@@ -1,0 +1,802 @@
+package ca.uhn.fhir.jpa.dao.r4;
+
+import static ca.uhn.fhir.jpa.term.TerminologySvcDeltaR4Test.newDeltaCodeSystem;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import ca.uhn.fhir.context.support.ConceptValidationOptions;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.ValidationSupportContext;
+import ca.uhn.fhir.context.support.ValueSetExpansionOptions;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.jpa.api.config.JpaStorageSettings;
+import ca.uhn.fhir.jpa.entity.TermConcept;
+import ca.uhn.fhir.jpa.entity.TermConceptParentChildLink;
+import ca.uhn.fhir.jpa.entity.TermValueSet;
+import ca.uhn.fhir.jpa.entity.TermValueSetConcept;
+import ca.uhn.fhir.jpa.entity.TermValueSetPreExpansionStatusEnum;
+import ca.uhn.fhir.jpa.term.TermReadSvcImpl;
+import ca.uhn.fhir.jpa.test.BaseJpaR4Test;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+import org.hl7.fhir.r4.model.CodeSystem;
+import org.hl7.fhir.r4.model.CodeType;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.Enumerations;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.StringType;
+import org.hl7.fhir.r4.model.UriType;
+import org.hl7.fhir.r4.model.ValueSet;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
+import static org.junit.jupiter.api.Assertions.fail;
+
+public class FhirResourceDaoR4ValueSetTest extends BaseJpaR4Test {
+
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(FhirResourceDaoR4ValueSetTest.class);
+
+	private IIdType myExtensionalVsId;
+
+	@AfterEach
+	public void after() {
+		TermReadSvcImpl.setForceDisableHibernateSearchForUnitTest(false);
+		myStorageSettings.setPreExpandValueSets(new JpaStorageSettings().isPreExpandValueSets());
+		myStorageSettings.setMaximumExpansionSize(new JpaStorageSettings().getMaximumExpansionSize());
+	}
+
+
+	@BeforeEach
+	@Transactional
+	public void before02() throws IOException {
+		ValueSet upload = loadResourceFromClasspath(ValueSet.class, "/extensional-case-3-vs.xml");
+		myExtensionalVsId = myValueSetDao.create(upload, mySrd).getId().toUnqualifiedVersionless();
+
+		CodeSystem upload2 = loadResourceFromClasspath(CodeSystem.class, "/extensional-case-3-cs.xml");
+		myCodeSystemDao.create(upload2, mySrd).getId().toUnqualifiedVersionless();
+
+	}
+
+	@Test
+	public void testValidateCodeInValueSet_ValueSetUrlUsedInsteadOfCodeSystem() throws IOException {
+		myCodeSystemDao.update(loadResourceFromClasspath(CodeSystem.class, "r4/adi-cs.json"));
+		myValueSetDao.update(loadResourceFromClasspath(ValueSet.class, "r4/adi-vs.json"));
+
+		myBatch2JobHelper.awaitNoJobsRunning();
+
+		ValidationSupportContext context = new ValidationSupportContext(myValidationSupport);
+		ConceptValidationOptions options = new ConceptValidationOptions();
+		IValidationSupport.CodeValidationResult outcome = myValidationSupport.validateCode(context, options, "http://payer-to-payer-exchange/fhir/ValueSet/mental-health/ndc", "378397893", null, "http://payer-to-payer-exchange/fhir/ValueSet/mental-health/ndc");
+		assertFalse(outcome.isOk());
+		assertEquals("Unable to validate code http://payer-to-payer-exchange/fhir/ValueSet/mental-health/ndc#378397893 - Supplied system URL is a ValueSet URL and not a CodeSystem URL, check if it is correct: http://payer-to-payer-exchange/fhir/ValueSet/mental-health/ndc", outcome.getMessage());
+	}
+
+
+	@Test
+	public void testValidateCodeInValueSet_SystemThatAppearsNowhereInValueSet() throws IOException {
+		myCodeSystemDao.update(loadResourceFromClasspath(CodeSystem.class, "r4/adi-cs.json"));
+		myValueSetDao.update(loadResourceFromClasspath(ValueSet.class, "r4/adi-vs.json"));
+
+		myBatch2JobHelper.awaitNoJobsRunning();
+
+		logAllValueSetConcepts();
+
+		ValidationSupportContext context = new ValidationSupportContext(myValidationSupport);
+		ConceptValidationOptions options = new ConceptValidationOptions();
+		IValidationSupport.CodeValidationResult outcome = myValidationSupport.validateCode(context, options, "http://payer-to-payer-exchange/fhir/CodeSystem/ndc", "378397893", null, "http://payer-to-payer-exchange/fhir/ValueSet/mental-health/ndc");
+		assertFalse(outcome.isOk());
+		// The ValueSet's include names ndc-codes, which nothing defines, so it is not pre-expanded (#8415) and the
+		// code is rejected by the in-memory expansion instead
+		assertThat(outcome.getMessage()).contains("Unknown code 'http://payer-to-payer-exchange/fhir/CodeSystem/ndc#378397893'");
+	}
+
+
+	@Test
+	public void testValidateCodeInValueSet_HierarchicalAndEnumeratedValueset() {
+		myValueSetDao.delete(myExtensionalVsId);
+
+		ourLog.info("Creating CodeSystem");
+		CodeSystem cs = new CodeSystem();
+		cs.setId("CodeSystem/cs");
+		cs.setUrl("http://foo/cs");
+		cs.setVersion("1.0");
+		cs.setContent(CodeSystem.CodeSystemContentMode.NOTPRESENT);
+		cs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		myCodeSystemDao.update(cs);
+
+		ourLog.info("Adding codes to codesystem");
+		CodeSystem delta = newDeltaCodeSystem();
+		CodeSystem.ConceptDefinitionComponent parent = delta.addConcept().setCode("parent");
+		for (int j = 0; j < 1200; j++) {
+			parent
+				.addConcept()
+				.setCode("child" + j);
+		}
+		myTermCodeSystemStorageSvc.addCodeSystemConcepts(newSrd(), delta);
+
+		ourLog.info("Creating ValueSet");
+		ValueSet vs = new ValueSet();
+		vs.setId("ValueSet/vs");
+		vs.setUrl("http://vs");
+		vs.getCompose()
+			.addInclude()
+			.setSystem("http://foo/cs")
+			.addFilter()
+			.setProperty("concept")
+			.setOp(ValueSet.FilterOperator.ISA)
+			.setValue("parent");
+		// The enumerated include must name a code system the server holds: listed codes in one it does not have
+		// fail the expansion (#8415)
+		CodeSystem csEnumerated = new CodeSystem();
+		csEnumerated.setUrl("http://foo/cs-np");
+		csEnumerated.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+		csEnumerated.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		csEnumerated.addConcept().setCode("code0");
+		csEnumerated.addConcept().setCode("code1");
+		myCodeSystemDao.create(csEnumerated);
+		vs.getCompose()
+			.addInclude()
+			.setSystem("http://foo/cs-np")
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("code0")))
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("code1")));
+		myValueSetDao.update(vs);
+
+		IValidationSupport.CodeValidationResult outcome;
+		ValidationSupportContext ctx = new ValidationSupportContext(myValidationSupport);
+		ConceptValidationOptions options = new ConceptValidationOptions();
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs", "childX", null, "http://vs");
+		assertNotNull(outcome);
+		assertFalse(outcome.isOk());
+		assertThat(outcome.getMessage()).contains("cannot apply filters");
+
+		// In memory - Enumerated include
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs-np", "code1", null, "http://vs");
+		assertNotNull(outcome);
+		assertTrue(outcome.isOk());
+		assertEquals("Code was validated against in-memory expansion of ValueSet: http://vs", outcome.getSourceDetails());
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs-np", "codeX", null, "http://vs");
+		assertNotNull(outcome);
+		assertFalse(outcome.isOk());
+		assertThat(outcome.getMessage()).contains("Unknown code 'http://foo/cs-np#codeX' for in-memory expansion of ValueSet 'http://vs'");
+
+		// Precalculated
+
+		myTerminologyDeferredStorageSvc.saveAllDeferred();
+		myBatch2JobHelper.awaitNoJobsRunning();
+		logAllValueSets();
+		logAllValueSetConcepts();
+		myValidationSupport.invalidateCaches();
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs", "child10", null, "http://vs");
+		assertNotNull(outcome);
+		assertTrue(outcome.isOk());
+		assertThat(outcome.getMessage()).startsWith("Code validation occurred using a ValueSet expansion that was pre-calculated at ");
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs", "childX", null, "http://vs");
+		assertNotNull(outcome);
+		assertFalse(outcome.isOk());
+		assertThat(outcome.getMessage()).contains("Unknown code \"http://foo/cs#childX\"");
+		assertThat(outcome.getMessage()).contains("Code validation occurred using a ValueSet expansion that was pre-calculated at ");
+
+		// Precalculated - Enumerated include
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs-np", "code1", null, "http://vs");
+		assertNotNull(outcome);
+		assertTrue(outcome.isOk());
+		assertThat(outcome.getMessage()).startsWith("Code validation occurred using a ValueSet expansion that was pre-calculated at ");
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs-np", "codeX", null, "http://vs");
+		assertNotNull(outcome);
+		assertFalse(outcome.isOk());
+		assertThat(outcome.getMessage()).contains("Unknown code \"http://foo/cs-np#codeX\"");
+		assertThat(outcome.getMessage()).contains("Code validation occurred using a ValueSet expansion that was pre-calculated at ");
+
+	}
+
+	@Test
+	public void testValidateCodeInValueSet_HierarchicalAndEnumeratedValueset_HibernateSearchDisabled() {
+		TermReadSvcImpl.setForceDisableHibernateSearchForUnitTest(true);
+
+		myValueSetDao.delete(myExtensionalVsId);
+
+		ourLog.info("Creating CodeSystem");
+		CodeSystem cs = new CodeSystem();
+		cs.setId("CodeSystem/cs");
+		cs.setUrl("http://foo/cs");
+		cs.setContent(CodeSystem.CodeSystemContentMode.NOTPRESENT);
+		cs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		myCodeSystemDao.update(cs);
+
+		ourLog.info("Adding codes to codesystem");
+		CodeSystem delta = newDeltaCodeSystem();
+		CodeSystem.ConceptDefinitionComponent parent = delta.addConcept().setCode("parent");
+		for (int j = 0; j < 1200; j++) {
+			parent
+				.addConcept()
+				.setCode("child" + j);
+		}
+		myTermCodeSystemStorageSvc.addCodeSystemConcepts(newSrd(), delta);
+
+		ourLog.info("Creating ValueSet");
+		ValueSet vs = new ValueSet();
+		vs.setId("ValueSet/vs");
+		vs.setUrl("http://vs");
+		vs.getCompose()
+			.addInclude()
+			.setSystem("http://foo/cs")
+			.addFilter()
+			.setProperty("concept")
+			.setOp(ValueSet.FilterOperator.ISA)
+			.setValue("parent");
+		// The enumerated include must name a code system the server holds: listed codes in one it does not have
+		// fail the expansion (#8415)
+		CodeSystem csEnumerated = new CodeSystem();
+		csEnumerated.setUrl("http://foo/cs-np");
+		csEnumerated.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+		csEnumerated.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		csEnumerated.addConcept().setCode("code0");
+		csEnumerated.addConcept().setCode("code1");
+		myCodeSystemDao.create(csEnumerated);
+		vs.getCompose()
+			.addInclude()
+			.setSystem("http://foo/cs-np")
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("code0")))
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("code1")));
+		myValueSetDao.update(vs);
+
+		IValidationSupport.CodeValidationResult outcome;
+		ValidationSupportContext ctx = new ValidationSupportContext(myValidationSupport);
+		ConceptValidationOptions options = new ConceptValidationOptions();
+
+		// In memory - Hierarchy in existing CS
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs", "child10", null, "http://vs");
+		assertNotNull(outcome);
+		assertFalse(outcome.isOk());
+		assertThat(outcome.getMessage()).contains("cannot apply filters");
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs", "childX", null, "http://vs");
+		assertNotNull(outcome);
+		assertFalse(outcome.isOk());
+		assertThat(outcome.getMessage()).contains("cannot apply filters");
+
+		// In memory - Enumerated include
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs-np", "code1", null, "http://vs");
+		assertNotNull(outcome);
+		assertTrue(outcome.isOk());
+		assertEquals("Code was validated against in-memory expansion of ValueSet: http://vs", outcome.getSourceDetails());
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs-np", "codeX", null, "http://vs");
+		assertNotNull(outcome);
+		assertFalse(outcome.isOk());
+		assertThat(outcome.getMessage()).contains("Unknown code 'http://foo/cs-np#codeX' for in-memory expansion of ValueSet 'http://vs'");
+
+		// Precalculated
+
+		myTerminologyDeferredStorageSvc.saveAllDeferred();
+		myBatch2JobHelper.awaitNoJobsRunning();
+		logAllValueSets();
+		myValidationSupport.invalidateCaches();
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs", "child10", null, "http://vs");
+		assertNotNull(outcome);
+		assertTrue(outcome.isOk());
+		assertThat(outcome.getMessage()).startsWith("Code validation occurred using a ValueSet expansion that was pre-calculated at ");
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs", "childX", null, "http://vs");
+		assertNotNull(outcome);
+		assertFalse(outcome.isOk());
+		assertThat(outcome.getMessage()).contains("Unknown code \"http://foo/cs#childX\"");
+		assertThat(outcome.getMessage()).contains("Code validation occurred using a ValueSet expansion that was pre-calculated at ");
+
+		// Precalculated - Enumerated include
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs-np", "code1", null, "http://vs");
+		assertNotNull(outcome);
+		assertTrue(outcome.isOk());
+		assertThat(outcome.getMessage()).startsWith("Code validation occurred using a ValueSet expansion that was pre-calculated at ");
+
+		outcome = myValidationSupport.validateCode(ctx, options, "http://foo/cs-np", "codeX", null, "http://vs");
+		assertNotNull(outcome);
+		assertFalse(outcome.isOk());
+		assertThat(outcome.getMessage()).contains("Unknown code \"http://foo/cs-np#codeX\"");
+		assertThat(outcome.getMessage()).contains("Code validation occurred using a ValueSet expansion that was pre-calculated at ");
+
+	}
+
+	@Test
+	public void testValidateCodeOperationNoValueSet() {
+		UriType valueSetIdentifier = null;
+		IdType id = null;
+		CodeType code = new CodeType("8450-9-XXX");
+		UriType system = new UriType("http://acme.org");
+		StringType display = null;
+		Coding coding = null;
+		CodeableConcept codeableConcept = null;
+		try {
+			myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+			fail();
+		} catch (InvalidRequestException e) {
+			assertEquals(Msg.code(901) + "Either ValueSet ID or ValueSet identifier or system and code must be provided. Unable to validate.", e.getMessage());
+		}
+	}
+
+	@Test
+	public void testValidateCodeOperationByIdentifierAndCodeAndSystem() {
+		UriType valueSetIdentifier = new UriType("http://www.healthintersections.com.au/fhir/ValueSet/extensional-case-2");
+		IdType id = null;
+		CodeType code = new CodeType("11378-7");
+		UriType system = new UriType("http://acme.org");
+		StringType display = null;
+		Coding coding = null;
+		CodeableConcept codeableConcept = null;
+		IValidationSupport.CodeValidationResult result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+	}
+
+	@Test
+	public void testValidateCodeOperationByIdentifierAndCodeAndSystemAndBadDisplay() {
+		UriType valueSetIdentifier = new UriType("http://www.healthintersections.com.au/fhir/ValueSet/extensional-case-2");
+		IdType id = null;
+		CodeType code = new CodeType("11378-7");
+		UriType system = new UriType("http://acme.org");
+		StringType display = new StringType("Systolic blood pressure at First encounterXXXX");
+		Coding coding = null;
+		CodeableConcept codeableConcept = null;
+		IValidationSupport.CodeValidationResult result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+		assertThat(result.getMessage()).contains("Concept Display \"Systolic blood pressure at First encounterXXXX\" does not match expected \"Systolic blood pressure at First encounter\" for 'http://acme.org#11378-7' for in-memory expansion of ValueSet 'http://www.healthintersections.com.au/fhir/ValueSet/extensional-case-2'");
+	}
+
+	@Test
+	public void testValidateCodeOperationByIdentifierAndCodeAndSystemAndGoodDisplay() {
+		UriType valueSetIdentifier = new UriType("http://www.healthintersections.com.au/fhir/ValueSet/extensional-case-2");
+		IdType id = null;
+		CodeType code = new CodeType("11378-7");
+		UriType system = new UriType("http://acme.org");
+		StringType display = new StringType("Systolic blood pressure at First encounter");
+		Coding coding = null;
+		CodeableConcept codeableConcept = null;
+		IValidationSupport.CodeValidationResult result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+	}
+
+	@Test
+	public void testValidateCodeOperationByResourceIdAndCodeableConcept() {
+		UriType valueSetIdentifier = null;
+		IIdType id = myExtensionalVsId;
+		CodeType code = null;
+		UriType system = null;
+		StringType display = null;
+		Coding coding = null;
+		CodeableConcept codeableConcept = new CodeableConcept();
+		codeableConcept.addCoding().setSystem("http://acme.org").setCode("11378-7");
+		IValidationSupport.CodeValidationResult result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+	}
+
+	@Test
+	public void testValidateCodeOperationByResourceIdAndCodeableConceptWithExistingValueSetAndPreExpansionEnabled() {
+		myStorageSettings.setPreExpandValueSets(true);
+
+		UriType valueSetIdentifier = null;
+		IIdType id = myExtensionalVsId;
+		CodeType code = null;
+		UriType system = null;
+		StringType display = null;
+		Coding coding = null;
+		CodeableConcept codeableConcept = new CodeableConcept();
+		codeableConcept.addCoding().setSystem("http://acme.org").setCode("11378-7");
+		IValidationSupport.CodeValidationResult result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+
+		myTerminologyDeferredStorageSvc.saveDeferred();
+		result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+
+		myBatch2JobHelper.awaitNoJobsRunning();
+		result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+	}
+
+	@Test
+	public void testValidateCodeOperationByResourceIdAndCodeAndSystem() {
+		UriType valueSetIdentifier = null;
+		IIdType id = myExtensionalVsId;
+		CodeType code = new CodeType("11378-7");
+		UriType system = new UriType("http://acme.org");
+		StringType display = null;
+		Coding coding = null;
+		CodeableConcept codeableConcept = null;
+		IValidationSupport.CodeValidationResult result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+	}
+
+	@Test
+	public void testValidateCodeOperationByResourceIdAndCodeAndSystemWithExistingValueSetAndPreExpansionEnabled() {
+		myStorageSettings.setPreExpandValueSets(true);
+
+		UriType valueSetIdentifier = null;
+		IIdType id = myExtensionalVsId;
+		CodeType code = new CodeType("11378-7");
+		UriType system = new UriType("http://acme.org");
+		StringType display = null;
+		Coding coding = null;
+		CodeableConcept codeableConcept = null;
+		IValidationSupport.CodeValidationResult result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+
+		myTerminologyDeferredStorageSvc.saveDeferred();
+		result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+
+		myBatch2JobHelper.awaitNoJobsRunning();
+		result = myValueSetDao.validateCode(valueSetIdentifier, id, code, system, display, coding, codeableConcept, mySrd);
+		assertTrue(result.isOk());
+		assertEquals("Systolic blood pressure at First encounter", result.getDisplay());
+	}
+
+	@Test
+	public void testExpandById_UnknownId() {
+		try {
+			myValueSetDao.expand(new IdType("http://foo"), null, mySrd);
+			fail();
+		} catch (ResourceNotFoundException e) {
+			assertEquals("HAPI-2001: Resource ValueSet/foo is not known", e.getMessage());
+		}
+	}
+
+
+	@Test
+	public void testExpandById() {
+		String resp;
+
+		ValueSet expanded = myValueSetDao.expand(myExtensionalVsId, null, mySrd);
+		resp = myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(expanded);
+		ourLog.info(resp);
+		assertThat(resp).contains("<ValueSet xmlns=\"http://hl7.org/fhir\">");
+		assertThat(resp).contains("<expansion>");
+		assertThat(resp).contains("<contains>");
+		assertThat(resp).contains("<system value=\"http://acme.org\"/>");
+		assertThat(resp).contains("<code value=\"8450-9\"/>");
+		assertThat(resp).contains("<display value=\"Systolic blood pressure--expiration\"/>");
+		assertThat(resp).contains("</contains>");
+		assertThat(resp).contains("<contains>");
+		assertThat(resp).contains("<system value=\"http://acme.org\"/>");
+		assertThat(resp).contains("<code value=\"11378-7\"/>");
+		assertThat(resp).contains("<display value=\"Systolic blood pressure at First encounter\"/>");
+		assertThat(resp).contains("</contains>");
+		assertThat(resp).contains("</expansion>");
+
+		/*
+		 * Filter with display name
+		 */
+
+		expanded = myValueSetDao.expand(myExtensionalVsId, new ValueSetExpansionOptions().setFilter("systolic"), mySrd);
+		resp = myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(expanded);
+		ourLog.info(resp);
+		//@formatter:off
+		assertThat(resp).containsSubsequence(
+			"<code value=\"11378-7\"/>",
+			"<display value=\"Systolic blood pressure at First encounter\"/>");
+		//@formatter:on
+
+	}
+
+	@Test
+	public void testExpandByValueSet_ExceedsMaxSize() {
+		// Add a bunch of codes
+		CodeSystem codesToAdd = newDeltaCodeSystem();
+		codesToAdd.setUrl("http://loinc.org");
+		for (int i = 0; i < 100; i++) {
+			codesToAdd.addConcept().setCode("CODE" + i).setDisplay("Display " + i);
+		}
+		myTermCodeSystemStorageSvc.addCodeSystemConcepts(newSrd(), codesToAdd);
+		myStorageSettings.setMaximumExpansionSize(50);
+
+		ValueSet vs = new ValueSet();
+		vs.setUrl("http://example.com/fhir/ValueSet/observation-vitalsignresult");
+		vs.getCompose().addInclude().setSystem("http://loinc.org");
+		myValueSetDao.create(vs);
+
+		try {
+			myValueSetDao.expand(vs, null);
+			fail();
+		} catch (InternalErrorException e) {
+			assertThat(e.getMessage()).contains(Msg.code(832) + "Expansion of ValueSet produced too many codes (maximum 50) - Operation aborted!");
+			assertThat(e.getMessage()).contains("Performing in-memory expansion");
+		}
+	}
+
+
+	@Test
+	public void testValidateCodeAgainstBuiltInValueSetAndCodeSystemWithValidCode() {
+		IPrimitiveType<String> display = null;
+		Coding coding = null;
+		CodeableConcept codeableConcept = null;
+		StringType vsIdentifier = new StringType("http://hl7.org/fhir/ValueSet/administrative-gender");
+		StringType code = new StringType("male");
+		StringType system = new StringType("http://hl7.org/fhir/administrative-gender");
+		IValidationSupport.CodeValidationResult result = myValueSetDao.validateCode(vsIdentifier, null, code, system, display, coding, codeableConcept, mySrd);
+
+		ourLog.info(result.getMessage());
+		assertThat(result.isOk()).as(result.getMessage()).isTrue();
+		assertEquals("Male", result.getDisplay());
+	}
+
+
+	@Test
+	public void testExpandValueSet_VsUsesVersionedSystem_CsIsFragmentWithoutCode() {
+		CodeSystem cs = new CodeSystem();
+		cs.setId("snomed-ct-ca-imm");
+		cs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		cs.setContent(CodeSystem.CodeSystemContentMode.FRAGMENT);
+		cs.setUrl("http://snomed.info/sct");
+		cs.setVersion("0.1.17");
+		myCodeSystemDao.update(cs);
+
+		ValueSet vs = new ValueSet();
+		vs.setId("vaccinecode");
+		vs.setUrl("http://ehealthontario.ca/fhir/ValueSet/vaccinecode");
+		vs.setVersion("0.1.17");
+		vs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		ValueSet.ConceptSetComponent vsInclude = vs.getCompose().addInclude();
+		vsInclude.setSystem("http://snomed.info/sct");
+		vsInclude.setVersion("http://snomed.info/sct/20611000087101/version/20210331");
+		vsInclude.addConcept().setCode("28571000087109").setDisplay("MODERNA COVID-19 mRNA-1273");
+		myValueSetDao.update(vs);
+
+		TermReadSvcImpl.setForceDisableHibernateSearchForUnitTest(true);
+		myTerminologyDeferredStorageSvc.saveAllDeferred();
+		myBatch2JobHelper.awaitNoJobsRunning();
+
+		// The include names a version that is not installed, so the enumerated code is not taken at face value:
+		// the pre-expansion fails and the code is rejected (#8415)
+		runInTransaction(() -> assertEquals(TermValueSetPreExpansionStatusEnum.FAILED_TO_EXPAND, myTermValueSetDao.findTermValueSetByUrlAndVersion("http://ehealthontario.ca/fhir/ValueSet/vaccinecode", "0.1.17").orElseThrow().getExpansionStatus()));
+		IValidationSupport.CodeValidationResult outcome = myValueSetDao.validateCode(null, new IdType("ValueSet/vaccinecode"), new CodeType("28571000087109"), new CodeType("http://snomed.info/sct"), null, null, null, mySrd);
+		assertFalse(outcome.isOk());
+		assertThat(outcome.getMessage()).contains("http://snomed.info/sct|http://snomed.info/sct/20611000087101/version/20210331");
+	}
+
+	@ParameterizedTest(name = "fullTextIndexing={0}")
+	@ValueSource(booleans = {true, false})
+	public void validateCode_preExpandedComposeNamesCodeSystemVersion_storesPlainSystemAndValidatesCodes(boolean theFullTextIndexing) {
+		CodeSystem cs = new CodeSystem();
+		cs.setId("qa-versioned");
+		cs.setUrl("http://example.org/fhir/CodeSystem/qa-versioned");
+		cs.setVersion("1.0.0");
+		cs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		cs.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+		cs.addConcept().setCode("A").setDisplay("Code A");
+		cs.addConcept().setCode("B").setDisplay("Code B");
+		myCodeSystemDao.update(cs, mySrd);
+
+		ValueSet vs = new ValueSet();
+		vs.setId("qa-named-version");
+		vs.setUrl("http://example.org/fhir/ValueSet/qa-named-version");
+		vs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		vs.getCompose()
+			.addInclude()
+			.setSystem("http://example.org/fhir/CodeSystem/qa-versioned")
+			.setVersion("1.0.0")
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("A")))
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("B")));
+		vs.getCompose()
+			.addExclude()
+			.setSystem("http://example.org/fhir/CodeSystem/qa-versioned")
+			.setVersion("1.0.0")
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("B")));
+		myValueSetDao.update(vs, mySrd);
+
+		// Expansion takes a different path with full-text indexing than without it
+		TermReadSvcImpl.setForceDisableHibernateSearchForUnitTest(!theFullTextIndexing);
+		myTerminologyDeferredStorageSvc.saveAllDeferred();
+		myBatch2JobHelper.awaitNoJobsRunning();
+		myValidationSupport.invalidateCaches();
+
+		// The stored concept carries the plain system URL, with the version in its own column
+		runInTransaction(() -> {
+			TermValueSet termValueSet = myTermValueSetDao
+				.findTermValueSetByUrlAndNullVersion("http://example.org/fhir/ValueSet/qa-named-version")
+				.orElseThrow();
+			assertEquals(TermValueSetPreExpansionStatusEnum.EXPANDED, termValueSet.getExpansionStatus());
+			assertThat(termValueSet.getConcepts())
+				.extracting(TermValueSetConcept::getSystem, TermValueSetConcept::getSystemVersion, TermValueSetConcept::getCode)
+				.containsExactly(tuple("http://example.org/fhir/CodeSystem/qa-versioned", "1.0.0", "A"));
+		});
+
+		IdType vsId = new IdType("ValueSet/qa-named-version");
+		CodeType system = new CodeType("http://example.org/fhir/CodeSystem/qa-versioned");
+		IValidationSupport.CodeValidationResult included = myValueSetDao.validateCode(null, vsId, new CodeType("A"), system, null, null, null, mySrd);
+		IValidationSupport.CodeValidationResult excluded = myValueSetDao.validateCode(null, vsId, new CodeType("B"), system, null, null, null, mySrd);
+		IValidationSupport.CodeValidationResult unknown = myValueSetDao.validateCode(null, vsId, new CodeType("X"), system, null, null, null, mySrd);
+
+		assertThat(included.isOk()).as(included.getMessage()).isTrue();
+		assertThat(included.getMessage()).startsWith("Code validation occurred using a ValueSet expansion that was pre-calculated at ");
+		assertThat(excluded.isOk()).as(excluded.getMessage()).isFalse();
+		assertThat(unknown.isOk()).as(unknown.getMessage()).isFalse();
+	}
+
+	@ParameterizedTest(name = "fullTextIndexing={0}")
+	@ValueSource(booleans = {true, false})
+	public void expandAndValidateCode_excludeNamesOtherCodeSystemVersionThanInclude_keepsIncludedCode(boolean theFullTextIndexing) {
+		for (String version : List.of("1.0.0", "2.0.0")) {
+			CodeSystem cs = new CodeSystem();
+			cs.setId("qa-versioned-" + version.replace('.', '-'));
+			cs.setUrl("http://example.org/fhir/CodeSystem/qa-versioned");
+			cs.setVersion(version);
+			cs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+			cs.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+			cs.addConcept().setCode("A").setDisplay("Code A");
+			cs.addConcept().setCode("B").setDisplay("Code B");
+			myCodeSystemDao.update(cs, mySrd);
+		}
+
+		ValueSet vs = new ValueSet();
+		vs.setId("qa-other-version-exclude");
+		vs.setUrl("http://example.org/fhir/ValueSet/qa-other-version-exclude");
+		vs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		vs.getCompose()
+			.addInclude()
+			.setSystem("http://example.org/fhir/CodeSystem/qa-versioned")
+			.setVersion("1.0.0")
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("A")))
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("B")));
+		vs.getCompose()
+			.addExclude()
+			.setSystem("http://example.org/fhir/CodeSystem/qa-versioned")
+			.setVersion("2.0.0")
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("B")));
+		myValueSetDao.update(vs, mySrd);
+
+		// Expansion takes a different path with full-text indexing than without it
+		TermReadSvcImpl.setForceDisableHibernateSearchForUnitTest(!theFullTextIndexing);
+		ValueSet inMemoryExpansion = myValueSetDao.expand(vs, null);
+		myTerminologyDeferredStorageSvc.saveAllDeferred();
+		myBatch2JobHelper.awaitNoJobsRunning();
+		myValidationSupport.invalidateCaches();
+
+		// The exclude names 2.0.0, so it does not remove B of 1.0.0, before or after pre-expansion
+		assertThat(inMemoryExpansion.getExpansion().getContains())
+			.extracting(ValueSet.ValueSetExpansionContainsComponent::getVersion, ValueSet.ValueSetExpansionContainsComponent::getCode)
+			.containsExactlyInAnyOrder(tuple("1.0.0", "A"), tuple("1.0.0", "B"));
+		runInTransaction(() -> {
+			TermValueSet termValueSet = myTermValueSetDao
+				.findTermValueSetByUrlAndNullVersion("http://example.org/fhir/ValueSet/qa-other-version-exclude")
+				.orElseThrow();
+			assertEquals(TermValueSetPreExpansionStatusEnum.EXPANDED, termValueSet.getExpansionStatus());
+			assertThat(termValueSet.getConcepts())
+				.extracting(TermValueSetConcept::getSystemVersion, TermValueSetConcept::getCode)
+				.containsExactlyInAnyOrder(tuple("1.0.0", "A"), tuple("1.0.0", "B"));
+		});
+		IValidationSupport.CodeValidationResult included = myValueSetDao.validateCode(null, new IdType("ValueSet/qa-other-version-exclude"), new CodeType("B"), new CodeType("http://example.org/fhir/CodeSystem/qa-versioned"), null, null, null, mySrd);
+		assertThat(included.isOk()).as(included.getMessage()).isTrue();
+		assertThat(included.getMessage()).startsWith("Code validation occurred using a ValueSet expansion that was pre-calculated at ");
+	}
+
+	@ParameterizedTest(name = "fullTextIndexing={0}")
+	@ValueSource(booleans = {true, false})
+	void expandAndValidateCode_includeWithoutVersionExcludeNamesInstalledVersion_removesExcludedCode(boolean theFullTextIndexing) {
+		CodeSystem cs = new CodeSystem();
+		cs.setId("qa-versioned");
+		cs.setUrl("http://example.org/fhir/CodeSystem/qa-versioned");
+		cs.setVersion("1.0.0");
+		cs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		cs.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+		cs.addConcept().setCode("A").setDisplay("Code A");
+		cs.addConcept().setCode("B").setDisplay("Code B");
+		myCodeSystemDao.update(cs, mySrd);
+
+		ValueSet vs = new ValueSet();
+		vs.setId("qa-versioned-exclude-only");
+		vs.setUrl("http://example.org/fhir/ValueSet/qa-versioned-exclude-only");
+		vs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		vs.getCompose()
+			.addInclude()
+			.setSystem("http://example.org/fhir/CodeSystem/qa-versioned")
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("A")))
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("B")));
+		vs.getCompose()
+			.addExclude()
+			.setSystem("http://example.org/fhir/CodeSystem/qa-versioned")
+			.setVersion("1.0.0")
+			.addConcept(new ValueSet.ConceptReferenceComponent(new CodeType("B")));
+		myValueSetDao.update(vs, mySrd);
+
+		// Expansion takes a different path with full-text indexing than without it
+		TermReadSvcImpl.setForceDisableHibernateSearchForUnitTest(!theFullTextIndexing);
+		ValueSet inMemoryExpansion = myValueSetDao.expand(vs, null);
+		myTerminologyDeferredStorageSvc.saveAllDeferred();
+		myBatch2JobHelper.awaitNoJobsRunning();
+		myValidationSupport.invalidateCaches();
+
+		// The include resolves to the installed 1.0.0, so the exclude naming 1.0.0 removes B, before and after
+		// pre-expansion
+		assertThat(inMemoryExpansion.getExpansion().getContains())
+			.extracting(ValueSet.ValueSetExpansionContainsComponent::getCode)
+			.containsExactly("A");
+		runInTransaction(() -> {
+			TermValueSet termValueSet = myTermValueSetDao
+				.findTermValueSetByUrlAndNullVersion("http://example.org/fhir/ValueSet/qa-versioned-exclude-only")
+				.orElseThrow();
+			assertEquals(TermValueSetPreExpansionStatusEnum.EXPANDED, termValueSet.getExpansionStatus());
+			assertThat(termValueSet.getConcepts()).extracting(TermValueSetConcept::getCode).containsExactly("A");
+		});
+		IValidationSupport.CodeValidationResult excluded = myValueSetDao.validateCode(null, new IdType("ValueSet/qa-versioned-exclude-only"), new CodeType("B"), new CodeType("http://example.org/fhir/CodeSystem/qa-versioned"), null, null, null, mySrd);
+		assertThat(excluded.isOk()).as(excluded.getMessage()).isFalse();
+	}
+
+	/** See #4449 */
+	@Test
+	public void testExpandValueSet_PreExpandedWithHierarchyNoHibernateSearch() {
+		CodeSystem cs = new CodeSystem();
+		cs.setId("icd10cm");
+		cs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		cs.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+		cs.setUrl("http://hl7.org/fhir/sid/icd-10-cm");
+		cs.setVersion("2021");
+
+		CodeSystem.ConceptDefinitionComponent parent = cs.addConcept()
+			.setCode("A00")
+			.setDisplay("Cholera");
+		parent.addConcept()
+			.setCode("A00.0")
+			.setDisplay("Cholera due to Vibrio cholerae 01, biovar cholerae");
+		parent.addConcept()
+			.setCode("A00.1")
+			.setDisplay("Cholera due to Vibrio cholerae 01, biovar eltor");
+		myCodeSystemDao.update(cs, mySrd);
+
+		ValueSet vs = new ValueSet();
+		vs.setId("icd10cm-valueset");
+		vs.setUrl("http://hl7.org/fhir/ValueSet/icd-10-cm");
+		vs.setVersion("2021");
+		vs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		ValueSet.ConceptSetComponent vsInclude = vs.getCompose().addInclude();
+		vsInclude.setSystem("http://hl7.org/fhir/sid/icd-10-cm");
+		vsInclude.setVersion("2021");
+		myValueSetDao.update(vs, mySrd);
+
+		TermReadSvcImpl.setForceDisableHibernateSearchForUnitTest(true);
+		myBatch2JobHelper.awaitNoJobsRunning();
+
+		ValueSetExpansionOptions options = new ValueSetExpansionOptions();
+		options.setIncludeHierarchy(true);
+		ValueSet valueSet = myValueSetDao.expand(vs, options);
+
+		assertNotNull(valueSet);
+		assertThat(valueSet.getExpansion().getContains()).hasSize(1);
+		assertThat(valueSet.getExpansion().getContains().get(0).getContains()).hasSize(2);
+	}
+
+
+}

@@ -1,46 +1,170 @@
 package ca.uhn.fhirtest.config;
 
-import java.util.Properties;
-
-import javax.persistence.EntityManagerFactory;
-import javax.sql.DataSource;
-
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.jpa.api.config.JpaStorageSettings;
+import ca.uhn.fhir.jpa.config.HapiJpaConfig;
+import ca.uhn.fhir.jpa.config.JpaDstu2Config;
+import ca.uhn.fhir.jpa.config.util.HapiEntityManagerFactoryUtil;
+import ca.uhn.fhir.jpa.model.config.SubscriptionSettings;
+import ca.uhn.fhir.jpa.model.dialect.HapiFhirH2Dialect;
+import ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect;
+import ca.uhn.fhir.jpa.util.CurrentThreadCaptureQueriesListener;
+import ca.uhn.fhir.jpa.validation.ValidationSettings;
+import ca.uhn.fhir.rest.server.interceptor.RequestValidatingInterceptor;
+import ca.uhn.fhir.validation.IValidatorModule;
+import ca.uhn.fhir.validation.ResultSeverityEnum;
+import ca.uhn.fhirtest.interceptor.PublicSecurityInterceptor;
+import jakarta.persistence.EntityManagerFactory;
+import net.ttddyy.dsproxy.support.ProxyDataSourceBuilder;
 import org.apache.commons.dbcp2.BasicDataSource;
-import org.apache.commons.lang3.time.DateUtils;
-import org.hibernate.dialect.PostgreSQL94Dialect;
-import org.hibernate.jpa.HibernatePersistenceProvider;
-import org.springframework.beans.factory.annotation.Autowire;
-import org.springframework.beans.factory.annotation.Value;
+import org.hl7.fhir.dstu2.model.Subscription;
+import org.hl7.fhir.r5.utils.validation.constants.ReferenceValidationPolicy;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.DependsOn;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.context.annotation.Primary;
 import org.springframework.context.support.PropertySourcesPlaceholderConfigurer;
 import org.springframework.orm.jpa.JpaTransactionManager;
 import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
 
-import ca.uhn.fhir.jpa.config.BaseJavaConfigDstu2;
-import ca.uhn.fhir.jpa.dao.DaoConfig;
-import ca.uhn.fhir.jpa.util.SubscriptionsRequireManualActivationInterceptorDstu2;
-import ca.uhn.fhir.rest.server.interceptor.IServerInterceptor;
-import ca.uhn.fhirtest.interceptor.PublicSecurityInterceptor;
+import java.util.Properties;
+import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
 
 @Configuration
-@Import(CommonConfig.class)
+@Import({CommonConfig.class, JpaDstu2Config.class, HapiJpaConfig.class})
 @EnableTransactionManagement()
-public class TestDstu2Config extends BaseJavaConfigDstu2 {
+public class TestDstu2Config extends BaseConfig {
 
-	public static final String FHIR_LUCENE_LOCATION_DSTU2 = "${fhir.lucene.location.dstu2}";
+	public static final String FHIR_LUCENE_LOCATION_DSTU2 = "fhir.lucene.location.dstu2";
 
-	@Value(TestDstu1Config.FHIR_DB_USERNAME)
-	private String myDbUsername;
+	private final String myDbUsername = System.getProperty(TestR5Config.FHIR_DB_USERNAME);
+	private final String myDbPassword = System.getProperty(TestR5Config.FHIR_DB_PASSWORD);
+	private final String myFhirLuceneLocation = System.getProperty(FHIR_LUCENE_LOCATION_DSTU2);
 
-	@Value(TestDstu1Config.FHIR_DB_PASSWORD)
-	private String myDbPassword;
+	@Bean
+	public PublicSecurityInterceptor securityInterceptor() {
+		return new PublicSecurityInterceptor();
+	}
 
-	@Value(FHIR_LUCENE_LOCATION_DSTU2)
-	private String myFhirLuceneLocation;
+	@Bean
+	public SubscriptionSettings subscriptionSettings() {
+		SubscriptionSettings retVal = new SubscriptionSettings();
+		retVal.addSupportedSubscriptionType(Subscription.SubscriptionChannelType.RESTHOOK);
+		retVal.setWebsocketContextPath("/");
+		return retVal;
+	}
+
+	@Bean
+	public JpaStorageSettings storageSettings() {
+		JpaStorageSettings retVal = new JpaStorageSettings();
+		retVal.setAllowContainsSearches(true);
+		retVal.setAllowMultipleDelete(true);
+		retVal.setAllowInlineMatchUrlReferences(true);
+		retVal.setAllowExternalReferences(true);
+		retVal.getTreatBaseUrlsAsLocal().add("http://hapi.fhir.org/baseDstu2");
+		retVal.getTreatBaseUrlsAsLocal().add("https://hapi.fhir.org/baseDstu2");
+		retVal.getTreatBaseUrlsAsLocal().add("http://fhirtest.uhn.ca/baseDstu2");
+		retVal.getTreatBaseUrlsAsLocal().add("https://fhirtest.uhn.ca/baseDstu2");
+		retVal.setCountSearchResultsUpTo(TestR4Config.COUNT_SEARCH_RESULTS_UP_TO);
+		retVal.setIndexMissingFields(JpaStorageSettings.IndexEnabledEnum.ENABLED);
+		retVal.setFetchSizeDefaultMaximum(10000);
+		retVal.setFilterParameterEnabled(true);
+		retVal.setDefaultSearchParamsCanBeOverridden(false);
+		retVal.setIndexOnContainedResources(true);
+		retVal.setIndexIdentifierOfType(true);
+		//		retVal.setHistoryCountMode(HistoryCountModeEnum.COUNT_ACCURATE);
+		return retVal;
+	}
+
+	@Bean
+	public ValidationSettings validationSettings() {
+		ValidationSettings retVal = new ValidationSettings();
+		retVal.setLocalReferenceValidationDefaultPolicy(ReferenceValidationPolicy.CHECK_VALID);
+		return retVal;
+	}
+
+	@Bean(name = "myPersistenceDataSourceDstu1")
+	public DataSource dataSource() {
+		BasicDataSource retVal = new BasicDataSource();
+		if (CommonConfig.isLocalTestMode()) {
+			retVal.setUrl("jdbc:h2:mem:fhirtest_dstu2");
+		} else {
+			retVal.setDriver(new org.postgresql.Driver());
+			retVal.setUrl("jdbc:postgresql://localhost/fhirtest_dstu2");
+		}
+		retVal.setUsername(myDbUsername);
+		retVal.setPassword(myDbPassword);
+		TestR5Config.applyCommonDatasourceParams(retVal);
+
+		return ProxyDataSourceBuilder.create(retVal)
+				//			.logQueryBySlf4j(SLF4JLogLevel.INFO, "SQL")
+				.logSlowQueryBySlf4j(10000, TimeUnit.MILLISECONDS)
+				.afterQuery(new CurrentThreadCaptureQueriesListener())
+				.countQuery()
+				.build();
+	}
+
+	@Primary
+	@Bean
+	public JpaTransactionManager transactionManager(EntityManagerFactory entityManagerFactory) {
+		JpaTransactionManager retVal = new JpaTransactionManager();
+		retVal.setEntityManagerFactory(entityManagerFactory);
+		return retVal;
+	}
+
+	@Bean
+	public LocalContainerEntityManagerFactoryBean entityManagerFactory(
+			ConfigurableListableBeanFactory theConfigurableListableBeanFactory,
+			FhirContext theFhirContext,
+			JpaStorageSettings theStorageSettings) {
+		LocalContainerEntityManagerFactoryBean retVal = HapiEntityManagerFactoryUtil.newEntityManagerFactory(
+				theConfigurableListableBeanFactory, theFhirContext, theStorageSettings);
+		retVal.setPersistenceUnitName("PU_HapiFhirJpaDstu2");
+		retVal.setDataSource(dataSource());
+		retVal.setJpaProperties(jpaProperties());
+		return retVal;
+	}
+
+	private Properties jpaProperties() {
+		Properties extraProperties = new Properties();
+		if (CommonConfig.isLocalTestMode()) {
+			extraProperties.put("hibernate.dialect", HapiFhirH2Dialect.class.getName());
+		} else {
+			extraProperties.put("hibernate.dialect", HapiFhirPostgresDialect.class.getName());
+		}
+		extraProperties.put("hibernate.format_sql", "false");
+		extraProperties.put("hibernate.show_sql", "false");
+		extraProperties.put("hibernate.hbm2ddl.auto", "none");
+		extraProperties.put("hibernate.jdbc.batch_size", "20");
+		extraProperties.put("hibernate.cache.use_query_cache", "false");
+		extraProperties.put("hibernate.cache.use_second_level_cache", "false");
+		extraProperties.put("hibernate.cache.use_structured_entries", "false");
+		extraProperties.put("hibernate.cache.use_minimal_puts", "false");
+
+		configureLuceneProperties(extraProperties, myFhirLuceneLocation);
+
+		return extraProperties;
+	}
+
+	/**
+	 * Bean which validates incoming requests
+	 */
+	@Bean
+	@Lazy
+	public RequestValidatingInterceptor requestValidatingInterceptor(IValidatorModule theInstanceValidator) {
+		RequestValidatingInterceptor requestValidator = new RequestValidatingInterceptor();
+		requestValidator.setFailOnSeverity(null);
+		requestValidator.setAddResponseHeaderOnSeverity(null);
+		requestValidator.setAddResponseOutcomeHeaderOnSeverity(ResultSeverityEnum.INFORMATION);
+		requestValidator.addValidatorModule(theInstanceValidator);
+		requestValidator.setIgnoreValidatorExceptions(true);
+
+		return requestValidator;
+	}
 
 	/**
 	 * This lets the "@Value" fields reference properties from the properties file
@@ -50,74 +174,9 @@ public class TestDstu2Config extends BaseJavaConfigDstu2 {
 		return new PropertySourcesPlaceholderConfigurer();
 	}
 
-	@Bean
-	public IServerInterceptor securityInterceptor() {
-		return new PublicSecurityInterceptor();
-	}
-
-	@Bean()
-	public DaoConfig daoConfig() {
-		DaoConfig retVal = new DaoConfig();
-		retVal.setSubscriptionEnabled(true);
-		retVal.setSubscriptionPollDelay(5000);
-		retVal.setSubscriptionPurgeInactiveAfterMillis(DateUtils.MILLIS_PER_HOUR);
-		retVal.setAllowMultipleDelete(true);
-		retVal.setAllowInlineMatchUrlReferences(true);
-		retVal.setAllowExternalReferences(true);
-		retVal.getTreatBaseUrlsAsLocal().add("http://fhirtest.uhn.ca/baseDstu2");
-		retVal.getTreatBaseUrlsAsLocal().add("https://fhirtest.uhn.ca/baseDstu2");
-		return retVal;
-	}
-
-	@Bean(name = "myPersistenceDataSourceDstu1", destroyMethod = "close")
-	@DependsOn("dbServer")
-	public DataSource dataSource() {
-		BasicDataSource retVal = new BasicDataSource();
-		retVal.setDriver(new org.postgresql.Driver());
-		retVal.setUrl("jdbc:postgresql://localhost/fhirtest_dstu2");
-		retVal.setUsername(myDbUsername);
-		retVal.setPassword(myDbPassword);
-		return retVal;
-	}
-
-	@Bean()
-	public JpaTransactionManager transactionManager(EntityManagerFactory entityManagerFactory) {
-		JpaTransactionManager retVal = new JpaTransactionManager();
-		retVal.setEntityManagerFactory(entityManagerFactory);
-		return retVal;
-	}
-
-	@Bean()
-	public LocalContainerEntityManagerFactoryBean entityManagerFactory() {
-		LocalContainerEntityManagerFactoryBean retVal = new LocalContainerEntityManagerFactoryBean();
-		retVal.setPersistenceUnitName("PU_HapiFhirJpaDstu2");
-		retVal.setDataSource(dataSource());
-		retVal.setPackagesToScan("ca.uhn.fhir.jpa.entity");
-		retVal.setPersistenceProvider(new HibernatePersistenceProvider());
-		retVal.setJpaProperties(jpaProperties());
-		return retVal;
-	}
-
-	private Properties jpaProperties() {
-		Properties extraProperties = new Properties();
-		extraProperties.put("hibernate.dialect", PostgreSQL94Dialect.class.getName());
-		extraProperties.put("hibernate.format_sql", "false");
-		extraProperties.put("hibernate.show_sql", "false");
-		extraProperties.put("hibernate.hbm2ddl.auto", "update");
-		extraProperties.put("hibernate.jdbc.batch_size", "20");
-		extraProperties.put("hibernate.cache.use_query_cache", "false");
-		extraProperties.put("hibernate.cache.use_second_level_cache", "false");
-		extraProperties.put("hibernate.cache.use_structured_entries", "false");
-		extraProperties.put("hibernate.cache.use_minimal_puts", "false");
-		extraProperties.put("hibernate.search.default.directory_provider", "filesystem");
-		extraProperties.put("hibernate.search.default.indexBase", myFhirLuceneLocation);
-		extraProperties.put("hibernate.search.lucene_version", "LUCENE_CURRENT");
-		return extraProperties;
-	}
-
-//	@Bean(autowire = Autowire.BY_TYPE)
-//	public IServerInterceptor subscriptionSecurityInterceptor() {
-//		return new SubscriptionsRequireManualActivationInterceptorDstu2();
-//	}
+	//	@Bean
+	//	public IServerInterceptor subscriptionSecurityInterceptor() {
+	//		return new SubscriptionsRequireManualActivationInterceptorDstu2();
+	//	}
 
 }

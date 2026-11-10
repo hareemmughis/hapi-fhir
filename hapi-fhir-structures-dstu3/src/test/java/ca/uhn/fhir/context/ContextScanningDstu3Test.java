@@ -1,36 +1,38 @@
 package ca.uhn.fhir.context;
 
-import static org.hamcrest.Matchers.containsInRelativeOrder;
-import static org.hamcrest.Matchers.not;
-import static org.junit.Assert.*;
-
-import java.util.TreeSet;
-
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.annotation.Read;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import ca.uhn.fhir.rest.server.IResourceProvider;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
 import org.hl7.fhir.dstu3.model.IdType;
 import org.hl7.fhir.dstu3.model.Observation;
 import org.hl7.fhir.dstu3.model.Observation.ObservationStatus;
 import org.hl7.fhir.dstu3.model.Patient;
 import org.hl7.fhir.dstu3.model.StringType;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.hl7.fhir.exceptions.FHIRFormatError;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
-import ca.uhn.fhir.rest.annotation.IdParam;
-import ca.uhn.fhir.rest.annotation.Read;
-import ca.uhn.fhir.rest.client.IGenericClient;
-import ca.uhn.fhir.rest.server.IResourceProvider;
-import ca.uhn.fhir.rest.server.RestfulServer;
-import ca.uhn.fhir.util.PortUtil;
-import ca.uhn.fhir.util.TestUtil;
+import java.util.TreeSet;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class ContextScanningDstu3Test {
-	private static FhirContext ourCtx = FhirContext.forDstu3();
+	private static final FhirContext ourCtx = FhirContext.forDstu3Cached();
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(ContextScanningDstu3Test.class);
-	private static int ourPort;
-	private static Server ourServer;
+
+	@RegisterExtension
+	private RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		 .setDefaultResponseEncoding(EncodingEnum.XML)
+		 .registerProvider(new PatientProvider())
+		 .registerProvider(new ObservationProvider())
+		 .setDefaultPrettyPrint(false);
 
 	@Test
 	public void testContextDoesntScanUnneccesaryTypes() {
@@ -40,23 +42,23 @@ public class ContextScanningDstu3Test {
 		TreeSet<String> elementDefs = scannedElementNames(ctx);
 		ourLog.info("Have {} resource definitions: {}", ctx.getAllResourceDefinitions().size(), resDefs);
 		ourLog.info("Have {} element definitions: {}", ctx.getElementDefinitions().size(), elementDefs);
-		assertThat(resDefs, not(containsInRelativeOrder("Observation")));
+		assertThat(resDefs).doesNotContain("Observation");
 		
-		IGenericClient client = ctx.newRestfulGenericClient("http://localhost:" + ourPort);
+		IGenericClient client = ctx.newRestfulGenericClient(ourServer.getBaseUrl());
 		client.read().resource(Patient.class).withId("1").execute();
 		
 		resDefs = scannedResourceNames(ctx);
 		elementDefs = scannedElementNames(ctx);
 		ourLog.info("Have {} resource definitions: {}", ctx.getAllResourceDefinitions().size(), resDefs);
 		ourLog.info("Have {} element definitions: {}", ctx.getElementDefinitions().size(), elementDefs);		
-		assertThat(resDefs, not(containsInRelativeOrder("Observation")));
+		assertThat(resDefs).doesNotContain("Observation");
 
 		client.read().resource(Observation.class).withId("1").execute();
 		resDefs = scannedResourceNames(ctx);
 		elementDefs = scannedElementNames(ctx);
 		ourLog.info("Have {} resource definitions: {}", ctx.getAllResourceDefinitions().size(), resDefs);
 		ourLog.info("Have {} element definitions: {}", ctx.getElementDefinitions().size(), elementDefs);		
-		assertThat(resDefs, containsInRelativeOrder("Observation"));
+		assertThat(resDefs).contains("Observation");
 	}
 
 	public static void main(String[] args) {
@@ -94,19 +96,20 @@ public class ContextScanningDstu3Test {
 		TreeSet<String> elementDefs = scannedElementNames(ctx);
 		ourLog.info("Have {} resource definitions: {}", ctx.getAllResourceDefinitions().size(), resDefs);
 		ourLog.info("Have {} element definitions: {}", ctx.getElementDefinitions().size(), elementDefs);
-		assertThat(resDefs, not(containsInRelativeOrder("Observation")));
-		
+		assertThat(resDefs).doesNotContain("Observation");
+
+
 		BaseRuntimeElementCompositeDefinition<?> compositeDef = (BaseRuntimeElementCompositeDefinition<?>) ctx.getElementDefinition("identifier");
 		assertFalse(compositeDef.isSealed());
 		
-		IGenericClient client = ctx.newRestfulGenericClient("http://localhost:" + ourPort);
+		IGenericClient client = ctx.newRestfulGenericClient(ourServer.getBaseUrl());
 		client.read().resource(Patient.class).withId("1").execute();
 		
 		resDefs = scannedResourceNames(ctx);
 		elementDefs = scannedElementNames(ctx);
 		ourLog.info("Have {} resource definitions: {}", ctx.getAllResourceDefinitions().size(), resDefs);
 		ourLog.info("Have {} element definitions: {}", ctx.getElementDefinitions().size(), elementDefs);		
-		assertThat(resDefs, not(containsInRelativeOrder("Observation")));
+		assertThat(resDefs).doesNotContain("Observation");
 		compositeDef = (BaseRuntimeElementCompositeDefinition<?>) ctx.getElementDefinition("identifier");
 		assertFalse(compositeDef.isSealed());
 
@@ -115,7 +118,7 @@ public class ContextScanningDstu3Test {
 		elementDefs = scannedElementNames(ctx);
 		ourLog.info("Have {} resource definitions: {}", ctx.getAllResourceDefinitions().size(), resDefs);
 		ourLog.info("Have {} element definitions: {}", ctx.getElementDefinitions().size(), elementDefs);		
-		assertThat(resDefs, containsInRelativeOrder("Observation"));		
+		assertThat(resDefs).contains("Observation");
 		compositeDef = (BaseRuntimeElementCompositeDefinition<?>) ctx.getElementDefinition("identifier");
 		assertTrue(compositeDef.isSealed());
 	}
@@ -137,26 +140,11 @@ public class ContextScanningDstu3Test {
 	}
 
 	
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-		servlet.setResourceProviders(new PatientProvider(), new ObservationProvider());
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-	}
 
 	public static class PatientProvider implements IResourceProvider {
 
@@ -180,7 +168,7 @@ public class ContextScanningDstu3Test {
 		}
 
 		@Read
-		public Observation read(@IdParam IdType theId) {
+		public Observation read(@IdParam IdType theId) throws FHIRFormatError {
 			Observation retVal = new Observation();
 			retVal.setId(theId);
 			retVal.addIdentifier().setSystem("ISYS").setValue("IVAL");

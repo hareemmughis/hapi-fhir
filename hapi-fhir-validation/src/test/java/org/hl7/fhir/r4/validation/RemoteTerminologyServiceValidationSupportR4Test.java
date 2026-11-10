@@ -1,0 +1,976 @@
+package org.hl7.fhir.r4.validation;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.support.ConceptValidationOptions;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.IValidationSupport.CodeValidationResult;
+import ca.uhn.fhir.context.support.IValidationSupport.IssueSeverity;
+import ca.uhn.fhir.context.support.IValidationSupport.LookupCodeResult;
+import ca.uhn.fhir.context.support.LookupCodeRequest;
+import ca.uhn.fhir.context.support.TranslateConceptResult;
+import ca.uhn.fhir.context.support.ValidationSupportContext;
+import ca.uhn.fhir.context.support.ValidationSupportUnavailableException;
+import ca.uhn.fhir.context.support.TranslateConceptResults;
+import ca.uhn.fhir.fhirpath.BaseValidationTestWithInlineMocks;
+import ca.uhn.fhir.jpa.model.util.JpaConstants;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.annotation.Operation;
+import ca.uhn.fhir.rest.annotation.OperationParam;
+import ca.uhn.fhir.rest.annotation.OptionalParam;
+import ca.uhn.fhir.rest.annotation.RequiredParam;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.api.SummaryEnum;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.client.interceptor.LoggingInterceptor;
+import ca.uhn.fhir.rest.param.StringParam;
+import ca.uhn.fhir.rest.param.UriParam;
+import ca.uhn.fhir.rest.server.IResourceProvider;
+import ca.uhn.fhir.rest.server.exceptions.AuthenticationException;
+import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
+import ca.uhn.fhir.rest.server.exceptions.ForbiddenOperationException;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.test.utilities.validation.IValidationProviders.FailEveryConnectionInterceptor;
+import ca.uhn.fhir.test.utilities.validation.IValidationProviders.FailEveryRequestInterceptor;
+import ca.uhn.fhir.util.Logs;
+import ca.uhn.test.util.LogbackTestExtension;
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import jakarta.annotation.Nullable;
+import jakarta.servlet.http.HttpServletRequest;
+import org.hl7.fhir.common.hapi.validation.support.InMemoryTerminologyServerValidationSupport;
+import org.hl7.fhir.common.hapi.validation.support.PrePopulatedValidationSupport;
+import org.hl7.fhir.common.hapi.validation.support.RemoteTerminologyServiceValidationSupport;
+import org.hl7.fhir.common.hapi.validation.support.ValidationSupportChain;
+import org.hl7.fhir.instance.model.api.IBaseCoding;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.BooleanType;
+import org.hl7.fhir.r4.model.CodeSystem;
+import org.hl7.fhir.r4.model.CodeType;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.ConceptMap;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Parameters;
+import org.hl7.fhir.r4.model.StringType;
+import org.hl7.fhir.r4.model.UriType;
+import org.hl7.fhir.r4.model.ValueSet;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+import static ca.uhn.fhir.test.utilities.validation.IValidationProviders.REMOTE_FAILURE;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Version specific tests for validation using RemoteTerminologyValidationSupport.
+ * The tests in this class simulate the call to a remote server and therefore, only tests the code in
+ * the RemoteTerminologyServiceValidationSupport itself. The remote client call is simulated using the test providers.
+ * @see RemoteTerminologyServiceValidationSupport
+ *
+ * Other operations are tested separately.
+ * @see RemoteTerminologyLookupCodeR4Test
+ * @see RemoteTerminologyValidateCodeR4Test
+ */
+public class RemoteTerminologyServiceValidationSupportR4Test extends BaseValidationTestWithInlineMocks {
+	private static final String CODE_SYSTEM = "CODE_SYS";
+	private static final String CODE = "CODE";
+	private static final String CODE_SYSTEM_VERSION = "2.78";
+	private static final String VALUE_SET_VERSION = "1.0.0";
+	private static final String VALUE_SET_URL = "http://value.set/url";
+	private static final String TARGET_SYSTEM = "http://target.system/url";
+	private static final String CONCEPT_MAP_URL = "http://concept.map/url";
+	private static final String CONCEPT_MAP_VERSION = "2.1";
+	private static final String SOURCE_VALUE_SET_URL = "http://source.vs.system/url";
+	private static final String TARGET_VALUE_SET_URL = "http://target.vs.system/url";
+	private static final String TARGET_CODE = "CODE";
+	private static final String TARGET_CODE_DISPLAY = "code";
+	private static final boolean REVERSE = true;
+	private static final String EQUIVALENCE_CODE = "equivalent";
+	private static final String ERROR_MESSAGE = "This is an error message";
+	private static final String SNOMED_CT = "http://snomed.info/sct";
+	private static final String SNOMED_CT_INTERNATIONAL_EDITION = SNOMED_CT + "/900000000000207008";
+	private static final String UNVERSIONED = "";
+
+	private static final FhirContext ourCtx = FhirContext.forR4Cached();
+
+	@RegisterExtension
+	public static RestfulServerExtension myRestfulServerExtension = new RestfulServerExtension(ourCtx);
+
+	@RegisterExtension
+	final LogbackTestExtension myTerminologyLog = new LogbackTestExtension(Logs.getTerminologyTroubleshootingLog());
+
+	private final MyValueSetProvider myValueSetProvider = new MyValueSetProvider();
+	private final MyCodeSystemProvider myCodeSystemProvider = new MyCodeSystemProvider();
+	private final MyConceptMapProvider myConceptMapProvider = new MyConceptMapProvider();
+	private final RemoteTerminologyServiceValidationSupport mySvc = new RemoteTerminologyServiceValidationSupport(ourCtx);
+	private FailEveryRequestInterceptor myFailEveryRequestInterceptor = new FailEveryRequestInterceptor();
+
+	@BeforeEach
+	public void before() {
+		myRestfulServerExtension.getRestfulServer().registerProvider(myValueSetProvider);
+		myRestfulServerExtension.getRestfulServer().registerProvider(myCodeSystemProvider);
+		myRestfulServerExtension.getRestfulServer().registerProvider(myConceptMapProvider);
+
+		String baseUrl = "http://localhost:" + myRestfulServerExtension.getPort();
+		mySvc.setBaseUrl(baseUrl);
+		mySvc.addClientInterceptor(new LoggingInterceptor(true));
+	}
+
+	@AfterEach
+	void after() {
+		myRestfulServerExtension.getRestfulServer().unregisterInterceptor(myFailEveryRequestInterceptor);
+	}
+
+	/**
+	 * A remote server that fails has said nothing about the code: the module throws, naming the remote server and
+	 * its error, so that the validation support chain can ask its other modules.
+	 */
+	// Created by Claude Opus 5.5
+	@ParameterizedTest
+	@EnumSource(RemoteFailure.class)
+	void validateCodeInValueSet_remoteServerFails_throwsNamingTheFailure(RemoteFailure theFailure) {
+		failEveryRemoteRequest(theFailure);
+
+		assertRemoteFailureThrown(() -> mySvc.validateCodeInValueSet(
+				null, new ConceptValidationOptions(), CODE_SYSTEM, CODE, null, newValueSet(null)));
+	}
+
+	// Created by Claude Opus 5.5
+	@ParameterizedTest
+	@EnumSource(RemoteFailure.class)
+	void validateCode_remoteServerFails_throwsNamingTheFailure(RemoteFailure theFailure) {
+		failEveryRemoteRequest(theFailure);
+
+		assertRemoteFailureThrown(
+				() -> mySvc.validateCode(null, new ConceptValidationOptions(), CODE_SYSTEM, CODE, null, null));
+	}
+
+	/**
+	 * A remote server that cannot be searched has said nothing about whether it holds the resource, so the search
+	 * throws rather than report it as not found.
+	 */
+	// Created by Claude Opus 5.5
+	@ParameterizedTest
+	@EnumSource(RemoteFailure.class)
+	void searches_remoteServerFails_throwNamingTheFailure(RemoteFailure theFailure) {
+		failEveryRemoteRequest(theFailure);
+
+		List<ThrowingCallable> searches = List.of(
+				() -> mySvc.fetchValueSet(VALUE_SET_URL),
+				() -> mySvc.isValueSetSupported(null, VALUE_SET_URL),
+				() -> mySvc.fetchCodeSystem(CODE_SYSTEM),
+				() -> mySvc.isCodeSystemSupported(null, CODE_SYSTEM));
+		for (ThrowingCallable search : searches) {
+			assertThatThrownBy(search)
+					.isInstanceOf(ValidationSupportUnavailableException.class)
+					.hasMessageContaining(REMOTE_FAILURE)
+					.hasMessageContaining(mySvc.getBaseUrl());
+		}
+		assertThat(getLoggedRemoteFailures()).hasSize(searches.size());
+	}
+
+	/**
+	 * A 401 or 403 is the remote server's answer, not an outage, so it is thrown to the caller as it is, from
+	 * $validate-code, $lookup and both searches. Only a 5xx or a connection failure is treated as an outage.
+	 */
+	// Created by Claude Opus 5.5
+	@ParameterizedTest
+	@ValueSource(ints = {401, 403})
+	void remoteServerRefuses_rethrows(int theStatusCode) {
+		BaseServerResponseException refusal = theStatusCode == AuthenticationException.STATUS_CODE
+				? new AuthenticationException(ERROR_MESSAGE)
+				: new ForbiddenOperationException(ERROR_MESSAGE);
+		myFailEveryRequestInterceptor = new FailEveryRequestInterceptor(refusal);
+		myRestfulServerExtension.getRestfulServer().registerInterceptor(myFailEveryRequestInterceptor);
+		myValueSetProvider.myNextReturnValueSets = List.of(newValueSet(null));
+
+		List<ThrowingCallable> requests = List.of(
+				() -> mySvc.validateCode(null, new ConceptValidationOptions(), CODE_SYSTEM, CODE, null, null),
+				() -> mySvc.validateCodeInValueSet(
+						null, new ConceptValidationOptions(), CODE_SYSTEM, CODE, null, newValueSet(null)),
+				() -> mySvc.fetchValueSet(VALUE_SET_URL),
+				() -> mySvc.fetchCodeSystem(CODE_SYSTEM),
+				() -> mySvc.lookupCode(null, new LookupCodeRequest(CODE_SYSTEM, CODE)));
+		for (ThrowingCallable request : requests) {
+			assertThatThrownBy(request)
+					.isInstanceOf(refusal.getClass())
+					.isNotInstanceOf(ValidationSupportUnavailableException.class)
+					.satisfies(e -> assertThat(((BaseServerResponseException) e).getStatusCode())
+							.isEqualTo(theStatusCode));
+		}
+		assertThat(getLoggedErrors()).isEmpty();
+	}
+
+	/**
+	 * Through a validation support chain, a remote server that fails leaves the code unchecked, which is reported
+	 * as a warning naming the remote server and its error rather than thrown into the caller's own request.
+	 */
+	// Created by Claude Opus 5.5
+	@ParameterizedTest
+	@EnumSource(RemoteFailure.class)
+	void chainValidateCode_remoteServerFails_returnsWarningNamingTheFailure(RemoteFailure theFailure) {
+		ValidationSupportChain chain = new ValidationSupportChain(mySvc);
+		failEveryRemoteRequest(theFailure);
+
+		CodeValidationResult outcome = chain.validateCode(
+				new ValidationSupportContext(chain),
+				new ConceptValidationOptions(),
+				CODE_SYSTEM,
+				CODE,
+				null,
+				VALUE_SET_URL);
+
+		assertRemoteFailureWarning(outcome);
+	}
+
+	// Created by Claude Opus 5.5
+	@ParameterizedTest
+	@EnumSource(RemoteFailure.class)
+	void chainValidateCodeInValueSet_remoteServerFails_returnsWarningNamingTheFailure(RemoteFailure theFailure) {
+		ValidationSupportChain chain = new ValidationSupportChain(mySvc);
+		failEveryRemoteRequest(theFailure);
+
+		CodeValidationResult outcome = chain.validateCodeInValueSet(
+				new ValidationSupportContext(chain),
+				new ConceptValidationOptions(),
+				CODE_SYSTEM,
+				CODE,
+				null,
+				newValueSet(null));
+
+		assertRemoteFailureWarning(outcome);
+	}
+
+	/**
+	 * The warning for a failed $validate-code is not cached: once the remote server recovers, an invalid code
+	 * gets its error.
+	 */
+	// Created by Claude Opus 5.5
+	@Test
+	void chainValidateCode_remoteValidateCodeFailsThenRecovers_reportsTheInvalidCode() {
+		ValidationSupportChain chain = new ValidationSupportChain(mySvc);
+		myValueSetProvider.myNextReturnValueSets = List.of(newValueSet(null));
+		myValueSetProvider.myValidateCodeException = new InternalErrorException(REMOTE_FAILURE);
+
+		CodeValidationResult duringOutage = validateCodeInValueSetUrl(chain);
+
+		myValueSetProvider.myValidateCodeException = null;
+		myValueSetProvider.myValidateCodeResult = new Parameters()
+				.addParameter("result", false)
+				.addParameter("message", "Unknown code " + CODE);
+		CodeValidationResult afterRecovery = validateCodeInValueSetUrl(chain);
+
+		assertRemoteFailureWarning(duringOutage);
+		assertThat(afterRecovery).isNotNull();
+		assertThat(afterRecovery.getSeverity()).isEqualTo(IssueSeverity.ERROR);
+		assertThat(afterRecovery.getMessage()).contains("Unknown code " + CODE);
+	}
+
+	/**
+	 * A failed $lookup is not cached: while the remote server fails it and no other module answers, the chain
+	 * throws rather than report the code as not found, and once the remote server recovers it finds the code.
+	 */
+	// Created by Claude Opus 5.5
+	@Test
+	void chainLookupCode_remoteLookupFailsThenRecovers_findsTheCode() {
+		ValidationSupportChain chain = new ValidationSupportChain(mySvc);
+		ValidationSupportContext context = new ValidationSupportContext(chain);
+		myCodeSystemProvider.myNextReturnCodeSystems = List.of(newCodeSystem(null));
+		myCodeSystemProvider.myLookupCodeException = new InternalErrorException(REMOTE_FAILURE);
+
+		assertThatThrownBy(() -> chain.lookupCode(context, new LookupCodeRequest(CODE_SYSTEM, CODE)))
+				.isInstanceOf(ValidationSupportUnavailableException.class)
+				.hasMessageContaining("HAPI-3067")
+				.hasMessageContaining(REMOTE_FAILURE)
+				.hasMessageContaining(mySvc.getBaseUrl());
+
+		myCodeSystemProvider.myLookupCodeException = null;
+		myCodeSystemProvider.myLookupCodeResult = new Parameters()
+				.addParameter("name", "Remote code system")
+				.addParameter("display", TARGET_CODE_DISPLAY);
+		LookupCodeResult afterRecovery = chain.lookupCode(context, new LookupCodeRequest(CODE_SYSTEM, CODE));
+
+		assertThat(afterRecovery).isNotNull();
+		assertThat(afterRecovery.isFound()).isTrue();
+		assertThat(afterRecovery.getCodeDisplay()).isEqualTo(TARGET_CODE_DISPLAY);
+	}
+
+	/**
+	 * A failed search is not cached either: once the remote server recovers, the chain finds the ValueSet and the
+	 * CodeSystem on it.
+	 */
+	// Created by Claude Opus 5.5
+	@Test
+	void chainSearches_remoteServerFailsThenRecovers_findsTheResources() {
+		ValidationSupportChain chain = new ValidationSupportChain(mySvc);
+		ValidationSupportContext context = new ValidationSupportContext(chain);
+		myValueSetProvider.myNextReturnValueSets = List.of(newValueSet(null));
+		myCodeSystemProvider.myNextReturnCodeSystems = List.of(newCodeSystem(null));
+		failEveryRemoteRequest(RemoteFailure.HTTP_500);
+
+		assertThat(chain.fetchValueSet(VALUE_SET_URL)).isNull();
+		assertThat(chain.isValueSetSupported(context, VALUE_SET_URL)).isFalse();
+		assertThat(chain.fetchCodeSystem(CODE_SYSTEM)).isNull();
+		assertThat(chain.isCodeSystemSupported(context, CODE_SYSTEM)).isFalse();
+
+		myRestfulServerExtension.getRestfulServer().unregisterInterceptor(myFailEveryRequestInterceptor);
+
+		assertThat(chain.fetchValueSet(VALUE_SET_URL)).isNotNull();
+		assertThat(chain.isValueSetSupported(context, VALUE_SET_URL)).isTrue();
+		assertThat(chain.fetchCodeSystem(CODE_SYSTEM)).isNotNull();
+		assertThat(chain.isCodeSystemSupported(context, CODE_SYSTEM)).isTrue();
+	}
+
+	/**
+	 * While the remote server is down, a local module that holds the ValueSet and CodeSystem answers instead.
+	 */
+	// Created by Claude Opus 5.5
+	@Test
+	void chain_remoteServerFails_localModuleAnswers() {
+		CodeSystem localCodeSystem = newCodeSystem(null);
+		localCodeSystem.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+		localCodeSystem.addConcept().setCode(CODE);
+		ValueSet localValueSet = newValueSet(null);
+		localValueSet.getCompose().addInclude().setSystem(CODE_SYSTEM);
+		PrePopulatedValidationSupport localModule = new PrePopulatedValidationSupport(ourCtx);
+		localModule.addCodeSystem(localCodeSystem);
+		localModule.addValueSet(localValueSet);
+		ValidationSupportChain chain = new ValidationSupportChain(
+				mySvc, localModule, new InMemoryTerminologyServerValidationSupport(ourCtx));
+		ValidationSupportContext context = new ValidationSupportContext(chain);
+		failEveryRemoteRequest(RemoteFailure.HTTP_500);
+
+		IBaseResource valueSet = chain.fetchValueSet(VALUE_SET_URL);
+		CodeValidationResult inCodeSystem =
+				chain.validateCode(context, new ConceptValidationOptions(), CODE_SYSTEM, CODE, null, null);
+		CodeValidationResult inValueSet = chain.validateCodeInValueSet(
+				context, new ConceptValidationOptions(), CODE_SYSTEM, CODE, null, localValueSet);
+		LookupCodeResult lookup = chain.lookupCode(context, new LookupCodeRequest(CODE_SYSTEM, CODE));
+
+		assertThat(valueSet).isSameAs(localValueSet);
+		assertThat(inCodeSystem).isNotNull();
+		assertThat(inCodeSystem.isOk()).isTrue();
+		assertThat(inValueSet).isNotNull();
+		assertThat(inValueSet.isOk()).isTrue();
+		assertThat(lookup).isNotNull();
+		assertThat(lookup.isFound()).isTrue();
+		assertThat(myFailEveryRequestInterceptor.getRequestCount()).isPositive();
+	}
+
+	private CodeValidationResult validateCodeInValueSetUrl(ValidationSupportChain theChain) {
+		return theChain.validateCode(
+				new ValidationSupportContext(theChain),
+				new ConceptValidationOptions(),
+				CODE_SYSTEM,
+				CODE,
+				null,
+				VALUE_SET_URL);
+	}
+
+	private void assertRemoteFailureThrown(ThrowingCallable theRequest) {
+		assertThatThrownBy(theRequest)
+				.isInstanceOf(ValidationSupportUnavailableException.class)
+				.hasMessageContaining(REMOTE_FAILURE)
+				.hasMessageContaining(mySvc.getBaseUrl())
+				.satisfies(e -> assertThat(getLoggedRemoteFailures()).singleElement().isEqualTo(e.getMessage()));
+	}
+
+	private void assertRemoteFailureWarning(CodeValidationResult theOutcome) {
+		assertThat(theOutcome).isNotNull();
+		assertThat(theOutcome.isOk()).isFalse();
+		assertThat(theOutcome.getSeverity()).isEqualTo(IssueSeverity.WARNING);
+		assertThat(theOutcome.getMessage()).contains(REMOTE_FAILURE, mySvc.getBaseUrl());
+		assertThat(theOutcome.getIssues()).singleElement().satisfies(issue -> {
+			assertThat(issue.getSeverity()).isEqualTo(IssueSeverity.WARNING);
+			assertThat(issue.getType().getCode()).isEqualTo("transient");
+			assertThat(issue.getDiagnostics()).contains(REMOTE_FAILURE, mySvc.getBaseUrl());
+		});
+		assertThat(getLoggedRemoteFailures()).singleElement().isEqualTo(theOutcome.getMessage());
+	}
+
+	/**
+	 * The ERROR-level messages logged that name the remote server and its failure.
+	 */
+	private List<String> getLoggedRemoteFailures() {
+		return getLoggedErrors().stream()
+				.filter(message -> message.contains(REMOTE_FAILURE) && message.contains(mySvc.getBaseUrl()))
+				.toList();
+	}
+
+	private List<String> getLoggedErrors() {
+		return myTerminologyLog.getLogEvents().stream()
+				.filter(event -> event.getLevel() == Level.ERROR)
+				.map(ILoggingEvent::getFormattedMessage)
+				.toList();
+	}
+
+	private void failEveryRemoteRequest(RemoteFailure theFailure) {
+		switch (theFailure) {
+			case HTTP_500 -> myRestfulServerExtension.getRestfulServer().registerInterceptor(myFailEveryRequestInterceptor);
+			case CONNECTION -> mySvc.addClientInterceptor(new FailEveryConnectionInterceptor());
+		}
+	}
+
+	private enum RemoteFailure {
+		HTTP_500,
+		CONNECTION
+	}
+
+	@Test
+	void fetchValueSet_forcesSummaryFalse() {
+		// given
+		myValueSetProvider.myNextReturnValueSets = new ArrayList<>();
+
+		// when
+		mySvc.fetchValueSet(VALUE_SET_URL);
+
+		// then
+		assertEquals(SummaryEnum.FALSE, myValueSetProvider.myLastSummaryParam);
+	}
+
+	/**
+	 * A CodeSystem resource's {@code url} element never contains a pipe, so a version-specific canonical
+	 * can only match when the version is sent as its own search parameter. Packing it into {@code url}
+	 * makes every version-specific system read as unknown.
+	 */
+	// Created by Claude Opus 5
+	@Test
+	void fetchCodeSystem_packedVersionedCanonical_searchesUrlAndVersionSeparately() {
+		myCodeSystemProvider.myNextReturnCodeSystems = List.of(newCodeSystem(CODE_SYSTEM_VERSION));
+
+		IBaseResource codeSystem = mySvc.fetchCodeSystem(CODE_SYSTEM + "|" + CODE_SYSTEM_VERSION);
+
+		assertNotNull(codeSystem);
+		assertEquals(CODE_SYSTEM, myCodeSystemProvider.myLastUrlParam.getValue());
+		assertNotNull(myCodeSystemProvider.myLastVersionParam);
+		assertEquals(CODE_SYSTEM_VERSION, myCodeSystemProvider.myLastVersionParam.getValue());
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	void fetchCodeSystem_versionAsItsOwnParameter_searchesUrlAndVersionSeparately() {
+		myCodeSystemProvider.myNextReturnCodeSystems = List.of(newCodeSystem(CODE_SYSTEM_VERSION));
+
+		IBaseResource codeSystem = mySvc.fetchCodeSystem(CODE_SYSTEM, CODE_SYSTEM_VERSION);
+
+		assertNotNull(codeSystem);
+		assertEquals(CODE_SYSTEM, myCodeSystemProvider.myLastUrlParam.getValue());
+		assertNotNull(myCodeSystemProvider.myLastVersionParam);
+		assertEquals(CODE_SYSTEM_VERSION, myCodeSystemProvider.myLastVersionParam.getValue());
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	void fetchCodeSystem_noVersion_searchesUrlOnly() {
+		myCodeSystemProvider.myNextReturnCodeSystems = List.of(newCodeSystem(null));
+
+		IBaseResource codeSystem = mySvc.fetchCodeSystem(CODE_SYSTEM);
+
+		assertNotNull(codeSystem);
+		assertEquals(CODE_SYSTEM, myCodeSystemProvider.myLastUrlParam.getValue());
+		assertNull(myCodeSystemProvider.myLastVersionParam);
+	}
+
+	/**
+	 * {@code isCodeSystemSupported} answers from the same search, so a version-specific system read as
+	 * unknown also reads as unsupported - which is what makes the whole ValueSet fail rather than
+	 * just one code.
+	 */
+	// Created by Claude Opus 5
+	@Test
+	void isCodeSystemSupported_packedVersionedCanonical_searchesUrlAndVersionSeparately() {
+		myCodeSystemProvider.myNextReturnCodeSystems = List.of(newCodeSystem(CODE_SYSTEM_VERSION));
+
+		boolean supported = mySvc.isCodeSystemSupported(null, CODE_SYSTEM + "|" + CODE_SYSTEM_VERSION);
+
+		assertTrue(supported);
+		assertEquals(CODE_SYSTEM, myCodeSystemProvider.myLastUrlParam.getValue());
+		assertNotNull(myCodeSystemProvider.myLastVersionParam);
+		assertEquals(CODE_SYSTEM_VERSION, myCodeSystemProvider.myLastVersionParam.getValue());
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	void isCodeSystemSupported_versionAsItsOwnParameter_searchesUrlAndVersionSeparately() {
+		myCodeSystemProvider.myNextReturnCodeSystems = List.of(newCodeSystem(CODE_SYSTEM_VERSION));
+
+		boolean supported = mySvc.isCodeSystemSupported(null, CODE_SYSTEM, CODE_SYSTEM_VERSION);
+
+		assertTrue(supported);
+		assertEquals(CODE_SYSTEM, myCodeSystemProvider.myLastUrlParam.getValue());
+		assertNotNull(myCodeSystemProvider.myLastVersionParam);
+		assertEquals(CODE_SYSTEM_VERSION, myCodeSystemProvider.myLastVersionParam.getValue());
+	}
+
+	/**
+	 * A server such as Ontoserver stores each SNOMED CT release under its full version,
+	 * {@code <edition>/version/<date>}, so a search for the edition alone finds nothing.
+	 */
+	// Created by Claude Opus 5.5
+	@Test
+	void isCodeSystemSupported_snomedEditionAlone_searchesWithoutAVersion() {
+		myCodeSystemProvider.myNextReturnCodeSystemsByVersion = Map.of(
+				UNVERSIONED, List.of(newSnomedRelease("1", SNOMED_CT_INTERNATIONAL_EDITION + "/version/20260601")));
+
+		boolean supported = mySvc.isCodeSystemSupported(null, SNOMED_CT, SNOMED_CT_INTERNATIONAL_EDITION);
+
+		assertTrue(supported);
+		assertNull(myCodeSystemProvider.myLastVersionParam);
+	}
+
+	// Created by Claude Opus 5.5
+	@ParameterizedTest(name = "{0}|{1} with only {2} on the server")
+	@CsvSource({
+		"http://snomed.info/sct, http://snomed.info/sct/900000000000207008/version/20990101, http://snomed.info/sct/900000000000207008/version/20260601",
+		"CODE_SYS,               1,                                         1/version/2"
+	})
+	void isCodeSystemSupported_noReleaseOfTheVersion_isNotSupported(
+			String theSystem, String theVersion, String theVersionOnTheServer) {
+		CodeSystem onTheServer = newSnomedRelease("1", theVersionOnTheServer);
+		onTheServer.setUrl(theSystem);
+		myCodeSystemProvider.myNextReturnCodeSystemsByVersion = Map.of(UNVERSIONED, List.of(onTheServer));
+
+		boolean supported = mySvc.isCodeSystemSupported(null, theSystem, theVersion);
+
+		assertFalse(supported);
+	}
+
+	/**
+	 * A ValueSet resource's {@code url} element never contains a pipe either, so the version has to be
+	 * sent as its own search parameter here too.
+	 */
+	// Created by Claude Opus 5
+	@Test
+	void fetchValueSet_packedVersionedCanonical_searchesUrlAndVersionSeparately() {
+		myValueSetProvider.myNextReturnValueSets = List.of(newValueSet(VALUE_SET_VERSION));
+
+		IBaseResource valueSet = mySvc.fetchValueSet(VALUE_SET_URL + "|" + VALUE_SET_VERSION);
+
+		assertNotNull(valueSet);
+		assertEquals(VALUE_SET_URL, myValueSetProvider.myLastUrlParam.getValue());
+		assertNotNull(myValueSetProvider.myLastVersionParam);
+		assertEquals(VALUE_SET_VERSION, myValueSetProvider.myLastVersionParam.getValue());
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	void fetchValueSet_versionAsItsOwnParameter_searchesUrlAndVersionSeparately() {
+		myValueSetProvider.myNextReturnValueSets = List.of(newValueSet(VALUE_SET_VERSION));
+
+		IBaseResource valueSet = mySvc.fetchValueSet(VALUE_SET_URL, VALUE_SET_VERSION);
+
+		assertNotNull(valueSet);
+		assertEquals(VALUE_SET_URL, myValueSetProvider.myLastUrlParam.getValue());
+		assertNotNull(myValueSetProvider.myLastVersionParam);
+		assertEquals(VALUE_SET_VERSION, myValueSetProvider.myLastVersionParam.getValue());
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	void fetchValueSet_noVersion_searchesUrlOnly() {
+		myValueSetProvider.myNextReturnValueSets = List.of(newValueSet(null));
+
+		IBaseResource valueSet = mySvc.fetchValueSet(VALUE_SET_URL);
+
+		assertNotNull(valueSet);
+		assertEquals(VALUE_SET_URL, myValueSetProvider.myLastUrlParam.getValue());
+		assertNull(myValueSetProvider.myLastVersionParam);
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	void isValueSetSupported_versionAsItsOwnParameter_searchesUrlAndVersionSeparately() {
+		myValueSetProvider.myNextReturnValueSets = List.of(newValueSet(VALUE_SET_VERSION));
+
+		boolean supported = mySvc.isValueSetSupported(null, VALUE_SET_URL, VALUE_SET_VERSION);
+
+		assertTrue(supported);
+		assertEquals(VALUE_SET_URL, myValueSetProvider.myLastUrlParam.getValue());
+		assertNotNull(myValueSetProvider.myLastVersionParam);
+		assertEquals(VALUE_SET_VERSION, myValueSetProvider.myLastVersionParam.getValue());
+	}
+
+	@Test
+	void translateCode_AllInParams_AllOutParams() {
+		myConceptMapProvider.myNextReturnParams = new Parameters();
+		myConceptMapProvider.myNextReturnParams.addParameter("result", true);
+		myConceptMapProvider.myNextReturnParams.addParameter("message", ERROR_MESSAGE);
+
+		TranslateConceptResults expectedResults = new TranslateConceptResults();
+		expectedResults.setResult(true);
+
+		// Add 2 matches
+		addMatchToTranslateRequest(myConceptMapProvider.myNextReturnParams);
+		addMatchToTranslateRequest(myConceptMapProvider.myNextReturnParams);
+
+		List<TranslateConceptResult> translateResults = new ArrayList<>();
+		TranslateConceptResult singleResult = new TranslateConceptResult();
+		singleResult
+			.setEquivalence(EQUIVALENCE_CODE)
+			.setSystem(TARGET_SYSTEM)
+			.setCode(TARGET_CODE)
+			.setConceptMapUrl(CONCEPT_MAP_URL)
+			.setDisplay(TARGET_CODE_DISPLAY);
+		translateResults.add(singleResult);
+		translateResults.add(singleResult);
+		expectedResults.setResults(translateResults);
+
+		CodeableConcept codeableConcept = new CodeableConcept();
+		codeableConcept.addCoding(new Coding(CODE_SYSTEM, CODE, null));
+
+		IValidationSupport.TranslateCodeRequest request = new IValidationSupport.TranslateCodeRequest(
+			Collections.unmodifiableList(codeableConcept.getCoding()),
+			TARGET_SYSTEM,
+			CONCEPT_MAP_URL,
+			CONCEPT_MAP_VERSION,
+			SOURCE_VALUE_SET_URL,
+			TARGET_VALUE_SET_URL,
+			null,
+			REVERSE);
+
+		TranslateConceptResults results = mySvc.translateConcept(request);
+
+		assertNotNull(results);
+		assertTrue(results.getResult());
+		assertEquals(2, results.getResults().size());
+		for(TranslateConceptResult result : results.getResults()) {
+			assertEquals(singleResult, result);
+		}
+
+		assertTrue(codeableConcept.equalsDeep(myConceptMapProvider.myLastCodeableConcept));
+		assertEquals(TARGET_SYSTEM, myConceptMapProvider.myLastTargetCodeSystem.getValue());
+		assertEquals(CONCEPT_MAP_URL, myConceptMapProvider.myLastConceptMapUrl.getValue());
+		assertEquals(CONCEPT_MAP_VERSION, myConceptMapProvider.myLastConceptMapVersion.getValue());
+		assertEquals(SOURCE_VALUE_SET_URL, myConceptMapProvider.myLastSourceValueSet.getValue());
+		assertEquals(TARGET_VALUE_SET_URL, myConceptMapProvider.myLastTargetValueSet.getValue());
+		assertEquals(REVERSE, myConceptMapProvider.myLastReverse.getValue());
+	}
+
+	@Test
+	void translateCode_NoInParams_NoOutParams() {
+		myConceptMapProvider.myNextReturnParams = new Parameters();
+
+		List<IBaseCoding> codings = new ArrayList<>();
+		codings.add(new Coding(null, null, null));
+		IValidationSupport.TranslateCodeRequest request = new IValidationSupport.TranslateCodeRequest(codings, null);
+
+		TranslateConceptResults results = mySvc.translateConcept(request);
+		assertNotNull(results);
+		assertFalse(results.getResult());
+		assertEquals(0, results.getResults().size());
+
+		assertNull(myConceptMapProvider.myLastCodeableConcept);
+		assertNull(myConceptMapProvider.myLastTargetCodeSystem);
+		assertNull(myConceptMapProvider.myLastConceptMapUrl);
+		assertNull(myConceptMapProvider.myLastConceptMapVersion);
+		assertNull(myConceptMapProvider.myLastSourceValueSet);
+		assertNull(myConceptMapProvider.myLastTargetValueSet);
+		assertNull(myConceptMapProvider.myLastReverse);
+	}
+
+	@Test
+	void fetchCodeSystem_forcesSummaryFalse() {
+		// given
+		myCodeSystemProvider.myNextReturnCodeSystems = new ArrayList<>();
+
+		// when
+		mySvc.fetchCodeSystem("http://loinc.org");
+
+		// then
+		assertEquals(SummaryEnum.FALSE, myCodeSystemProvider.myLastSummaryParam);
+	}
+
+
+	private void addMatchToTranslateRequest(Parameters params) {
+		Parameters.ParametersParameterComponent matchParam = params.addParameter().setName("match");
+		matchParam.addPart().setName("equivalence").setValue(new CodeType(EQUIVALENCE_CODE));
+		Coding value = new Coding(TARGET_SYSTEM, TARGET_CODE, TARGET_CODE_DISPLAY);
+		matchParam.addPart().setName("concept").setValue(value);
+		matchParam.addPart().setName("source").setValue(new UriType(CONCEPT_MAP_URL));
+	}
+
+	@Test
+	void isValueSetSupported_False() {
+		myValueSetProvider.myNextReturnValueSets = new ArrayList<>();
+
+		boolean outcome = mySvc.isValueSetSupported(null, "http://loinc.org/VS");
+		assertFalse(outcome);
+		assertEquals("http://loinc.org/VS", myValueSetProvider.myLastUrlParam.getValue());
+	}
+
+	@Test
+	void isValueSetSupported_True() {
+		myValueSetProvider.myNextReturnValueSets = new ArrayList<>();
+		myValueSetProvider.myNextReturnValueSets.add((ValueSet) new ValueSet().setId("ValueSet/123"));
+
+		boolean outcome = mySvc.isValueSetSupported(null, "http://loinc.org/VS");
+		assertTrue(outcome);
+		assertEquals("http://loinc.org/VS", myValueSetProvider.myLastUrlParam.getValue());
+	}
+
+	@Test
+	void isCodeSystemSupported_False() {
+		myCodeSystemProvider.myNextReturnCodeSystems = new ArrayList<>();
+
+		boolean outcome = mySvc.isCodeSystemSupported(null, "http://loinc.org");
+		assertFalse(outcome);
+		assertEquals("http://loinc.org", myCodeSystemProvider.myLastUrlParam.getValue());
+	}
+
+	@Test
+	void isCodeSystemSupported_True() {
+		myCodeSystemProvider.myNextReturnCodeSystems = new ArrayList<>();
+		myCodeSystemProvider.myNextReturnCodeSystems.add((CodeSystem) new CodeSystem().setId("CodeSystem/123"));
+
+		boolean outcome = mySvc.isCodeSystemSupported(null, "http://loinc.org");
+		assertTrue(outcome);
+		assertEquals("http://loinc.org", myCodeSystemProvider.myLastUrlParam.getValue());
+	}
+
+	@SuppressWarnings("unused")
+	/**
+	 * A CodeSystem a test provider can return: the server rejects a resource with no ID.
+	 */
+	// Created by Claude Opus 5
+	private static ValueSet newValueSet(@Nullable String theVersion) {
+		ValueSet valueSet = new ValueSet();
+		valueSet.setId("ValueSet/123");
+		valueSet.setUrl(VALUE_SET_URL);
+		valueSet.setVersion(theVersion);
+		return valueSet;
+	}
+
+	// Created by Claude Opus 5
+	private static CodeSystem newCodeSystem(@Nullable String theVersion) {
+		CodeSystem codeSystem = new CodeSystem();
+		codeSystem.setId("CodeSystem/123");
+		codeSystem.setUrl(CODE_SYSTEM);
+		codeSystem.setVersion(theVersion);
+		return codeSystem;
+	}
+
+	// Created by Claude Opus 5.5
+	private static CodeSystem newSnomedRelease(String theId, String theVersion) {
+		CodeSystem codeSystem = new CodeSystem();
+		codeSystem.setId("CodeSystem/" + theId);
+		codeSystem.setUrl(SNOMED_CT);
+		codeSystem.setVersion(theVersion);
+		return codeSystem;
+	}
+
+	private static class MyCodeSystemProvider implements IResourceProvider {
+		private SummaryEnum myLastSummaryParam;
+		private UriParam myLastUrlParam;
+		private StringParam myLastVersionParam;
+		private List<CodeSystem> myNextReturnCodeSystems;
+		/**
+		 * When set, answers each search by its version ({@link #UNVERSIONED} for none) instead of
+		 * {@link #myNextReturnCodeSystems}, and with nothing for a version it has no entry for.
+		 */
+		// Created by Claude Opus 5.5
+		private Map<String, List<CodeSystem>> myNextReturnCodeSystemsByVersion;
+		// Created by Claude Opus 5.5
+		private Parameters myLookupCodeResult;
+		// Created by Claude Opus 5.5
+		private BaseServerResponseException myLookupCodeException;
+
+		// Created by Claude Opus 5.5
+		@Operation(name = "$lookup", idempotent = true)
+		public Parameters lookup(
+				@OperationParam(name = "code", min = 0, max = 1) CodeType theCode,
+				@OperationParam(name = "system", min = 0, max = 1) UriType theSystem) {
+			if (myLookupCodeException != null) {
+				throw myLookupCodeException;
+			}
+			return myLookupCodeResult;
+		}
+
+		@Override
+		public Class<? extends IBaseResource> getResourceType() {
+			return CodeSystem.class;
+		}
+
+		@Search
+		public List<CodeSystem> find(
+				@RequiredParam(name = "url") UriParam theUrlParam,
+				@OptionalParam(name = "version") StringParam theVersionParam,
+				SummaryEnum theSummaryParam) {
+			myLastUrlParam = theUrlParam;
+			myLastVersionParam = theVersionParam;
+			myLastSummaryParam = theSummaryParam;
+			if (myNextReturnCodeSystemsByVersion != null) {
+				String version = theVersionParam != null ? theVersionParam.getValue() : UNVERSIONED;
+				return myNextReturnCodeSystemsByVersion.getOrDefault(version, List.of());
+			}
+			assert myNextReturnCodeSystems != null;
+			return myNextReturnCodeSystems;
+		}
+	}
+
+	@SuppressWarnings("unused")
+	private static class MyValueSetProvider implements IResourceProvider {
+		private List<ValueSet> myNextReturnValueSets;
+		private UriParam myLastUrlParam;
+		// Created by Claude Opus 5
+		private StringParam myLastVersionParam;
+		private SummaryEnum myLastSummaryParam;
+		private Parameters myValidateCodeResult;
+		// Created by Claude Opus 5.5
+		private BaseServerResponseException myValidateCodeException;
+		private BooleanType myLastValidateCodeInferSystem;
+
+		// Created by claude-sonnet-4-6
+		@Operation(name = "validate-code", idempotent = true, returnParameters = {
+			@OperationParam(name = "result", type = BooleanType.class, min = 1),
+			@OperationParam(name = "message", type = StringType.class),
+			@OperationParam(name = "display", type = StringType.class)
+		})
+		public Parameters validateCode(
+			@OperationParam(name = "url", min = 0, max = 1) UriType theValueSetUrl,
+			@OperationParam(name = "code", min = 0, max = 1) CodeType theCode,
+			@OperationParam(name = "inferSystem", min = 0, max = 1) BooleanType theInferSystem,
+			@OperationParam(name = "valueSet") ValueSet theValueSet) {
+			myLastValidateCodeInferSystem = theInferSystem;
+			if (myValidateCodeException != null) {
+				throw myValidateCodeException;
+			}
+			return myValidateCodeResult;
+		}
+
+		@Search
+		public List<ValueSet> find(
+			@RequiredParam(name = "url") UriParam theUrlParam,
+			@OptionalParam(name = "version") StringParam theVersionParam,
+			SummaryEnum theSummaryParam) {
+			myLastUrlParam = theUrlParam;
+			myLastVersionParam = theVersionParam;
+			myLastSummaryParam = theSummaryParam;
+			assert myNextReturnValueSets != null;
+			return myNextReturnValueSets;
+		}
+
+		@Override
+		public Class<? extends IBaseResource> getResourceType() {
+			return ValueSet.class;
+		}
+
+	}
+
+	@SuppressWarnings("unused")
+	private static class MyConceptMapProvider implements IResourceProvider {
+		private UriType myLastConceptMapUrl;
+		private StringType myLastConceptMapVersion;
+		private CodeableConcept myLastCodeableConcept;
+		private UriType myLastSourceValueSet;
+		private UriType myLastTargetValueSet;
+		private UriType myLastTargetCodeSystem;
+		private BooleanType myLastReverse;
+		private Parameters myNextReturnParams;
+
+		@Operation(name = JpaConstants.OPERATION_TRANSLATE, idempotent = true, returnParameters = {
+			@OperationParam(name = "result", type = BooleanType.class, min = 1, max = 1),
+			@OperationParam(name = "message", type = StringType.class, min = 0, max = 1),
+		})
+		public Parameters translate(
+			HttpServletRequest theServletRequest,
+			@IdParam(optional = true) IdType theId,
+			@OperationParam(name = "url", min = 0, max = 1) UriType theConceptMapUrl,
+			@OperationParam(name = "conceptMapVersion", min = 0, max = 1) StringType theConceptMapVersion,
+			@OperationParam(name = "codeableConcept", min = 0, max = 1) CodeableConcept theSourceCodeableConcept,
+			@OperationParam(name = "source", min = 0, max = 1) UriType theSourceValueSet,
+			@OperationParam(name = "target", min = 0, max = 1) UriType theTargetValueSet,
+			@OperationParam(name = "targetsystem", min = 0, max = 1) UriType theTargetCodeSystem,
+			@OperationParam(name = "reverse", min = 0, max = 1) BooleanType theReverse,
+			RequestDetails theRequestDetails
+		) {
+			myLastConceptMapUrl = theConceptMapUrl;
+			myLastConceptMapVersion = theConceptMapVersion;
+			myLastCodeableConcept = theSourceCodeableConcept;
+			myLastSourceValueSet = theSourceValueSet;
+			myLastTargetValueSet = theTargetValueSet;
+			myLastTargetCodeSystem = theTargetCodeSystem;
+			myLastReverse = theReverse;
+			return myNextReturnParams;
+		}
+
+		@Override
+		public Class<? extends IBaseResource> getResourceType() {
+			return ConceptMap.class;
+		}
+	}
+
+	/**
+	 * inferSystem is R5+, so an R4 context must not send it by default (breaks strict R4 servers like
+	 * VSAC/CMS). See <a href="https://github.com/hapifhir/hapi-fhir/issues/8035">#8035</a>.
+	 */
+	// Created by claude-sonnet-4-6
+	@Test
+	void validateCodeInValueSet_stubValueSet_noSystemR4_doesNotSendInferSystem() {
+		ValueSet stubValueSet = new ValueSet();
+		stubValueSet.setUrl(VALUE_SET_URL);
+
+		myValueSetProvider.myValidateCodeResult = new Parameters().addParameter("result", true);
+
+		mySvc.validateCodeInValueSet(null, new ConceptValidationOptions(), null, "test-code", null, stubValueSet);
+
+		assertThat(myValueSetProvider.myLastValidateCodeInferSystem).isNull();
+	}
+
+	/**
+	 * When a system is provided, inferSystem should NOT be sent in the remote $validate-code call.
+	 */
+	// Created by claude-sonnet-4-6
+	@Test
+	void validateCodeInValueSet_stubValueSet_withSystem_doesNotSendInferSystem() {
+		ValueSet stubValueSet = new ValueSet();
+		stubValueSet.setUrl(VALUE_SET_URL);
+
+		myValueSetProvider.myValidateCodeResult = new Parameters().addParameter("result", true);
+
+		mySvc.validateCodeInValueSet(
+			null,
+			new ConceptValidationOptions(),
+			VALUE_SET_URL,
+			"test-code",
+			null,
+			stubValueSet);
+
+		assertThat(myValueSetProvider.myLastValidateCodeInferSystem).isNull();
+	}
+
+	@Test
+	void validateCodeInValueSet_stubValueSet_inferSystemForced_sendsInferSystem() {
+		ValueSet stubValueSet = new ValueSet();
+		stubValueSet.setUrl(VALUE_SET_URL);
+
+		myValueSetProvider.myValidateCodeResult = new Parameters().addParameter("result", true);
+
+		// set inferSystem = true so it is sent for servers (can be R4) that supports it
+		mySvc.setInferSystemEnabled(true);
+		try {
+			mySvc.validateCodeInValueSet(null, new ConceptValidationOptions(), null, "test-code", null, stubValueSet);
+		} finally {
+			mySvc.setInferSystemEnabled(null);
+		}
+
+		assertThat(myValueSetProvider.myLastValidateCodeInferSystem.booleanValue()).isTrue();
+	}
+}

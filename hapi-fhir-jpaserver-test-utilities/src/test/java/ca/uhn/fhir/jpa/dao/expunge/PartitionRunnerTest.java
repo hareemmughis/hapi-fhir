@@ -1,0 +1,319 @@
+package ca.uhn.fhir.jpa.dao.expunge;
+
+import ca.uhn.fhir.interceptor.api.HookParams;
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.api.config.JpaStorageSettings;
+import ca.uhn.fhir.jpa.dao.tx.HapiTransactionService;
+import ca.uhn.fhir.jpa.model.dao.JpaPid;
+import ca.uhn.fhir.jpa.partition.IRequestPartitionHelperSvc;
+import ca.uhn.fhir.jpa.svc.MockHapiTransactionService;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.api.server.storage.IResourcePersistentId;
+import ca.uhn.fhir.rest.server.servlet.ServletRequestDetails;
+import ca.uhn.test.concurrency.PointcutLatch;
+import com.google.common.collect.Sets;
+import org.apache.commons.lang3.builder.ToStringBuilder;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.transaction.support.TransactionCallback;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Consumer;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+public class PartitionRunnerTest {
+	private static final Logger ourLog = LoggerFactory.getLogger(PartitionRunnerTest.class);
+	private static final String TEST_THREADNAME_1 = "test-1";
+	private static final String TEST_THREADNAME_2 = "test-2";
+	private static final String TENANT_A = "TENANT_A";
+
+	@Mock
+	IRequestPartitionHelperSvc myRequestPartitionHelperSvc;
+
+	private final PointcutLatch myLatch = new PointcutLatch("partition call");
+
+	@AfterEach
+	public void before() {
+		myLatch.clear();
+	}
+
+	@Test
+	public void emptyList() {
+		List<IResourcePersistentId> resourceIds = buildPidList(0);
+		Consumer<List<IResourcePersistentId>> partitionConsumer = buildPartitionConsumer(myLatch);
+		myLatch.setExpectedCount(0);
+
+		getPartitionRunner().runInPartitionedThreads(resourceIds, partitionConsumer);
+		myLatch.clear();
+	}
+
+	private PartitionRunner getPartitionRunner() {
+		return getPartitionRunner(JpaStorageSettings.DEFAULT_EXPUNGE_BATCH_SIZE);
+	}
+
+	private PartitionRunner getPartitionRunner(int theBatchSize) {
+		return getPartitionRunner(theBatchSize, Runtime.getRuntime().availableProcessors());
+	}
+
+	private PartitionRunner getPartitionRunner(int theBatchSize, int theThreadCount) {
+		return new PartitionRunner("TEST", "test", theBatchSize, theThreadCount);
+	}
+
+	private PartitionRunner getPartitionRunner(HapiTransactionService theTransactionService,
+											   RequestDetails theRequestDetails,
+											   RequestPartitionId theRequestPartitionId) {
+		return new PartitionRunner("TEST", "test", JpaStorageSettings.DEFAULT_EXPUNGE_BATCH_SIZE,
+			Runtime.getRuntime().availableProcessors(), theTransactionService, myRequestPartitionHelperSvc,
+			theRequestDetails, theRequestPartitionId);
+	}
+
+	private List<IResourcePersistentId> buildPidList(int size) {
+		List<IResourcePersistentId> list = new ArrayList<>();
+		for (long i = 0; i < size; ++i) {
+			list.add(JpaPid.fromId(i + 1));
+		}
+		return list;
+	}
+
+	@Test
+	public void oneItem() throws InterruptedException {
+		List<IResourcePersistentId> resourceIds = buildPidList(1);
+
+		Consumer<List<IResourcePersistentId>> partitionConsumer = buildPartitionConsumer(myLatch);
+		myLatch.setExpectedCount(1);
+		getPartitionRunner().runInPartitionedThreads(resourceIds, partitionConsumer);
+		PartitionCall partitionCall = (PartitionCall) PointcutLatch.getLatchInvocationParameter(myLatch.awaitExpected());
+		assertEquals("main", partitionCall.threadName);
+		assertEquals(1, partitionCall.size);
+	}
+
+
+	@Test
+	public void twoItems() throws InterruptedException {
+		List<IResourcePersistentId> resourceIds = buildPidList(2);
+
+		Consumer<List<IResourcePersistentId>> partitionConsumer = buildPartitionConsumer(myLatch);
+		myLatch.setExpectedCount(1);
+		getPartitionRunner().runInPartitionedThreads(resourceIds, partitionConsumer);
+		PartitionCall partitionCall = (PartitionCall) PointcutLatch.getLatchInvocationParameter(myLatch.awaitExpected());
+		assertEquals("main", partitionCall.threadName);
+		assertEquals(2, partitionCall.size);
+	}
+
+	@Test
+	public void tenItemsBatch5() throws InterruptedException {
+		List<IResourcePersistentId> resourceIds = buildPidList(10);
+
+		Consumer<List<IResourcePersistentId>> partitionConsumer = buildPartitionConsumer(myLatch);
+		myLatch.setExpectedCount(2);
+		getPartitionRunner(5).runInPartitionedThreads(resourceIds, partitionConsumer);
+		List<HookParams> calls = myLatch.awaitExpected();
+		PartitionCall partitionCall1 = (PartitionCall) PointcutLatch.getLatchInvocationParameter(calls, 0);
+		assertThat(partitionCall1.threadName).isIn(TEST_THREADNAME_1, TEST_THREADNAME_2);
+		assertEquals(5, partitionCall1.size);
+		PartitionCall partitionCall2 = (PartitionCall) PointcutLatch.getLatchInvocationParameter(calls, 1);
+		assertThat(partitionCall2.threadName).isIn(TEST_THREADNAME_1, TEST_THREADNAME_2);
+		assertEquals(5, partitionCall2.size);
+		assertThat(partitionCall2.threadName).isNotEqualTo(partitionCall1.threadName);
+	}
+
+	@Test
+	public void nineItemsBatch5() throws InterruptedException {
+		List<IResourcePersistentId> resourceIds = buildPidList(9);
+
+		// We don't care in which order, but one partition size should be
+		// 5 and one should be 4
+		Set<Integer> nums = Sets.newHashSet(5, 4);
+
+		Consumer<List<IResourcePersistentId>> partitionConsumer = buildPartitionConsumer(myLatch);
+		myLatch.setExpectedCount(2);
+		getPartitionRunner(5).runInPartitionedThreads(resourceIds, partitionConsumer);
+		List<HookParams> calls = myLatch.awaitExpected();
+		PartitionCall partitionCall1 = (PartitionCall) PointcutLatch.getLatchInvocationParameter(calls, 0);
+		assertThat(partitionCall1.threadName).isIn(TEST_THREADNAME_1, TEST_THREADNAME_2);
+		assertEquals(true, nums.remove(partitionCall1.size));
+		PartitionCall partitionCall2 = (PartitionCall) PointcutLatch.getLatchInvocationParameter(calls, 1);
+		assertThat(partitionCall2.threadName).isIn(TEST_THREADNAME_1, TEST_THREADNAME_2);
+		assertEquals(true, nums.remove(partitionCall2.size));
+		assertThat(partitionCall2.threadName).isNotEqualTo(partitionCall1.threadName);
+	}
+
+
+
+	/**
+	 * See #5636 $expunge operation ignoring ExpungeThreadCount setting in certain cases
+	 */
+	@Test
+	public void testExpunge_withTasksSizeBiggerThanExecutorQueue_usesConfiguredNumberOfThreads() throws InterruptedException {
+		// setup
+		List<IResourcePersistentId> resourceIds = buildPidList(2500);
+		Consumer<List<IResourcePersistentId>> partitionConsumer = buildPartitionConsumer(myLatch);
+		// with batch size = 2 we expect 2500/2 runnableTasks to be created
+		myLatch.setExpectedCount(1250);
+
+		// execute
+		getPartitionRunner(2, 2).runInPartitionedThreads(resourceIds, partitionConsumer);
+		List<HookParams> calls = myLatch.awaitExpected();
+
+		// validate - only two threads should be used for execution
+		for (int i = 0; i < 1250; i++) {
+			PartitionCall partitionCall = (PartitionCall) PointcutLatch.getLatchInvocationParameter(calls, i);
+			assertThat(partitionCall.threadName).isIn(TEST_THREADNAME_1, TEST_THREADNAME_2);
+		}
+	}
+
+	@Test
+	public void tenItemsOneThread() throws InterruptedException {
+		List<IResourcePersistentId> resourceIds = buildPidList(10);
+
+		Consumer<List<IResourcePersistentId>> partitionConsumer = buildPartitionConsumer(myLatch);
+		myLatch.setExpectedCount(2);
+		getPartitionRunner(5, 1).runInPartitionedThreads(resourceIds, partitionConsumer);
+		List<HookParams> calls = myLatch.awaitExpected();
+		{
+			PartitionCall partitionCall = (PartitionCall) PointcutLatch.getLatchInvocationParameter(calls, 0);
+			assertEquals(TEST_THREADNAME_1, partitionCall.threadName);
+			assertEquals(5, partitionCall.size);
+		}
+		{
+			PartitionCall partitionCall = (PartitionCall) PointcutLatch.getLatchInvocationParameter(calls, 1);
+			assertEquals(TEST_THREADNAME_1, partitionCall.threadName);
+			assertEquals(5, partitionCall.size);
+		}
+	}
+
+	@ParameterizedTest
+	@NullSource
+	@ValueSource(ints = 1)
+	void runInPartitionedThreads_withRequestPartitionId_usesPartitionIdInTransaction(Integer thePartitionId)
+		throws InterruptedException {
+
+		// setup: create requestDetails and requestPartitionId
+		RequestDetails requestDetails = new ServletRequestDetails();
+		requestDetails.setTenantId(TENANT_A);
+		RequestPartitionId requestPartitionId = Optional.ofNullable(thePartitionId)
+			.map(RequestPartitionId::fromPartitionId).orElse(null);
+
+		// setup: create PartitionRunner and PartitionConsumer
+		CapturingMockTxService mockTxService = new CapturingMockTxService();
+		PartitionRunner partitionRunner = getPartitionRunner(mockTxService, requestDetails, requestPartitionId);
+		Consumer<List<IResourcePersistentId>> partitionConsumer = buildPartitionConsumer(myLatch);
+		myLatch.setExpectedCount(1);
+
+		// execute
+		partitionRunner.runInPartitionedThreads(buildPidList(1), partitionConsumer);
+
+		// verify partitionId and requestDetails
+		RequestPartitionId capturedRequestPartitionId = mockTxService.getRequestPartitionId();
+		if (thePartitionId == null) {
+			assertThat(capturedRequestPartitionId).isNull();
+		} else {
+			assertThat(capturedRequestPartitionId).isNotNull();
+			assertThat(capturedRequestPartitionId.getFirstPartitionIdOrNull()).isEqualTo(thePartitionId);
+		}
+		RequestDetails capturedRequestDetailsValue = mockTxService.getRequestDetails();
+		assertThat(capturedRequestDetailsValue.getTenantId()).isEqualTo(TENANT_A);
+
+		// verify the consumer was called
+		PartitionCall partitionCall = (PartitionCall) PointcutLatch.getLatchInvocationParameter(myLatch.awaitExpected());
+		assertEquals("main", partitionCall.threadName);
+		assertEquals(1, partitionCall.size);
+	}
+
+	@Test
+	void runInPartitionedThreads_withPartitionHelperSvc_determinesPartitionFromRequestDetails() throws InterruptedException {
+		// setup: create requestDetails and requestPartitionId
+		RequestDetails requestDetails = new ServletRequestDetails();
+		requestDetails.setTenantId(TENANT_A);
+		RequestPartitionId requestPartitionId = RequestPartitionId.fromPartitionId(2);
+		CapturingMockTxService mockTxService = new CapturingMockTxService();
+
+		// setup: create PartitionRunner and PartitionConsumer, mock determineGenericPartitionForRequest
+		when(myRequestPartitionHelperSvc.determineGenericPartitionForRequest(any())).thenReturn(requestPartitionId);
+		PartitionRunner partitionRunner = getPartitionRunner(mockTxService, requestDetails, null);
+		Consumer<List<IResourcePersistentId>> partitionConsumer = buildPartitionConsumer(myLatch);
+		myLatch.setExpectedCount(1);
+
+		// execute
+		partitionRunner.runInPartitionedThreads(buildPidList(1), partitionConsumer);
+
+		// verify partition helper was called to determine partition
+		verify(myRequestPartitionHelperSvc, times(1)).determineGenericPartitionForRequest(any());
+
+		// verify determined partition ID is used in transaction
+		assertEquals(requestPartitionId, mockTxService.getRequestPartitionId());
+
+		// verify request details are preserved
+		RequestDetails capturedRequestDetails = mockTxService.getRequestDetails();
+		assertThat(capturedRequestDetails.getTenantId()).isEqualTo(TENANT_A);
+
+		// verify the consumer was called
+		List<HookParams> calls = myLatch.awaitExpected();
+		PartitionCall partitionCall = (PartitionCall) PointcutLatch.getLatchInvocationParameter(calls, 0);
+		assertEquals("main", partitionCall.threadName);
+	}
+
+	/**
+	 * Overriding MockHapiTransactionService.doExecute() instead of mockito capturing
+	 * as ExecutionBuilder has protected access
+	 */
+	private static class CapturingMockTxService extends MockHapiTransactionService {
+		private RequestPartitionId myRequestPartitionId;
+		private RequestDetails myRequestDetails;
+
+		@Override
+		public <T> T doExecute(ExecutionBuilder theExecutionBuilder, TransactionCallback<T> theCallback) {
+			myRequestPartitionId = theExecutionBuilder.getRequestPartitionIdForTesting();
+			myRequestDetails = theExecutionBuilder.getRequestDetailsForTesting();
+			return super.doExecute(theExecutionBuilder, theCallback);
+		}
+
+		public RequestPartitionId getRequestPartitionId() {
+			return myRequestPartitionId;
+		}
+
+		public RequestDetails getRequestDetails() {
+			return myRequestDetails;
+		}
+	}
+
+	private Consumer<List<IResourcePersistentId>> buildPartitionConsumer(PointcutLatch latch) {
+		return list -> latch.call(new PartitionCall(Thread.currentThread().getName(), list.size()));
+	}
+
+	static class PartitionCall {
+		private final String threadName;
+		private final int size;
+
+		PartitionCall(String theThreadName, int theSize) {
+			threadName = theThreadName;
+			size = theSize;
+		}
+
+		@Override
+		public String toString() {
+			return new ToStringBuilder(this)
+				.append("myThreadName", threadName)
+				.append("mySize", size)
+				.toString();
+		}
+	}
+}

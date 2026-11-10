@@ -1,0 +1,615 @@
+/*-
+ * #%L
+ * HAPI FHIR JPA Server Test Utilities
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.test;
+
+import ca.uhn.fhir.batch2.api.IJobCoordinator;
+import ca.uhn.fhir.batch2.api.IJobMaintenanceService;
+import ca.uhn.fhir.batch2.api.IJobPersistence;
+import ca.uhn.fhir.batch2.api.IReductionStepExecutorService;
+import ca.uhn.fhir.batch2.coordinator.ReductionStepExecutorServiceImpl;
+import ca.uhn.fhir.batch2.model.JobInstance;
+import ca.uhn.fhir.batch2.model.JobWorkNotification;
+import ca.uhn.fhir.batch2.model.StatusEnum;
+import ca.uhn.fhir.broker.api.IChannelConsumer;
+import ca.uhn.fhir.broker.jms.SpringMessagingReceiverAdapter;
+import ca.uhn.fhir.jpa.batch.models.Batch2JobStartResponse;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.MethodOutcome;
+import com.google.common.annotations.VisibleForTesting;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.lang3.Validate;
+import org.awaitility.Awaitility;
+import org.awaitility.core.ConditionTimeoutException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.messaging.support.ExecutorSubscribableChannel;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.test.util.AopTestUtils;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.thymeleaf.util.ArrayUtils;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.time.Duration;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+public class Batch2JobHelper {
+	private static final Logger ourLog = LoggerFactory.getLogger(Batch2JobHelper.class);
+
+	private static final int BATCH_SIZE = 100;
+	public static final int DEFAULT_WAIT_DEADLINE = 30;
+	public static final Duration DEFAULT_WAIT_DURATION = Duration.of(DEFAULT_WAIT_DEADLINE, ChronoUnit.SECONDS);
+	private static final Duration BATCH2_IDLE_DURATION = Duration.ofMillis(50);
+
+	private final IJobMaintenanceService myJobMaintenanceService;
+	private final IJobCoordinator myJobCoordinator;
+	private final IJobPersistence myJobPersistence;
+	@Nullable
+	private final IChannelConsumer<JobWorkNotification> myWorkChannelConsumer;
+	@Nullable
+	private final IReductionStepExecutorService myReductionStepExecutorService;
+
+	/**
+	 * Creates a helper that cannot use {@link #awaitNoInFlightWork()}.
+	 */
+	public Batch2JobHelper(IJobMaintenanceService theJobMaintenanceService, IJobCoordinator theJobCoordinator, IJobPersistence theJobPersistence) {
+		myJobMaintenanceService = theJobMaintenanceService;
+		myJobCoordinator = theJobCoordinator;
+		myJobPersistence = theJobPersistence;
+		myWorkChannelConsumer = null;
+		myReductionStepExecutorService = null;
+	}
+
+	/**
+	 * Creates a helper that can also wait for running batch2 work with {@link #awaitNoInFlightWork()}.
+	 */
+	public Batch2JobHelper(
+			IJobMaintenanceService theJobMaintenanceService,
+			IJobCoordinator theJobCoordinator,
+			IJobPersistence theJobPersistence,
+			@Nonnull IChannelConsumer<JobWorkNotification> theWorkChannelConsumer,
+			@Nonnull IReductionStepExecutorService theReductionStepExecutorService) {
+		myJobMaintenanceService = theJobMaintenanceService;
+		myJobCoordinator = theJobCoordinator;
+		myJobPersistence = theJobPersistence;
+		myWorkChannelConsumer = Validate.notNull(theWorkChannelConsumer, "theWorkChannelConsumer must not be null");
+		myReductionStepExecutorService =
+				Validate.notNull(theReductionStepExecutorService, "theReductionStepExecutorService must not be null");
+	}
+
+	public JobInstance awaitJobCompletion(Batch2JobStartResponse theStartResponse) {
+		return awaitJobCompletion(theStartResponse.getInstanceId());
+	}
+
+	public JobInstance awaitJobCompletion(String theBatchJobId) {
+		return awaitJobHasStatus(theBatchJobId, StatusEnum.COMPLETED);
+	}
+
+	public JobInstance awaitJobCompletionWithoutMaintenancePass(String theBatchJobId) {
+		return awaitJobHasStatusWithoutMaintenancePass(theBatchJobId, StatusEnum.COMPLETED);
+	}
+
+	public JobInstance awaitJobCancelled(String theInstanceId) {
+		return awaitJobHasStatus(theInstanceId, StatusEnum.CANCELLED);
+	}
+
+	public JobInstance awaitJobCompletion(String theInstanceId, int theSecondsToWait) {
+		return awaitJobHasStatus(theInstanceId, theSecondsToWait, StatusEnum.COMPLETED);
+	}
+
+	public JobInstance awaitJobHasStatus(String theInstanceId, StatusEnum... theExpectedStatus) {
+		return awaitJobHasStatus(theInstanceId, DEFAULT_WAIT_DEADLINE, theExpectedStatus);
+	}
+
+	public JobInstance awaitJobHasStatusWithoutMaintenancePass(String theInstanceId, StatusEnum... theExpectedStatus) {
+		return awaitJobawaitJobHasStatusWithoutMaintenancePass(theInstanceId, DEFAULT_WAIT_DEADLINE, theExpectedStatus);
+	}
+
+	public JobInstance awaitJobHasStatus(String theInstanceId, int theSecondsToWait, StatusEnum... theExpectedStatus) {
+		assert !TransactionSynchronizationManager.isActualTransactionActive();
+
+		AtomicInteger checkCount = new AtomicInteger();
+		try {
+			await()
+				.atMost(theSecondsToWait, TimeUnit.SECONDS)
+				.pollDelay(100, TimeUnit.MILLISECONDS)
+				.until(() -> {
+					checkCount.getAndIncrement();
+					boolean inFinalStatus = false;
+					if (ArrayUtils.contains(theExpectedStatus, StatusEnum.COMPLETED) && !ArrayUtils.contains(theExpectedStatus, StatusEnum.FAILED)) {
+						inFinalStatus = hasStatus(theInstanceId, StatusEnum.FAILED);
+					}
+					if (ArrayUtils.contains(theExpectedStatus, StatusEnum.FAILED) && !ArrayUtils.contains(theExpectedStatus, StatusEnum.COMPLETED)) {
+						inFinalStatus = hasStatus(theInstanceId, StatusEnum.COMPLETED);
+					}
+					boolean retVal = checkStatusWithMaintenancePass(theInstanceId, theExpectedStatus);
+					if (!retVal && inFinalStatus) {
+						// Fail fast - If we hit one of these statuses and it's not the one we want, abort
+						throw new ConditionTimeoutException("Already in failed/completed status");
+					}
+					return retVal;
+				});
+		} catch (ConditionTimeoutException e) {
+			String statuses = myJobPersistence.fetchInstances(100, 0)
+				.stream()
+				.map(t -> t.getInstanceId() + " " + t.getJobDefinitionId() + "/" + t.getStatus().name())
+				.collect(Collectors.joining("\n"));
+			JobInstance instance = myJobCoordinator.getInstance(theInstanceId);
+			String currentStatus = instance.getStatus().name();
+			String message = "Job " + theInstanceId + " still has status " + currentStatus
+				+ " after " + checkCount.get() + " checks in " + theSecondsToWait + " seconds."
+				+ " - All statuses:\n" + statuses;
+			if (isNotBlank(instance.getErrorMessage())) {
+				message += "\nError message: " + instance.getErrorMessage();
+			}
+			fail(message);
+		}
+		return myJobCoordinator.getInstance(theInstanceId);
+	}
+
+	public JobInstance awaitJobawaitJobHasStatusWithoutMaintenancePass(String theBatchJobId, int theSecondsToWait, StatusEnum... theExpectedStatus) {
+		assert !TransactionSynchronizationManager.isActualTransactionActive();
+
+		try {
+			await()
+				.atMost(theSecondsToWait, TimeUnit.SECONDS)
+				.until(() -> hasStatus(theBatchJobId, theExpectedStatus));
+		} catch (ConditionTimeoutException e) {
+			String statuses = myJobPersistence.fetchInstances(100, 0)
+				.stream()
+				.map(t -> t.getJobDefinitionId() + "/" + t.getStatus().name())
+				.collect(Collectors.joining("\n"));
+			String currentStatus = myJobCoordinator.getInstance(theBatchJobId).getStatus().name();
+			fail("Job still has status " + currentStatus + " - All statuses:\n" + statuses);
+		}
+		return myJobCoordinator.getInstance(theBatchJobId);
+	}
+
+	private boolean checkStatusWithMaintenancePass(String theInstanceId, StatusEnum... theExpectedStatuses) {
+		if (hasStatus(theInstanceId, theExpectedStatuses)) {
+			return true;
+		}
+		myJobMaintenanceService.runActiveJobMaintenancePass();
+		return hasStatus(theInstanceId, theExpectedStatuses);
+	}
+
+	private boolean hasStatus(String theInstanceId, StatusEnum... theExpectedStatuses) {
+		StatusEnum status = getStatus(theInstanceId);
+		ourLog.debug("Checking status of {} in {}: is {}", theInstanceId, theExpectedStatuses, status);
+		return ArrayUtils.contains(theExpectedStatuses, status);
+	}
+
+	private StatusEnum getStatus(String theInstanceId) {
+		return myJobCoordinator.getInstance(theInstanceId).getStatus();
+	}
+
+	public JobInstance awaitJobFailure(Batch2JobStartResponse theStartResponse) {
+		return awaitJobFailure(theStartResponse.getInstanceId());
+	}
+
+	public JobInstance awaitJobFailure(String theInstanceId) {
+		return awaitJobHasStatus(theInstanceId, StatusEnum.ERRORED, StatusEnum.FAILED);
+	}
+
+	public void awaitJobHasStatusWithForcedMaintenanceRuns(String theInstanceId, StatusEnum... theStatusEnums) {
+		AtomicInteger counter = new AtomicInteger();
+		Duration waitDuration = DEFAULT_WAIT_DURATION;
+		try {
+			await()
+				.atMost(waitDuration)
+				.until(() -> {
+					counter.getAndIncrement();
+					forceRunActiveJobMaintenancePass();
+					return hasStatus(theInstanceId, theStatusEnums);
+				});
+		} catch (ConditionTimeoutException ex) {
+			StatusEnum status = getStatus(theInstanceId);
+			fail(String.format(
+				"Job %s has state %s after %s timeout and %d checks",
+				theInstanceId,
+				status.name(),
+				waitDuration,
+				counter.get()
+			), ex);
+		}
+	}
+
+	public void awaitJobInProgress(String theInstanceId) {
+		Duration waitDuration = DEFAULT_WAIT_DURATION;
+		try {
+			await()
+				.atMost(waitDuration)
+				.until(() -> checkStatusWithMaintenancePass(theInstanceId, StatusEnum.IN_PROGRESS));
+		} catch (ConditionTimeoutException ex) {
+			StatusEnum statusEnum = getStatus(theInstanceId);
+			String msg = String.format("Job %s still has status %s after %s seconds.",
+				theInstanceId,
+				statusEnum.name(),
+				waitDuration);
+			fail(msg);
+		}
+	}
+
+	public void assertNotFastTracking(String theInstanceId) {
+		assertFalse(myJobCoordinator.getInstance(theInstanceId).isFastTracking());
+	}
+
+	public void assertFastTracking(String theInstanceId) {
+		assertTrue(myJobCoordinator.getInstance(theInstanceId).isFastTracking());
+	}
+
+	public void awaitGatedStepId(String theExpectedGatedStepId, String theInstanceId) {
+		try {
+			await().until(() -> {
+				String currentGatedStepId = myJobCoordinator.getInstance(theInstanceId).getCurrentGatedStepId();
+				return theExpectedGatedStepId.equals(currentGatedStepId);
+			});
+		} catch (ConditionTimeoutException ex) {
+			JobInstance instance = myJobCoordinator.getInstance(theInstanceId);
+			String msg = String.format("Instance %s of Job %s never got to step %s. Current step %s, current status %s.",
+				theInstanceId,
+				instance.getJobDefinitionId(),
+				theExpectedGatedStepId,
+				instance.getCurrentGatedStepId(),
+				instance.getStatus().name());
+			fail(msg);
+		}
+	}
+
+	public long getCombinedRecordsProcessed(String theInstanceId) {
+		JobInstance job = myJobCoordinator.getInstance(theInstanceId);
+		return job.getCombinedRecordsProcessed();
+	}
+
+	/**
+	 * Awaits completion of all active (non-terminal) jobs for the given job definition ID.
+	 * Jobs that have already reached a terminal state (COMPLETED, FAILED, or CANCELLED) are
+	 * ignored, since stale FAILED/CANCELLED jobs from previous tests should not cause the
+	 * current test to fail.
+	 */
+	public void awaitAllJobsOfJobDefinitionIdToComplete(String theJobDefinitionId) {
+		// fetch all jobs of any status type
+		List<JobInstance> instances = myJobCoordinator.getJobInstancesByJobDefinitionId(
+			theJobDefinitionId,
+			BATCH_SIZE,
+			0);
+		// Only wait for jobs that haven't reached a terminal state yet.
+		// Stale FAILED/CANCELLED jobs from previous tests should not cause the current test to fail.
+		List<JobInstance> activeInstances = instances.stream()
+			.filter(i -> !i.getStatus().isEnded())
+			.toList();
+		awaitJobCompletions(activeInstances);
+	}
+
+	protected void awaitJobCompletions(Collection<JobInstance> theJobInstances) {
+		// This intermittently fails for unknown reasons, so I've added a bunch
+		// of extra junk here to improve what we output when it fails
+		for (JobInstance jobInstance : theJobInstances) {
+			try {
+				awaitJobCompletion(jobInstance.getInstanceId());
+			} catch (ConditionTimeoutException e) {
+				StringBuilder msg = new StringBuilder();
+				msg.append("Failed waiting for job to complete.\n");
+				msg.append("Error: ").append(e).append("\n");
+				msg.append("Statuses:");
+				for (JobInstance instance : theJobInstances) {
+					msg.append("\n * Execution ")
+						.append(instance.getInstanceId())
+						.append(" has status ")
+						.append(instance.getStatus());
+				}
+				fail(msg.toString());
+			}
+		}
+	}
+
+	public List<JobInstance> findJobsByDefinition(String theJobDefinitionId) {
+		return myJobCoordinator.getInstancesbyJobDefinitionIdAndEndedStatus(theJobDefinitionId, null, 100, 0);
+	}
+
+	public void awaitNoJobsRunning() {
+		awaitNoJobsRunning(false);
+	}
+
+	public boolean hasRunningJobs() {
+		HashMap<String, String> map = new HashMap<>();
+		// Use IJobPersistence: IJobCoordinator throws for jobs whose definition is not registered,
+		// which some tests create
+		List<JobInstance> jobs = fetchAllNotEndedInstances();
+		// "All Jobs" assumes at least one job exists
+		if (jobs.isEmpty()) {
+			return false;
+		}
+
+		for (JobInstance job : jobs) {
+			if (!job.getStatus().isEnded()) {
+				map.put(job.getInstanceId(), job.getJobDefinitionId() + " : " + job.getStatus().name());
+			}
+		}
+
+		if (!map.isEmpty()) {
+			ourLog.warn("Found Running Jobs {}",map.keySet().stream().map(k -> k + " : " + map.get(k)).collect(Collectors.joining("\n")));
+
+			return true;
+		}
+		return false;
+	}
+
+	public void awaitNoJobsRunning(boolean theExpectAtLeastOneJobToExist) {
+		HashMap<String, String> map = new HashMap<>();
+		Awaitility.await().atMost(DEFAULT_WAIT_DURATION)
+			.until(() -> {
+				myJobMaintenanceService.runActiveJobMaintenancePass();
+
+				boolean foundAtLeastOneJob = false;
+				for (int pageIndex = 0; ; pageIndex++) {
+
+					List<JobInstance> jobs = myJobCoordinator.getInstances(1000, pageIndex);
+					for (JobInstance job : jobs) {
+						foundAtLeastOneJob = true;
+						if (!job.getStatus().isEnded()) {
+							map.put(job.getInstanceId(), job.getStatus().name());
+						} else {
+							map.remove(job.getInstanceId());
+						}
+					}
+
+					if (jobs.isEmpty()) {
+						break;
+					}
+
+				}
+
+				// "All Jobs" assumes at least one job exists
+				if (theExpectAtLeastOneJobToExist && !foundAtLeastOneJob) {
+					ourLog.warn("No jobs found yet...");
+					return false;
+				}
+
+				return map.isEmpty();
+			});
+
+
+		if (!map.isEmpty()) {
+			String msg = map.entrySet().stream().map(e -> e.getKey() + "=" + e.getValue()).collect(Collectors.joining(", \n "));
+			ourLog.info("The following jobs did not complete as expected: {}", msg);
+		}
+	}
+
+	/**
+	 * @deprecated Use {@link #runActiveJobMaintenancePass()} instead
+	 */
+	@Deprecated(since = "8.12.0", forRemoval = true)
+	public void runMaintenancePass() {
+		myJobMaintenanceService.runActiveJobMaintenancePass();
+	}
+
+	public void runActiveJobMaintenancePass() {
+		myJobMaintenanceService.runActiveJobMaintenancePass();
+	}
+
+	public void runEndedJobMaintenancePass() {
+		myJobMaintenanceService.runEndedJobMaintenancePass();
+	}
+
+	@VisibleForTesting
+	public void enableMaintenanceRunner(boolean theEnabled) {
+		myJobMaintenanceService.enableMaintenance(theEnabled);
+	}
+
+	/**
+	 * Forces a run of the maintenance pass without waiting for
+	 * the semaphore to release
+	 */
+	public void forceRunActiveJobMaintenancePass() {
+		myJobMaintenanceService.forceActiveJobMaintenancePass();
+	}
+
+	/**
+	 * Cancels every job that has not finished. It does not wait: a cancelled job only stops later, and work it has
+	 * already started keeps running. Call {@link #awaitNoInFlightWork()} to wait for that.
+	 */
+	public void cancelAllJobs() {
+		for (JobInstance next : fetchAllNotEndedInstances()) {
+			myJobPersistence.cancelInstance(next.getInstanceId());
+		}
+	}
+
+	/**
+	 * Same as {@link #cancelAllJobs()}. Despite the name, it does not wait for the cancellation.
+	 *
+	 * @deprecated Use {@link #cancelAllJobs()}, then {@link #awaitNoInFlightWork()} if the caller needs to wait.
+	 */
+	@Deprecated(since = "8.14.0", forRemoval = true)
+	public void cancelAllJobsAndAwaitCancellation() {
+		cancelAllJobs();
+	}
+
+	/**
+	 * Waits for a maintenance pass that is already running to finish. Such a pass can still send work to the
+	 * workers after {@link #awaitNoInFlightWork()} has returned, so call this first. It does not stop later passes
+	 * from starting, so pause the schedulers before calling it.
+	 *
+	 * @throws ca.uhn.fhir.rest.server.exceptions.InternalErrorException if the pass does not finish within the
+	 * maintenance service's hold timeout
+	 */
+	public void awaitMaintenancePassToFinish() {
+		try (Closeable ignored = myJobMaintenanceService.holdJobMaintenanceForExpunge()) {
+			// Acquiring the hold waits for the running pass; closing it lets maintenance resume
+		} catch (IOException e) {
+			throw new UncheckedIOException(e);
+		}
+	}
+
+	/**
+	 * Runs {@code theStopBatch2}, then {@code theCleanup}, then always {@code theRestartSchedulers}.
+	 * <p>
+	 * If {@code theStopBatch2} fails, {@code theCleanup} still runs so the next test starts clean, and the failure
+	 * is thrown afterwards. If {@code theCleanup} fails as well, its exception is thrown and the stop failure is
+	 * attached to it as suppressed.
+	 * </p>
+	 */
+	static void runCleanupWithBatch2Stopped(
+			Runnable theStopBatch2, Runnable theCleanup, Runnable theRestartSchedulers) {
+		RuntimeException stopFailure = null;
+		try {
+			try {
+				theStopBatch2.run();
+			} catch (RuntimeException e) {
+				stopFailure = e;
+			}
+			theCleanup.run();
+		} catch (RuntimeException | Error e) {
+			if (stopFailure != null) {
+				e.addSuppressed(stopFailure);
+			}
+			throw e;
+		} finally {
+			theRestartSchedulers.run();
+		}
+		if (stopFailure != null) {
+			throw stopFailure;
+		}
+	}
+
+	/**
+	 * Waits until batch2 has no work queued or running and the reducer is idle, so that nothing writes to the
+	 * database while a test cleans it up.
+	 * <p>
+	 * It does not stop new work from starting, so pause the schedulers first. A maintenance pass that was already
+	 * running when they paused is not waited for; call {@link #awaitMaintenancePassToFinish()} before this.
+	 * </p>
+	 * <p>
+	 * Batch2 has to stay idle for 50 ms in a row, because work passing from the queue to a worker thread is
+	 * briefly invisible.
+	 * </p>
+	 *
+	 * @throws IllegalStateException if this helper was created without the work channel and reducer, or cannot
+	 * inspect them
+	 * @throws ConditionTimeoutException if work is still running after {@link #DEFAULT_WAIT_DURATION}
+	 */
+	public void awaitNoInFlightWork() {
+		awaitNoInFlightWork(DEFAULT_WAIT_DURATION);
+	}
+
+	/**
+	 * Same as {@link #awaitNoInFlightWork()}, with a custom timeout.
+	 */
+	public void awaitNoInFlightWork(Duration theTimeout) {
+		Validate.validState(
+				myWorkChannelConsumer != null && myReductionStepExecutorService != null,
+				"This Batch2JobHelper was built without the work channel consumer and reduction step executor");
+		ThreadPoolTaskExecutor workChannelExecutor = getWorkChannelExecutor(myWorkChannelConsumer);
+		ReductionStepExecutorServiceImpl reducer = getReducer(myReductionStepExecutorService);
+
+		await().pollDelay(Duration.ZERO)
+			.pollInterval(Duration.ofMillis(10))
+			.during(BATCH2_IDLE_DURATION)
+			.atMost(theTimeout)
+			.untilAsserted(() -> assertThat(describeInFlightWork(workChannelExecutor, reducer))
+				.as("batch2 work still in flight")
+				.isEmpty());
+	}
+
+	/**
+	 * Reads every page, not just the first. Batch2 keeps running while this reads, so a job that ends in the
+	 * meantime leaves the not-ended set and can shift a later job onto a page already read; that job is then
+	 * missed. This only matters with more than one page (1000 jobs).
+	 */
+	private List<JobInstance> fetchAllNotEndedInstances() {
+		List<JobInstance> retVal = new ArrayList<>();
+		for (int pageIndex = 0; ; pageIndex++) {
+			List<JobInstance> page = myJobPersistence.fetchInstances(1000, pageIndex, StatusEnum.getNotEndedStatuses());
+			if (page.isEmpty()) {
+				return retVal;
+			}
+			retVal.addAll(page);
+		}
+	}
+
+	private static List<String> describeInFlightWork(
+			ThreadPoolTaskExecutor theWorkChannelExecutor, ReductionStepExecutorServiceImpl theReducer) {
+		List<String> retVal = new ArrayList<>();
+		int running = theWorkChannelExecutor.getActiveCount();
+		int queued = theWorkChannelExecutor.getQueueSize();
+		if (running > 0 || queued > 0) {
+			retVal.add("work channel has " + running + " running and " + queued + " queued work chunks");
+		}
+		if (!theReducer.isIdleForUnitTest()) {
+			retVal.add("reducer is running or waiting to run a reduction step");
+		}
+		return retVal;
+	}
+
+	private static ThreadPoolTaskExecutor getWorkChannelExecutor(
+			IChannelConsumer<JobWorkNotification> theWorkChannelConsumer) {
+		if (theWorkChannelConsumer instanceof SpringMessagingReceiverAdapter<?> adapter
+				&& adapter.getSpringMessagingChannelReceiver() instanceof ExecutorSubscribableChannel channel
+				&& channel.getExecutor() instanceof ThreadPoolTaskExecutor executor) {
+			return executor;
+		}
+		throw new IllegalStateException(
+				"Cannot see the worker threads of batch2 work channel consumer " + theWorkChannelConsumer);
+	}
+
+	private static ReductionStepExecutorServiceImpl getReducer(
+			IReductionStepExecutorService theReductionStepExecutorService) {
+		if (AopTestUtils.getUltimateTargetObject(theReductionStepExecutorService)
+				instanceof ReductionStepExecutorServiceImpl reducer) {
+			return reducer;
+		}
+		throw new IllegalStateException(
+				"Cannot see the state of reduction step executor " + theReductionStepExecutorService);
+	}
+
+	/**
+	 * Given the contents of a <code>Content-Location</code> header coming back from a Bulk Modification
+	 * initiation request, determine the job ID
+	 */
+	@Nonnull
+	public static String getJobIdFromPollingLocation(String thePollingLocation) {
+		return thePollingLocation.substring(thePollingLocation.indexOf("_jobId=") + 7);
+	}
+
+	/**
+	 * Given a MethodOutcome coming back from a client-initiated Bulk Modification
+	 * initiation request, determine the job ID
+	 */
+	@Nonnull
+	public static String getJobIdFromPollingLocation(MethodOutcome theMethodOutcome) {
+		return getJobIdFromPollingLocation(theMethodOutcome.getFirstResponseHeader(Constants.HEADER_CONTENT_LOCATION).orElseThrow());
+	}
+}

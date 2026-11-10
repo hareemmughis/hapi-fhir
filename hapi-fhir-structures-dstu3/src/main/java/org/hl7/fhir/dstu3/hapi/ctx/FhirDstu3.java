@@ -1,5 +1,3 @@
-package org.hl7.fhir.dstu3.hapi.ctx;
-
 /*
  * #%L
  * HAPI FHIR Structures - DSTU2 (FHIR v1.0.0)
@@ -9,9 +7,9 @@ package org.hl7.fhir.dstu3.hapi.ctx;
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
- *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,63 +17,35 @@ package org.hl7.fhir.dstu3.hapi.ctx;
  * limitations under the License.
  * #L%
  */
-
-import java.io.InputStream;
-import java.util.Date;
-import java.util.List;
-
-import org.apache.commons.lang3.StringUtils;
-import org.hl7.fhir.dstu3.hapi.fluentpath.FluentPathDstu3;
-import org.hl7.fhir.dstu3.hapi.rest.server.Dstu3BundleFactory;
-import org.hl7.fhir.dstu3.hapi.rest.server.ServerCapabilityStatementProvider;
-import org.hl7.fhir.dstu3.hapi.rest.server.ServerProfileProvider;
-import org.hl7.fhir.dstu3.hapi.validation.DefaultProfileValidationSupport;
-import org.hl7.fhir.dstu3.model.Coding;
-import org.hl7.fhir.dstu3.model.Constants;
-import org.hl7.fhir.dstu3.model.IdType;
-import org.hl7.fhir.dstu3.model.Reference;
-import org.hl7.fhir.dstu3.model.Resource;
-import org.hl7.fhir.dstu3.model.StructureDefinition;
-import org.hl7.fhir.instance.model.api.IBaseCoding;
-import org.hl7.fhir.instance.model.api.IBaseReference;
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.hl7.fhir.instance.model.api.IIdType;
-import org.hl7.fhir.instance.model.api.IPrimitiveType;
+package org.hl7.fhir.dstu3.hapi.ctx;
 
 import ca.uhn.fhir.context.ConfigurationException;
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.context.FhirVersionEnum;
 import ca.uhn.fhir.context.RuntimeResourceDefinition;
-import ca.uhn.fhir.context.support.IContextValidationSupport;
-import ca.uhn.fhir.fluentpath.IFluentPath;
+import ca.uhn.fhir.fhirpath.IFhirPath;
+import ca.uhn.fhir.i18n.Msg;
 import ca.uhn.fhir.model.api.IFhirVersion;
 import ca.uhn.fhir.model.primitive.IdDt;
-import ca.uhn.fhir.rest.server.IResourceProvider;
-import ca.uhn.fhir.rest.server.IVersionSpecificBundleFactory;
-import ca.uhn.fhir.rest.server.RestfulServer;
+import ca.uhn.fhir.rest.api.IVersionSpecificBundleFactory;
+import ca.uhn.fhir.util.ReflectionUtil;
+import org.apache.commons.lang3.StringUtils;
+import org.hl7.fhir.dstu3.hapi.fluentpath.FhirPathDstu3;
+import org.hl7.fhir.dstu3.hapi.rest.server.Dstu3BundleFactory;
+import org.hl7.fhir.dstu3.model.*;
+import org.hl7.fhir.instance.model.api.*;
+
+import java.io.InputStream;
+import java.util.Date;
+import java.util.List;
 
 public class FhirDstu3 implements IFhirVersion {
 
 	private String myId;
 
 	@Override
-	public IFluentPath createFluentPathExecutor(FhirContext theFhirContext) {
-		return new FluentPathDstu3(theFhirContext);
-	}
-
-	@Override
-	public ServerCapabilityStatementProvider createServerConformanceProvider(RestfulServer theServer) {
-		return new ServerCapabilityStatementProvider(theServer);
-	}
-
-	@Override
-	public IResourceProvider createServerProfilesProvider(RestfulServer theRestfulServer) {
-		return new ServerProfileProvider(theRestfulServer);
-	}
-
-	@Override
-	public IContextValidationSupport<?, ?, ?, ?, ?, ?> createValidationSupport() {
-		return new DefaultProfileValidationSupport();
+	public IFhirPath createFhirPathExecutor(FhirContext theFhirContext) {
+		return new FhirPathDstu3(theFhirContext);
 	}
 
 	@Override
@@ -101,12 +71,13 @@ public class FhirDstu3 implements IFhirVersion {
 
 	@Override
 	public InputStream getFhirVersionPropertiesFile() {
-		InputStream str = FhirDstu3.class.getResourceAsStream("/org/hl7/fhir/dstu3/model/fhirversion.properties");
+		InputStream str = FhirDstu3.class.getResourceAsStream("/org/hl7/fhir/dstu3/hapi/model/fhirversion.properties");
 		if (str == null) {
-			str = FhirDstu3.class.getResourceAsStream("/org/hl7/fhir/dstu3/model/fhirversion.properties");
+			str = FhirDstu3.class.getResourceAsStream("/org/hl7/fhir/dstu3/hapi/model/fhirversion.properties");
 		}
 		if (str == null) {
-			throw new ConfigurationException("Can not find model property file on classpath: " + "/ca/uhn/fhir/model/dstu3/fhirversion.properties");
+			throw new ConfigurationException(Msg.code(609) + "Can not find model property file on classpath: "
+					+ "/org/hl7/fhir/dstu3/hapi/model/fhirversion.properties");
 		}
 		return str;
 	}
@@ -115,15 +86,20 @@ public class FhirDstu3 implements IFhirVersion {
 	public IPrimitiveType<Date> getLastUpdated(IBaseResource theResource) {
 		return ((Resource) theResource).getMeta().getLastUpdatedElement();
 	}
-	
+
 	@Override
 	public String getPathToSchemaDefinitions() {
-		return "/org/hl7/fhir/instance/model/dstu3/schema";
+		return "/org/hl7/fhir/dstu3/model/schema";
 	}
 
 	@Override
 	public Class<? extends IBaseReference> getResourceReferenceType() {
 		return Reference.class;
+	}
+
+	@Override
+	public Object getServerVersion() {
+		return ReflectionUtil.newInstanceOfFhirServerType("org.hl7.fhir.dstu3.hapi.ctx.FhirServerDstu3");
 	}
 
 	@Override
@@ -145,5 +121,4 @@ public class FhirDstu3 implements IFhirVersion {
 	public IIdType newIdType() {
 		return new IdType();
 	}
-
 }

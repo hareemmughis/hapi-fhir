@@ -1,16 +1,16 @@
 package ca.uhn.fhir.rest.client;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.fail;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
-import java.io.StringReader;
-import java.nio.charset.Charset;
-
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.model.api.ResourceMetadataKeyEnum;
+import ca.uhn.fhir.model.dstu2.resource.Patient;
+import ca.uhn.fhir.model.primitive.IdDt;
+import ca.uhn.fhir.model.primitive.InstantDt;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import ca.uhn.fhir.rest.client.api.ServerValidationModeEnum;
+import ca.uhn.fhir.rest.server.exceptions.NotModifiedException;
+import ca.uhn.fhir.rest.server.exceptions.PreconditionFailedException;
+import ca.uhn.fhir.util.TestUtil;
 import org.apache.commons.io.input.ReaderInputStream;
 import org.apache.http.Header;
 import org.apache.http.HttpResponse;
@@ -19,24 +19,21 @@ import org.apache.http.client.HttpClient;
 import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.message.BasicHeader;
 import org.apache.http.message.BasicStatusLine;
-import org.hamcrest.core.StringContains;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.internal.stubbing.defaultanswers.ReturnsDeepStubs;
 
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.model.api.ResourceMetadataKeyEnum;
-import ca.uhn.fhir.model.api.TagList;
-import ca.uhn.fhir.model.dstu2.resource.Patient;
-import ca.uhn.fhir.model.primitive.IdDt;
-import ca.uhn.fhir.model.primitive.InstantDt;
-import ca.uhn.fhir.rest.server.Constants;
-import ca.uhn.fhir.rest.server.exceptions.NotModifiedException;
-import ca.uhn.fhir.rest.server.exceptions.PreconditionFailedException;
-import ca.uhn.fhir.util.TestUtil;
+import java.io.StringReader;
+import java.nio.charset.Charset;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Created by dsotnikov on 2/25/2014.
@@ -48,13 +45,12 @@ public class ETagClientDstu2Test {
 
 	private HttpResponse myHttpResponse;
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
-
-	@Before
+	@BeforeEach
 	public void before() {
 
 		myHttpClient = mock(HttpClient.class, new ReturnsDeepStubs());
@@ -98,7 +94,6 @@ public class ETagClientDstu2Test {
 		Header[] headers = new Header[] { 
 				new BasicHeader(Constants.HEADER_LAST_MODIFIED, "Wed, 15 Nov 1995 04:58:08 GMT"),
 				new BasicHeader(Constants.HEADER_CONTENT_LOCATION, "http://foo.com/Patient/123/_history/2333"),
-				new BasicHeader(Constants.HEADER_CATEGORY, "http://foo/tagdefinition.html; scheme=\"http://hl7.org/fhir/tag\"; label=\"Some tag\""),
 				new BasicHeader(Constants.HEADER_ETAG, "\"9999\"")
 				};
 		//@formatter:on
@@ -114,12 +109,6 @@ public class ETagClientDstu2Test {
 		lm.setTimeZoneZulu(true);
 		assertEquals("1995-11-15T04:58:08.000Z", lm.getValueAsString());
 
-		TagList tags = ResourceMetadataKeyEnum.TAG_LIST.get(response);
-		assertNotNull(tags);
-		assertEquals(1, tags.size());
-		assertEquals("http://foo/tagdefinition.html", tags.get(0).getTerm());
-		assertEquals("http://hl7.org/fhir/tag", tags.get(0).getScheme());
-		assertEquals("Some tag", tags.get(0).getLabel());
 	}
 
 	@Test
@@ -141,8 +130,7 @@ public class ETagClientDstu2Test {
 				.resource(Patient.class)
 				.withId(new IdDt("Patient/1234"))
 				.execute();
-			fail();
-		} catch (NotModifiedException e) {
+			fail();		} catch (NotModifiedException e) {
 			// good!
 		}
 		//@formatter:on
@@ -159,7 +147,7 @@ public class ETagClientDstu2Test {
 			.ifVersionMatches("9876").returnResource(expected)
 			.execute();
 		//@formatter:on
-		assertSame(expected, response);
+		assertThat(response).isSameAs(expected);
 		assertEquals("http://example.com/fhir/Patient/1234", capt.getAllValues().get(count).getURI().toString());
 		assertEquals("\"9876\"", capt.getAllValues().get(count).getHeaders(Constants.HEADER_IF_NONE_MATCH_LC)[0].getValue());
 		count++;
@@ -198,7 +186,7 @@ public class ETagClientDstu2Test {
 		.execute();
 		//@formatter:on
 		assertEquals("http://example.com/fhir/Patient/1234", capt.getAllValues().get(count).getURI().toString());
-		assertEquals("\"9876\"", capt.getAllValues().get(count).getHeaders(Constants.HEADER_IF_MATCH_LC)[0].getValue());
+		assertEquals("W/\"9876\"", capt.getAllValues().get(count).getHeaders(Constants.HEADER_IF_MATCH_LC)[0].getValue());
 		count++;
 
 	}
@@ -222,13 +210,12 @@ public class ETagClientDstu2Test {
 				.resource(getResource())
 				.withId(new IdDt("Patient/1234/_history/9876"))
 				.execute();
-			fail();
-		} catch (PreconditionFailedException e) {
+			fail();		} catch (PreconditionFailedException e) {
 			// good
 		}
 		//@formatter:on
 		assertEquals("http://example.com/fhir/Patient/1234", capt.getAllValues().get(count).getURI().toString());
-		assertEquals("\"9876\"", capt.getAllValues().get(count).getHeaders(Constants.HEADER_IF_MATCH_LC)[0].getValue());
+		assertEquals("W/\"9876\"", capt.getAllValues().get(count).getHeaders(Constants.HEADER_IF_MATCH_LC)[0].getValue());
 		count++;
 
 		//@formatter:off
@@ -240,13 +227,12 @@ public class ETagClientDstu2Test {
 				.update()
 				.resource(resource)
 				.execute();
-			fail();
-		} catch (PreconditionFailedException e) {
+			fail();		} catch (PreconditionFailedException e) {
 			// good
 		}
 		//@formatter:on
 		assertEquals("http://example.com/fhir/Patient/1234", capt.getAllValues().get(count).getURI().toString());
-		assertEquals("\"9876\"", capt.getAllValues().get(count).getHeaders(Constants.HEADER_IF_MATCH_LC)[0].getValue());
+		assertEquals("W/\"9876\"", capt.getAllValues().get(count).getHeaders(Constants.HEADER_IF_MATCH_LC)[0].getValue());
 		count++;
 	}
 
@@ -260,8 +246,10 @@ public class ETagClientDstu2Test {
 		when(myHttpResponse.getStatusLine()).thenReturn(new BasicStatusLine(new ProtocolVersion("HTTP", 1, 1), 200, "OK"));
 		when(myHttpResponse.getEntity().getContentType()).thenReturn(new BasicHeader("content-type", Constants.CT_FHIR_XML + "; charset=UTF-8"));
 		when(myHttpResponse.getEntity().getContent()).thenReturn(new ReaderInputStream(new StringReader(msg), Charset.forName("UTF-8")));
-		Header[] headers = new Header[] { new BasicHeader(Constants.HEADER_LAST_MODIFIED, "Wed, 15 Nov 1995 04:58:08 GMT"), new BasicHeader(Constants.HEADER_CONTENT_LOCATION, "http://foo.com/Patient/123/_history/2333"),
-				new BasicHeader(Constants.HEADER_CATEGORY, "http://foo/tagdefinition.html; scheme=\"http://hl7.org/fhir/tag\"; label=\"Some tag\"") };
+		Header[] headers = new Header[] {
+				new BasicHeader(Constants.HEADER_LAST_MODIFIED, "Wed, 15 Nov 1995 04:58:08 GMT"),
+				new BasicHeader(Constants.HEADER_CONTENT_LOCATION, "http://foo.com/Patient/123/_history/2333"),
+		};
 		when(myHttpResponse.getAllHeaders()).thenReturn(headers);
 
 		IGenericClient client = ourCtx.newRestfulGenericClient("http://example.com/fhir");
@@ -269,27 +257,27 @@ public class ETagClientDstu2Test {
 		int count = 0;
 
 		Patient response = client.read().resource(Patient.class).withId(new IdDt("Patient/1234")).execute();
-		assertThat(response.getNameFirstRep().getFamilyAsSingleString(), StringContains.containsString("Cardinal"));
+		assertThat(response.getNameFirstRep().getFamilyAsSingleString()).contains("Cardinal");
 		assertEquals("http://example.com/fhir/Patient/1234", capt.getAllValues().get(count++).getURI().toString());
 
 		when(myHttpResponse.getEntity().getContent()).thenReturn(new ReaderInputStream(new StringReader(msg), Charset.forName("UTF-8")));
 		response = (Patient) client.read().resource("Patient").withId("1234").execute();
-		assertThat(response.getNameFirstRep().getFamilyAsSingleString(), StringContains.containsString("Cardinal"));
+		assertThat(response.getNameFirstRep().getFamilyAsSingleString()).contains("Cardinal");
 		assertEquals("http://example.com/fhir/Patient/1234", capt.getAllValues().get(count++).getURI().toString());
 
 		when(myHttpResponse.getEntity().getContent()).thenReturn(new ReaderInputStream(new StringReader(msg), Charset.forName("UTF-8")));
 		response = client.read().resource(Patient.class).withIdAndVersion("1234", "22").execute();
-		assertThat(response.getNameFirstRep().getFamilyAsSingleString(), StringContains.containsString("Cardinal"));
+		assertThat(response.getNameFirstRep().getFamilyAsSingleString()).contains("Cardinal");
 		assertEquals("http://example.com/fhir/Patient/1234/_history/22", capt.getAllValues().get(count++).getURI().toString());
 
 		when(myHttpResponse.getEntity().getContent()).thenReturn(new ReaderInputStream(new StringReader(msg), Charset.forName("UTF-8")));
 		response = client.read().resource(Patient.class).withUrl("http://foo/Patient/22").execute();
-		assertThat(response.getNameFirstRep().getFamilyAsSingleString(), StringContains.containsString("Cardinal"));
+		assertThat(response.getNameFirstRep().getFamilyAsSingleString()).contains("Cardinal");
 		assertEquals("http://foo/Patient/22", capt.getAllValues().get(count++).getURI().toString());
 
 	}
 
-	@BeforeClass
+	@BeforeAll
 	public static void beforeClass() {
 		ourCtx = FhirContext.forDstu2();
 	}

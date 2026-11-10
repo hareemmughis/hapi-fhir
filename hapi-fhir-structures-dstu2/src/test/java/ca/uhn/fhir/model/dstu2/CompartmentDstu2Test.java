@@ -1,23 +1,25 @@
 package ca.uhn.fhir.model.dstu2;
 
-import static org.junit.Assert.*;
-
-import org.junit.AfterClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.model.dstu2.resource.Observation;
-import ca.uhn.fhir.model.dstu2.resource.Patient;
 import ca.uhn.fhir.model.primitive.IdDt;
 import ca.uhn.fhir.util.TestUtil;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
 
 public class CompartmentDstu2Test {
 	
 	private static FhirContext ourCtx = FhirContext.forDstu2();
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 
@@ -26,16 +28,20 @@ public class CompartmentDstu2Test {
 		
 		Observation o = new Observation();
 		o.getSubject().setReference("Patient/PID1");
-		
+
 		assertTrue(ourCtx.newTerser().isSourceInCompartmentForTarget("Patient", o, new IdDt("Patient/PID1")));
 		assertFalse(ourCtx.newTerser().isSourceInCompartmentForTarget("Patient", o, new IdDt("Patient/PID2")));
 	}
 	
-	@Test(expected=IllegalArgumentException.class)
+	@Test
 	public void testBadArguments() {
-		Observation o = new Observation();
-		o.getSubject().setReference("Patient/PID1");
-		ourCtx.newTerser().isSourceInCompartmentForTarget("Patient", o, new IdDt("123"));
+		try {
+			Observation o = new Observation();
+			o.getSubject().setReference("Patient/PID1");
+			ourCtx.newTerser().isSourceInCompartmentForTarget("Patient", o, new IdDt("123"));
+			fail();		} catch (IllegalArgumentException e) {
+			assertEquals("theTarget must have a populated resource type (theTarget.getResourceType() does not return a value)", e.getMessage());
+		}
 	}
 
 }

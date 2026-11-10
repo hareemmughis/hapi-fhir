@@ -1,34 +1,26 @@
 package ca.uhn.fhir.jaxrs.server.util;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import ca.uhn.fhir.jaxrs.server.test.TestJaxRsDummyPatientProviderDstu3;
+import ca.uhn.fhir.rest.api.RequestTypeEnum;
+import ca.uhn.fhir.rest.api.RestOperationTypeEnum;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.UriInfo;
+import org.apache.commons.lang3.StringUtils;
+import org.jboss.resteasy.specimpl.ResteasyHttpHeaders;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.net.URISyntaxException;
+import java.util.Arrays;
+
+import static org.assertj.core.api.AssertionsForClassTypes.assertThatExceptionOfType;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
-
-import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.Arrays;
-
-import javax.ws.rs.HttpMethod;
-import javax.ws.rs.core.MultivaluedHashMap;
-import javax.ws.rs.core.MultivaluedMap;
-import javax.ws.rs.core.UriInfo;
-
-import org.apache.commons.lang3.StringUtils;
-import org.glassfish.jersey.internal.MapPropertiesDelegate;
-import org.glassfish.jersey.server.ContainerRequest;
-import org.junit.Before;
-import org.junit.Test;
-
-import ca.uhn.fhir.jaxrs.server.test.TestJaxRsDummyPatientProvider;
-import ca.uhn.fhir.jaxrs.server.test.TestJaxRsDummyPatientProviderDstu3;
-import ca.uhn.fhir.jaxrs.server.util.JaxRsRequest;
-import ca.uhn.fhir.jaxrs.server.util.JaxRsResponse;
-import ca.uhn.fhir.rest.api.RequestTypeEnum;
-import ca.uhn.fhir.rest.api.RestOperationTypeEnum;
 
 public class JaxRsRequestDstu3Test {
 	
@@ -38,10 +30,10 @@ public class JaxRsRequestDstu3Test {
 	
 	private JaxRsRequest details;
 	private MultivaluedMap<String, String> queryParameters = new MultivaluedHashMap<String, String>();
-	private ContainerRequest headers;
+	private ResteasyHttpHeaders headers;
 	private TestJaxRsDummyPatientProviderDstu3 provider;
 	
-	@Before
+	@BeforeEach
 	public void setUp() throws URISyntaxException {
 		details = createRequestDetails();
 	}
@@ -52,18 +44,18 @@ public class JaxRsRequestDstu3Test {
 		String headerValue = "location_value";
 		String headerValue2 = "location_value_2";
 		assertTrue(StringUtils.isBlank(details.getHeader(headerKey)));
-		headers.header(headerKey, headerValue);
+		queryParameters.add(headerKey, headerValue);
 		assertEquals(headerValue, details.getHeader(headerKey));
 		assertEquals(Arrays.asList(headerValue), details.getHeaders(headerKey));
 		
-		headers.header(headerKey, headerValue2);
+		queryParameters.add(headerKey, headerValue2);
 		assertEquals(headerValue, details.getHeader(headerKey));
 		assertEquals(Arrays.asList(headerValue, headerValue2), details.getHeaders(headerKey));
 	}
 	
 	@Test
 	public void testGetByteStreamRequestContents() {
-		assertEquals(RESOURCE_STRING, new String(details.getByteStreamRequestContents()));
+		assertEquals(RESOURCE_STRING, new String(details.getByteStreamRequestContents(null)));
 	}
 	
 	@Test
@@ -78,14 +70,18 @@ public class JaxRsRequestDstu3Test {
 		assertTrue(response == details.getResponse());
 	}
 
-	@Test(expected = UnsupportedOperationException.class)
-	public void testGetReader() throws IOException {
-		details.getReader();
+	@Test
+	public void testGetReader() {
+		assertThatExceptionOfType(UnsupportedOperationException.class).isThrownBy(() -> {
+			details.getReader();
+		});
 	}
 
-	@Test(expected = UnsupportedOperationException.class)
+	@Test
 	public void testGetInputStream() {
-		details.getInputStream();
+		assertThatExceptionOfType(UnsupportedOperationException.class).isThrownBy(() -> {
+			details.getInputStream();
+		});
 	}
 
 	@Test
@@ -98,9 +94,9 @@ public class JaxRsRequestDstu3Test {
 		assertEquals(this.provider, details.getServer());
 	}
 
-	public JaxRsRequest createRequestDetails() throws URISyntaxException {
-		//headers
-		headers = new ContainerRequest(new URI(BASEURI), new URI(REQUESTURI), HttpMethod.GET, null, new MapPropertiesDelegate());
+	public JaxRsRequest createRequestDetails() {
+		// headers
+		headers = new ResteasyHttpHeaders(queryParameters);
 		
 		//uri info
 		UriInfo uriInfo = mock(UriInfo.class);

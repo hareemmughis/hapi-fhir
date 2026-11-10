@@ -1,0 +1,644 @@
+package ca.uhn.fhir.jpa.provider.r4;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+
+import ca.uhn.fhir.interceptor.api.Hook;
+import ca.uhn.fhir.interceptor.api.HookParams;
+import ca.uhn.fhir.interceptor.api.IAnonymousInterceptor;
+import ca.uhn.fhir.interceptor.api.Pointcut;
+import ca.uhn.fhir.jpa.api.config.JpaStorageSettings;
+import ca.uhn.fhir.jpa.binary.api.IBinaryStorageSvc;
+import ca.uhn.fhir.jpa.binstore.MemoryBinaryStorageSvcImpl;
+import ca.uhn.fhir.jpa.interceptor.UserRequestRetryVersionConflictsInterceptor;
+import ca.uhn.fhir.jpa.model.util.JpaConstants;
+import ca.uhn.fhir.jpa.provider.BaseResourceProviderR4Test;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.api.server.ResponseDetails;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import ca.uhn.fhir.rest.server.exceptions.ResourceGoneException;
+import ca.uhn.fhir.rest.server.provider.ProviderConstants;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.util.HapiExtensions;
+import ca.uhn.test.concurrency.PointcutLatch;
+import org.apache.http.entity.ContentType;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r4.model.Attachment;
+import org.hl7.fhir.r4.model.Binary;
+import org.hl7.fhir.r4.model.BooleanType;
+import org.hl7.fhir.r4.model.DateTimeType;
+import org.hl7.fhir.r4.model.DocumentReference;
+import org.hl7.fhir.r4.model.Parameters;
+import org.hl7.fhir.r4.model.StringType;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+
+public class BinaryAccessProviderR4Test extends BaseResourceProviderR4Test {
+
+	public static final byte[] SOME_BYTES = {1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2, 1};
+	public static final byte[] SOME_BYTES_2 = {5, 5, 5, 6};
+	private static final Logger ourLog = LoggerFactory.getLogger(BinaryAccessProviderR4Test.class);
+
+	@Autowired
+	private MemoryBinaryStorageSvcImpl myStorageSvc;
+	@Autowired
+	private IBinaryStorageSvc myBinaryStorageSvc;
+
+	@Override
+	@BeforeEach
+	public void before() throws Exception {
+		super.before();
+		myStorageSvc.setMinimumBinarySize(10);
+		myStorageSettings.setExpungeEnabled(true);
+		myInterceptorRegistry.registerInterceptor(myBinaryStorageInterceptor);
+	}
+
+	@Override
+	@AfterEach
+	public void after() throws Exception {
+		super.after();
+		myStorageSvc.setMinimumBinarySize(0);
+		myStorageSettings.setExpungeEnabled(new JpaStorageSettings().isExpungeEnabled());
+		myInterceptorRegistry.unregisterInterceptor(myBinaryStorageInterceptor);
+		myBinaryStorageInterceptor.setAllowAutoInflateBinaries(true);
+	}
+
+	@Test
+	public void testRead() {
+		IIdType id = createDocumentReference(true);
+
+		IAnonymousInterceptor interceptor = mock(IAnonymousInterceptor.class);
+		myInterceptorRegistry.registerAnonymousInterceptor(Pointcut.STORAGE_PRESHOW_RESOURCES, interceptor);
+		try {
+			doAnswer(t -> {
+				Pointcut pointcut = t.getArgument(0, Pointcut.class);
+				HookParams params = t.getArgument(1, HookParams.class);
+				ourLog.info("Interceptor invoked with pointcut {} and params {}", pointcut, params);
+				return null;
+			}).when(interceptor).invoke(any(), any());
+
+
+			// Read it back using the operation
+
+			String path = "/DocumentReference/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_READ +
+				"?path=DocumentReference.content.attachment";
+			executeBinaryReadAndValidate(path, SOME_BYTES, "image/png");
+
+			verify(interceptor, times(1)).invoke(eq(Pointcut.STORAGE_PRESHOW_RESOURCES), any());
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+		}
+	}
+
+
+	@Test
+	public void testReadSecondInstance() {
+		IIdType id = createDocumentReference(true);
+
+		IAnonymousInterceptor interceptor = mock(IAnonymousInterceptor.class);
+		myInterceptorRegistry.registerAnonymousInterceptor(Pointcut.STORAGE_PRESHOW_RESOURCES, interceptor);
+		try {
+			// Read it back using the operation
+			String path = "/DocumentReference/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_READ +
+				"?path=DocumentReference.content[1].attachment";
+			executeBinaryReadAndValidate(path, SOME_BYTES_2, "image/gif");
+
+			verify(interceptor, times(1)).invoke(eq(Pointcut.STORAGE_PRESHOW_RESOURCES), any());
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+		}
+	}
+
+	@Test
+	public void testReadNoPath() {
+		IIdType id = createDocumentReference(true);
+
+		String path = "/DocumentReference/" + id.getIdPart() + "/" +
+			JpaConstants.OPERATION_BINARY_ACCESS_READ;
+		myServer.fhirRequest(path).get()
+				.assertStatus(400)
+				.assertBodyContains("No path specified");
+
+	}
+
+	@Test
+	public void testReadNoData() {
+		IIdType id = createDocumentReference(false);
+
+		String path = "/DocumentReference/" + id.getIdPart() + "/" +
+			JpaConstants.OPERATION_BINARY_ACCESS_READ +
+			"?path=DocumentReference.content.attachment";
+
+		String response = myServer.fhirRequest(path).get().assertStatus(400).getBody();
+		assertThat(response).matches(".*The resource with ID DocumentReference/[0-9]+ has no data at path.*");
+	}
+
+
+	@Test
+	public void testManualResponseOperationsInvokeServerOutgoingResponsePointcut() throws InterruptedException {
+		IIdType id = createDocumentReference(true);
+
+		PointcutLatch latch = new PointcutLatch(Pointcut.SERVER_OUTGOING_RESPONSE);
+		myServer.getRestfulServer().getInterceptorService().registerAnonymousInterceptor(Pointcut.SERVER_OUTGOING_RESPONSE, latch);
+
+
+		String path = "/DocumentReference/" + id.getIdPart() + "/" +
+			JpaConstants.OPERATION_BINARY_ACCESS_READ +
+			"?path=DocumentReference.content.attachment";
+
+		latch.setExpectedCount(1);
+		myServer.fhirRequest(path).get().assertStatus(200);
+		List<HookParams> hookParams = latch.awaitExpected();
+
+		RequestDetails requestDetails = PointcutLatch.getInvocationParameterOfType(hookParams, RequestDetails.class);
+		ResponseDetails responseDetails = PointcutLatch.getInvocationParameterOfType(hookParams, ResponseDetails.class);
+
+		assertThat(responseDetails).isNotNull();
+		assertThat(requestDetails).isNotNull();
+
+		assertThat(requestDetails.getId().toString()).isEqualTo(id.toString());
+	}
+
+	@Test
+	public void testReadUnknownBlobId() {
+		IIdType id = createDocumentReference(false);
+
+		// Write a binary using the operation
+		String path = "/DocumentReference/" + id.getIdPart() + "/" +
+			JpaConstants.OPERATION_BINARY_ACCESS_WRITE +
+			"?path=DocumentReference.content.attachment";
+		String attachmentId = executeBinaryWriteAndValidateDocumentReference(path, SOME_BYTES);
+		assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+
+		myBinaryStorageSvc.expungeBinaryContent(id, attachmentId);
+
+		path = "/DocumentReference/" + id.getIdPart() + "/" +
+			JpaConstants.OPERATION_BINARY_ACCESS_READ +
+			"?path=DocumentReference.content.attachment";
+		String response = myServer.fhirRequest(path).get().assertStatus(400).getBody();
+		assertThat(response).matches(".*Can not find the requested binary content. It may have been deleted.*");
+
+	}
+
+	/**
+	 * Stores a binary large enough that it should live in binary storage
+	 */
+	@Test
+	public void testWriteLargeAttachment() {
+		IIdType id = createDocumentReference(false);
+
+		IAnonymousInterceptor interceptor = mock(IAnonymousInterceptor.class);
+		registerInterceptor(interceptor);
+		try {
+
+			// Write the binary using the operation
+			String path = "/DocumentReference/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_WRITE +
+				"?path=DocumentReference.content.attachment";
+			String attachmentId = executeBinaryWriteAndValidateDocumentReference(path, SOME_BYTES);
+			assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+			validateInterceptorInvoked(interceptor, 1);
+
+			// Read it back using the operation
+			path = "/DocumentReference/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_READ + "?path=DocumentReference.content.attachment";
+			executeBinaryReadAndValidate(path, SOME_BYTES, "image/jpeg");
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+		}
+	}
+
+	/**
+	 * With binary content externalized, uploading same binary content twice should be a no-op.
+	 */
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false})
+	public void testWriteLargeAttachment_thenUpdateWithSameContent_isNoOp(boolean theIsAllowAutoInflateBinaries) {
+		myBinaryStorageInterceptor.setAllowAutoInflateBinaries(theIsAllowAutoInflateBinaries);
+		IIdType id = createDocumentReference(false);
+
+		IAnonymousInterceptor interceptor = mock(IAnonymousInterceptor.class);
+		registerInterceptor(interceptor);
+		try {
+			// Write the binary using the operation
+			String path = "/DocumentReference/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_WRITE + "?path=DocumentReference.content.attachment";
+			String attachmentId = executeBinaryWriteAndValidateDocumentReference(path, SOME_BYTES);
+			assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+			validateInterceptorInvoked(interceptor, 1);
+
+			// Write the binary again
+			String attachmentIdNoOp = executeBinaryWriteAndValidateDocumentReference(path, SOME_BYTES);
+			assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+			validateInterceptorInvoked(interceptor, 2);
+			assertEquals(attachmentId, attachmentIdNoOp);
+
+			// Read it back using the operation
+			path = "/DocumentReference/" + id.getIdPart() + "/" + JpaConstants.OPERATION_BINARY_ACCESS_READ +
+				"?path=DocumentReference.content.attachment";
+			executeBinaryReadAndValidate(path, SOME_BYTES, "image/jpeg");
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+		}
+	}
+
+	@Test
+	public void testDontAllowUpdateWithAttachmentId_NoneExists() {
+
+		DocumentReference dr = new DocumentReference();
+		dr.addContent()
+			.getAttachment()
+			.getDataElement()
+			.addExtension(HapiExtensions.EXT_EXTERNALIZED_BINARY_ID, new StringType("0000-1111"));
+
+		try {
+			myClient.create().resource(dr).execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("Can not find the requested binary content. It may have been deleted.");
+		}
+	}
+
+	/**
+	 * Stores a binary small enough that it shouldn't live in binary storage
+	 */
+	@Test
+	public void testWriteSmallAttachment() {
+		IIdType id = createDocumentReference(false);
+
+		IAnonymousInterceptor interceptor = mock(IAnonymousInterceptor.class);
+		registerInterceptor(interceptor);
+		try {
+
+			// Write the binary using the operation
+			String path = "/DocumentReference/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_WRITE +
+				"?path=DocumentReference.content.attachment";
+			String accept = "application/fhir+json; _pretty=true";
+			DocumentReference ref = myServer.fhirRequest(path)
+					.withHeader(Constants.HEADER_ACCEPT, accept)
+					.post(SOME_BYTES_2, ContentType.IMAGE_JPEG.getMimeType())
+					.assertStatus(200)
+					.assertMimeType(Constants.CT_FHIR_JSON_NEW)
+					.getBodyAsResource(DocumentReference.class);
+
+			Attachment attachment = ref.getContentFirstRep().getAttachment();
+			assertThat(attachment.getContentType()).isEqualTo(ContentType.IMAGE_JPEG.getMimeType());
+			assertThat(attachment.getSize()).isEqualTo(4);
+			assertThat(attachment.getData()).containsExactly(SOME_BYTES_2);
+			assertThat(ref.getMeta().getVersionId()).isEqualTo("2");
+			String attachmentId = attachment.getExtensionString(HapiExtensions.EXT_EXTERNALIZED_BINARY_ID);
+			assertThat(attachmentId).isNull();
+
+			validateInterceptorInvoked(interceptor, 1);
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+		}
+	}
+
+	/**
+	 * Stores a binary large enough that it should live in binary storage
+	 */
+	@Test
+	public void testWriteLargeBinaryUsingOperation() {
+		Binary binary = new Binary();
+		binary.setContentType("image/png");
+
+		ourLog.debug(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(binary));
+
+		IIdType id = myClient.create().resource(binary).execute().getId().toUnqualifiedVersionless();
+
+		IAnonymousInterceptor interceptor = mock(IAnonymousInterceptor.class);
+		registerInterceptor(interceptor);
+		try {
+			// Write using the operation
+			String path = "/Binary/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_WRITE + "?path=Binary";
+			String attachmentId = executeBinaryWriteAndValidateBinary(path);
+			assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+			validateInterceptorInvoked(interceptor, 1);
+
+			// Read it back using the operation
+			path = "/Binary/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_READ + "?path=Binary";
+			executeBinaryReadAndValidate(path, SOME_BYTES, "image/jpeg");
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+		}
+	}
+
+	/**
+	 * With binary content externalized, uploading same binary content twice should be a no-op.
+	 */
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false})
+	public void testWriteLargeBinary_thenUpdateWithSameContent_isNoOp(boolean theIsAllowAutoInflateBinaries) {
+		myBinaryStorageInterceptor.setAllowAutoInflateBinaries(theIsAllowAutoInflateBinaries);
+		Binary binary = new Binary();
+		binary.setContentType("image/png");
+
+		ourLog.debug(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(binary));
+
+		IIdType id = myClient.create().resource(binary).execute().getId().toUnqualifiedVersionless();
+
+		IAnonymousInterceptor interceptor = mock(IAnonymousInterceptor.class);
+		registerInterceptor(interceptor);
+		try {
+			// Write the binary using the operation
+			String path = "/Binary/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_WRITE +
+				"?path=Binary";
+			String attachmentId = executeBinaryWriteAndValidateBinary(path);
+			assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+			validateInterceptorInvoked(interceptor, 1);
+
+			// Write the binary again
+			String attachmentIdNoOp = executeBinaryWriteAndValidateBinary(path);
+			assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+			validateInterceptorInvoked(interceptor, 2);
+			assertEquals(attachmentId, attachmentIdNoOp);
+
+			// Read it back using the operation
+			path = "/Binary/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_READ +
+				"?path=Binary";
+			executeBinaryReadAndValidate(path, SOME_BYTES, "image/jpeg");
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+		}
+	}
+
+
+	/**
+	 * Stores a binary large enough that it should live in binary storage
+	 */
+	@Test
+	public void testWriteLargeBinaryWithoutExplicitPath() {
+		Binary binary = new Binary();
+		binary.setContentType("image/png");
+
+		ourLog.debug(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(binary));
+
+		IIdType id = myClient.create().resource(binary).execute().getId().toUnqualifiedVersionless();
+
+		// Write using the operation
+
+		String path = "/Binary/" + id.getIdPart() + "/" +
+			JpaConstants.OPERATION_BINARY_ACCESS_WRITE;
+		String attachmentId = executeBinaryWriteAndValidateBinary(path);
+		assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+
+		// Read it back using the operation
+		path = "/Binary/" + id.getIdPart() + "/" +
+			JpaConstants.OPERATION_BINARY_ACCESS_READ;
+		executeBinaryReadAndValidate(path, SOME_BYTES, "image/jpeg");
+
+	}
+
+
+	static class BinaryBlobIdInterceptor {
+		@Hook(Pointcut.STORAGE_BINARY_ASSIGN_BLOB_ID_PREFIX)
+		public String provideBlobIdForBinary(RequestDetails theRequestDetails, IBaseResource theResource) {
+			ourLog.info("Received binary for prefixing!");
+			return "test-blob-id-prefix";
+		}
+	}
+
+	@Test
+	public void testWriteLargeBinaryToDocumentReference_callsBlobIdPrefixHook() {
+		byte[] bytes = new byte[1234];
+		for (int i = 0; i < bytes.length; i++) {
+			bytes[i] = (byte) (((float) Byte.MAX_VALUE) * Math.random());
+		}
+
+		DocumentReference dr = new DocumentReference();
+		dr.addContent().getAttachment()
+			.setContentType("application/pdf")
+			.setSize(12345)
+			.setTitle("hello")
+			.setCreationElement(new DateTimeType("2002"));
+		IIdType id = myClient.create().resource(dr).execute().getId().toUnqualifiedVersionless();
+
+		BinaryBlobIdInterceptor interceptor = spy(new BinaryBlobIdInterceptor());
+		myInterceptorRegistry.registerInterceptor(interceptor);
+
+		try {
+			// Write using the operation
+
+			String path = "/DocumentReference/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_WRITE +
+				"?path=DocumentReference.content.attachment";
+			String attachmentId = executeBinaryWriteAndValidateDocumentReference(path, bytes);
+			assertThat(attachmentId).startsWith("test-blob-id-prefix");
+
+			verify(interceptor, timeout(5_000).times(1)).provideBlobIdForBinary(any(), any());
+			verifyNoMoreInteractions(interceptor);
+
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+		}
+	}
+
+	@Test
+	public void testWriteLargeBinaryToDocumentReference() {
+		byte[] bytes = new byte[134696];
+		for (int i = 0; i < bytes.length; i++) {
+			bytes[i] = (byte) (((float) Byte.MAX_VALUE) * Math.random());
+		}
+
+		DocumentReference dr = new DocumentReference();
+		dr.addContent().getAttachment()
+			.setContentType("application/pdf")
+			.setSize(12345)
+			.setTitle("hello")
+			.setCreationElement(new DateTimeType("2002"));
+		IIdType id = myClient.create().resource(dr).execute().getId().toUnqualifiedVersionless();
+
+		IAnonymousInterceptor interceptor = mock(IAnonymousInterceptor.class);
+		registerInterceptor(interceptor);
+		try {
+			// Write using the operation
+
+			String path = "/DocumentReference/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_WRITE +
+				"?path=DocumentReference.content.attachment";
+			String attachmentId = executeBinaryWriteAndValidateDocumentReference(path, bytes);
+			assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+
+
+			validateInterceptorInvoked(interceptor, 1);
+
+			// Read it back using the operation
+			path = "/DocumentReference/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_READ +
+				"?path=DocumentReference.content.attachment";
+			executeBinaryReadAndValidate(path, bytes, "image/jpeg");
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+		}
+	}
+
+	private void executeBinaryReadAndValidate(String thePath, byte[] theExpectedContent, String theExpectedContentType) {
+		byte[] actualBytes = myServer.fhirRequest(thePath).get()
+				.assertStatus(200)
+				.assertHeader(Constants.HEADER_CONTENT_TYPE, theExpectedContentType)
+				.assertHeader("Content-Length", String.valueOf(theExpectedContent.length))
+				.getBodyBytes();
+
+		assertThat(actualBytes).containsExactly(theExpectedContent);
+	}
+
+	private HttpTestResponse executeBinaryWrite(String thePath, byte[] theContent) {
+		String accept = "application/fhir+json; _pretty=true";
+		return myServer.fhirRequest(thePath)
+				.withHeader(Constants.HEADER_ACCEPT, accept)
+				.post(theContent, ContentType.IMAGE_JPEG.getMimeType())
+				.assertStatus(200)
+				.assertMimeType(Constants.CT_FHIR_JSON_NEW);
+	}
+
+	private String executeBinaryWriteAndValidateDocumentReference(String thePath, byte[] theContent) {
+		DocumentReference ref = executeBinaryWrite(thePath, theContent).getBodyAsResource(DocumentReference.class);
+
+		Attachment attachment = ref.getContentFirstRep().getAttachment();
+		assertEquals(ContentType.IMAGE_JPEG.getMimeType(), attachment.getContentType());
+		assertEquals(theContent.length, attachment.getSize());
+		assertNull(attachment.getData());
+		assertEquals("2", ref.getMeta().getVersionId());
+		return attachment.getDataElement().getExtensionString(HapiExtensions.EXT_EXTERNALIZED_BINARY_ID);
+	}
+
+	private String executeBinaryWriteAndValidateBinary(String thePath) {
+		Binary target = executeBinaryWrite(thePath, SOME_BYTES).getBodyAsResource(Binary.class);
+
+		assertEquals(ContentType.IMAGE_JPEG.getMimeType(), target.getContentType());
+		assertNull(target.getData());
+		assertEquals("2", target.getMeta().getVersionId());
+		return target.getDataElement().getExtensionString(HapiExtensions.EXT_EXTERNALIZED_BINARY_ID);
+	}
+
+	private void registerInterceptor(IAnonymousInterceptor theInterceptor) {
+		myInterceptorRegistry.registerAnonymousInterceptor(Pointcut.STORAGE_PRESHOW_RESOURCES, theInterceptor);
+		myInterceptorRegistry.registerAnonymousInterceptor(Pointcut.STORAGE_PRESTORAGE_RESOURCE_CREATED, theInterceptor);
+		myInterceptorRegistry.registerAnonymousInterceptor(Pointcut.STORAGE_PRESTORAGE_RESOURCE_UPDATED, theInterceptor);
+	}
+
+	private void validateInterceptorInvoked(IAnonymousInterceptor theInterceptor, int theInvocationCount) {
+		verify(theInterceptor, timeout(5000).times(theInvocationCount)).invoke(eq(Pointcut.STORAGE_PRESHOW_RESOURCES), any());
+		verify(theInterceptor, timeout(5000).times(theInvocationCount)).invoke(eq(Pointcut.STORAGE_PRESTORAGE_RESOURCE_UPDATED), any());
+		verifyNoMoreInteractions(theInterceptor);
+	}
+
+	private IIdType createDocumentReference(boolean theSetData) {
+		DocumentReference documentReference = new DocumentReference();
+		Attachment attachment = documentReference
+			.addContent()
+			.getAttachment()
+			.setContentType("image/png");
+		if (theSetData) {
+			attachment.setData(SOME_BYTES);
+		}
+		attachment = documentReference
+			.addContent()
+			.getAttachment()
+			.setContentType("image/gif");
+		if (theSetData) {
+			attachment.setData(SOME_BYTES_2);
+		}
+
+		ourLog.debug(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(documentReference));
+
+		return myClient.create().resource(documentReference).execute().getId().toUnqualifiedVersionless();
+	}
+
+
+	@Test
+	public void testResourceExpungeAlsoExpungesBinaryData() throws IOException {
+		IIdType id = createDocumentReference(false);
+
+		String path = "/DocumentReference/" + id.getIdPart() + "/" +
+			JpaConstants.OPERATION_BINARY_ACCESS_WRITE +
+			"?path=DocumentReference.content.attachment";
+		String attachmentId = executeBinaryWriteAndValidateDocumentReference(path, SOME_BYTES);
+		assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+
+		ByteArrayOutputStream capture = new ByteArrayOutputStream();
+		myStorageSvc.writeBinaryContent(id, attachmentId, capture);
+		assertEquals(15, capture.size());
+
+		// Now delete (logical delete- should not expunge the binary)
+		myClient.delete().resourceById(id).execute();
+		try {
+			myClient.read().resource("DocumentReference").withId(id).execute();
+			fail();
+		} catch (ResourceGoneException e) {
+			// good
+		}
+
+		capture = new ByteArrayOutputStream();
+		myStorageSvc.writeBinaryContent(id, attachmentId, capture);
+		assertEquals(15, capture.size());
+
+		// Now expunge
+		Parameters parameters = new Parameters();
+		parameters.addParameter().setName(ProviderConstants.OPERATION_EXPUNGE_PARAM_EXPUNGE_DELETED_RESOURCES).setValue(new BooleanType(true));
+		myClient
+			.operation()
+			.onInstance(id)
+			.named(ProviderConstants.OPERATION_EXPUNGE)
+			.withParameters(parameters)
+			.execute();
+
+		capture = new ByteArrayOutputStream();
+		assertFalse(myStorageSvc.writeBinaryContent(id, attachmentId, capture));
+		assertEquals(0, capture.size());
+
+	}
+
+	@Test
+	public void testWriteWithConflictInterceptor() {
+		UserRequestRetryVersionConflictsInterceptor interceptor = new UserRequestRetryVersionConflictsInterceptor();
+		myServer.getRestfulServer().registerInterceptor(interceptor);
+		try {
+
+			IIdType id = createDocumentReference(false);
+
+			String path = "/DocumentReference/" + id.getIdPart() + "/" +
+				JpaConstants.OPERATION_BINARY_ACCESS_WRITE +
+				"?path=DocumentReference.content.attachment";
+			String attachmentId = executeBinaryWriteAndValidateDocumentReference(path, SOME_BYTES);
+			assertThat(attachmentId).matches("[a-zA-Z0-9]{100}");
+
+		} finally {
+			myServer.getRestfulServer().unregisterInterceptor(interceptor);
+		}
+	}
+
+}

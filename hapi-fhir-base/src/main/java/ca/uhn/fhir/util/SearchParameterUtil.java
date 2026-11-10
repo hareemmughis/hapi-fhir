@@ -1,0 +1,670 @@
+/*-
+ * #%L
+ * HAPI FHIR - Core Library
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.util;
+
+import ca.uhn.fhir.context.BaseRuntimeChildDefinition;
+import ca.uhn.fhir.context.BaseRuntimeElementCompositeDefinition;
+import ca.uhn.fhir.context.BaseRuntimeElementDefinition;
+import ca.uhn.fhir.context.ConfigurationException;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.context.RuntimeResourceDefinition;
+import ca.uhn.fhir.context.RuntimeSearchParam;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.api.annotation.Compartment;
+import ca.uhn.fhir.model.api.annotation.ResourceDef;
+import ca.uhn.fhir.model.api.annotation.SearchParamDefinition;
+import ca.uhn.fhir.parser.DataFormatException;
+import ca.uhn.fhir.rest.api.RestSearchParameterTypeEnum;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ClassUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.instance.model.api.IBase;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+public class SearchParameterUtil {
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(SearchParameterUtil.class);
+
+	/**
+	 * This is a list of resources that are in the
+	 * <a href="https://build.fhir.org/compartmentdefinition-patient.html">Patient Compartment</a>
+	 * but we are omitting anyways for security reasons.
+	 *
+	 * See <a href="https://github.com/hapifhir/hapi-fhir/issues/7118">this issue</a> for why.
+	 */
+	public static final Map<String, Set<String>> RESOURCE_TYPES_TO_SP_TO_OMIT_FROM_PATIENT_COMPARTMENT =
+			new HashMap<>();
+
+	static {
+		RESOURCE_TYPES_TO_SP_TO_OMIT_FROM_PATIENT_COMPARTMENT.put("Group", new HashSet<>());
+		RESOURCE_TYPES_TO_SP_TO_OMIT_FROM_PATIENT_COMPARTMENT.put("List", new HashSet<>());
+
+		// group
+		RESOURCE_TYPES_TO_SP_TO_OMIT_FROM_PATIENT_COMPARTMENT.get("Group").add("member");
+
+		// list
+		RESOURCE_TYPES_TO_SP_TO_OMIT_FROM_PATIENT_COMPARTMENT.get("List").add("subject");
+		RESOURCE_TYPES_TO_SP_TO_OMIT_FROM_PATIENT_COMPARTMENT.get("List").add("source");
+		RESOURCE_TYPES_TO_SP_TO_OMIT_FROM_PATIENT_COMPARTMENT.get("List").add("patient");
+	}
+
+	/**
+	 * Returns true if the named compartment (Patient, Practitioner, etc) should
+	 * include the provided Search Parameter (SP)
+	 */
+	private static boolean shouldCompartmentIncludeSP(
+			String theCompartmentName, SearchParamDefinition theSearchParamDef) {
+
+		// default
+		return Arrays.stream(theSearchParamDef.providesMembershipIn())
+				.anyMatch(p -> p.name().equals(theCompartmentName));
+	}
+
+	/**
+	 * Retrieves the set of compartments for the provided Resource class and SP definition.
+	 * Includes special case handling
+	 *
+	 * @param theResourceClazz the resource class (ie, Patient.class, Group.class, etc)
+	 * @param theSearchParamDefinition the SP definition (from the fields)
+	 * @return a set of valid compartments for the provided search parameter.
+	 */
+	public static Set<String> getMembershipCompartmentsForSearchParameter(
+			Class<? extends IBase> theResourceClazz, SearchParamDefinition theSearchParamDefinition) {
+		RestSearchParameterTypeEnum paramType = RestSearchParameterTypeEnum.forCode(
+				theSearchParamDefinition.type().toLowerCase());
+		if (paramType == null) {
+			throw new ConfigurationException(Msg.code(2786) + "Search param " + theSearchParamDefinition.name()
+					+ " has an invalid type: " + theSearchParamDefinition.type());
+		}
+
+		Set<String> validCompartments = new HashSet<>();
+		for (Compartment compartment : theSearchParamDefinition.providesMembershipIn()) {
+			if (paramType != RestSearchParameterTypeEnum.REFERENCE) {
+				StringBuilder b = new StringBuilder();
+				b.append("Search param ");
+				b.append(theSearchParamDefinition.name());
+				b.append(" on resource type ");
+				b.append(theResourceClazz.getName());
+				b.append(" provides compartment membership but is not of type 'reference'");
+				ourLog.warn(b.toString());
+				continue;
+			}
+
+			if (SearchParameterUtil.shouldCompartmentIncludeSP(compartment.name(), theSearchParamDefinition)) {
+				String compartmentName = getCleansedCompartmentName(compartment.name());
+				validCompartments.add(compartmentName);
+			}
+		}
+
+		/*
+		 * In the base FHIR R4 specification, the Device resource is not a part of the Patient compartment.
+		 * However, it is a patient-specific resource that most users expect to be, and several derivative
+		 * specifications including g(10) testing expect it to be, and the fact that it is not has led to many
+		 * bug reports in HAPI FHIR. As of HAPI FHIR 8.0.0 it is being manually added in response to those
+		 * requests.
+		 * See https://github.com/hapifhir/hapi-fhir/issues/6536 for more information.
+		 */
+		if (theSearchParamDefinition.name().equals("patient")
+				&& theSearchParamDefinition.path().equals("Device.patient")) {
+			validCompartments.add("Patient");
+		}
+
+		/*
+		 * In many cases, the "patient" SP is a "convenience" SP that resolves to a path to
+		 * another SearchParameter that declares patient compartment membership. In this case,
+		 *  we add the "patient" SP to the patient compartment as well.
+		 */
+		if ("patient".equalsIgnoreCase(theSearchParamDefinition.name())
+				&& paramType.equals(RestSearchParameterTypeEnum.REFERENCE)) {
+
+			String fhirResourceType = getResourceTypeName(theResourceClazz);
+			// Ignore deliberately omitted parameters
+			Set<String> omittedSps = RESOURCE_TYPES_TO_SP_TO_OMIT_FROM_PATIENT_COMPARTMENT.getOrDefault(
+					fhirResourceType, Collections.emptySet());
+
+			if (!omittedSps.contains(theSearchParamDefinition.name().toLowerCase())
+					&& isCoveredByPatientCompartmentBaseSp(
+							theResourceClazz, fhirResourceType, theSearchParamDefinition)) {
+				validCompartments.add("Patient");
+			}
+		}
+
+		return validCompartments;
+	}
+
+	static String getCleansedCompartmentName(String theCompartmentName) {
+		// As of 2021-12-28 the R5 structures incorrectly have this prefix
+		if (theCompartmentName.startsWith("Base FHIR compartment definition for ")) {
+			return theCompartmentName.substring("Base FHIR compartment definition for ".length());
+		}
+		return theCompartmentName;
+	}
+
+	/**
+	 * Returns the FHIR resource type name for the given class. Uses the {@link ResourceDef}
+	 * annotation when present (since Java class names may differ from FHIR type names, e.g.
+	 * {@code ListResource.class} → {@code "List"}), falling back to the simple class name.
+	 */
+	private static String getResourceTypeName(Class<? extends IBase> theResourceClazz) {
+		ResourceDef resourceDef = theResourceClazz.getAnnotation(ResourceDef.class);
+		return (resourceDef != null && !resourceDef.name().isEmpty())
+				? resourceDef.name()
+				: theResourceClazz.getSimpleName();
+	}
+
+	/**
+	 * Returns true if {@code thePatientSp}'s path covers the same field as another {@code @SearchParamDefinition}
+	 * that declares Patient compartment membership on the same {@code theResourceClazz}.
+	 * A base SP segment matches when the patient SP has the same path (exact alias) or suffixed with
+	 * {@code .where(resolve() is Patient)} (narrowing).
+	 *
+	 * <p> Example: Observation.patient's path is Observation.subject.where(resolve() is Patient) --> returns true because
+	 * Observation.subject (the base SP) declares Patient compartment membership.
+	 * <p> Example: Coverage.patient's path is Coverage.beneficiary --> returns true because Coverage.beneficiary
+	 * declares Patient compartment membership.
+	 *
+	 * <p> Note that the {@code SearchParamDefinition} is scanned since RuntimeSearchParams have not finished being
+	 * constructed yet.
+	 */
+	private static boolean isCoveredByPatientCompartmentBaseSp(
+			Class<? extends IBase> theResourceClazz, String theResourceType, SearchParamDefinition thePatientSp) {
+		Set<String> patientPathSegments = ownPathSegmentsNoWhitespace(theResourceType, thePatientSp.path());
+		return Arrays.stream(theResourceClazz.getFields())
+				.map(f -> f.getAnnotation(SearchParamDefinition.class))
+				// Any other SP that is not the "patient" SP
+				.filter(spd -> spd != null && !thePatientSp.name().equalsIgnoreCase(spd.name()))
+				// That declares Patient compartment membership
+				.filter(spd -> Arrays.stream(spd.providesMembershipIn())
+						.anyMatch(c -> "Patient".equals(getCleansedCompartmentName(c.name()))))
+				// Get the path for theResourceType
+				.flatMap(spd -> ownPathSegmentsNoWhitespace(theResourceType, spd.path()).stream())
+				// "where(resolve()isPatient)" has no space before "is" on purpose — ownPathSegmentsNoWhitespace
+				// strips all whitespace so the narrowing suffix must be spaceless too.
+				.anyMatch(baseSegment -> patientPathSegments.contains(baseSegment + ".where(resolve()isPatient)")
+						|| patientPathSegments.contains(baseSegment));
+	}
+
+	/**
+	 * Splits a (possibly pipe-delimited multi-resource) SP path into segments, keeping only the
+	 * segments that belong to the given resource type. This is necessary since in R4+, sp.path()
+	 * returns a list of paths delimited by '|' if the SP has multiple resource bases.
+	 *
+	 * <p>ALL whitespace is stripped, since FHIRPath permits arbitrary whitespace (eg.
+	 * Observation.subject == Observation . subject).
+	 * The returned segments are therefore comparison keys since it may not be valid FHIRPath.
+	 */
+	private static Set<String> ownPathSegmentsNoWhitespace(String theResourceType, String thePath) {
+		return Arrays.stream(thePath.split("\\|"))
+				.map(StringUtils::deleteWhitespace)
+				.filter(segment -> segment.startsWith(theResourceType + "."))
+				.collect(Collectors.toSet());
+	}
+
+	// Created by Claude Opus 4.7
+	/**
+	 * Returns true if the given SearchParameter base value represents an abstract base type
+	 * ({@code Resource}, {@code DomainResource}, {@code CanonicalResource} (R5+), or
+	 * {@code MetadataResource} (R5+)), meaning the parameter applies to all resource types
+	 * that extend that abstract base.
+	 */
+	public static boolean isAbstractResourceBase(String theBase) {
+		return "Resource".equals(theBase)
+				|| "DomainResource".equals(theBase)
+				|| "CanonicalResource".equals(theBase)
+				|| "MetadataResource".equals(theBase);
+	}
+
+	// Created by Claude Opus 4.7
+	/**
+	 * Expands a SearchParameter base list. Each entry that is an abstract base type
+	 * ({@code Resource}, {@code DomainResource}, {@code CanonicalResource}, {@code MetadataResource})
+	 * is replaced with the set of concrete resource types that extend that abstract class; concrete
+	 * entries are preserved as-is. If no entry is abstract, the original list is returned unchanged.
+	 * <p>
+	 * Abstract types expand narrowly:
+	 * <ul>
+	 *   <li>{@code Resource} → every concrete type (root of the hierarchy)</li>
+	 *   <li>{@code DomainResource} → only concrete types that extend {@code DomainResource}</li>
+	 *   <li>{@code CanonicalResource} → only concrete types that extend {@code CanonicalResource} (R5+)</li>
+	 *   <li>{@code MetadataResource} → only concrete types that extend {@code MetadataResource} (R5+)</li>
+	 * </ul>
+	 */
+	public static List<String> expandBaseWhenNeeded(FhirContext theContext, Collection<String> theBase) {
+		if (theBase.stream().noneMatch(SearchParameterUtil::isAbstractResourceBase)) {
+			return new ArrayList<>(theBase);
+		}
+		Set<String> result = new LinkedHashSet<>();
+		for (String baseEntry : theBase) {
+			if (isAbstractResourceBase(baseEntry)) {
+				result.addAll(getConcreteTypesExtending(theContext, baseEntry));
+			} else {
+				result.add(baseEntry);
+			}
+		}
+		return new ArrayList<>(result);
+	}
+
+	/**
+	 * Returns the concrete resource types whose implementing class has an ancestor with the given
+	 * abstract-base name in its superclass chain. Used by {@link #expandBaseWhenNeeded} to perform
+	 * per-abstract-type expansion rather than a blanket "all types".
+	 */
+	private static List<String> getConcreteTypesExtending(FhirContext theContext, String theAbstractBase) {
+		List<String> result = new ArrayList<>();
+		for (String concreteType : theContext.getResourceTypes()) {
+			final Class<?> cls = theContext.getResourceDefinition(concreteType).getImplementingClass();
+			for (Class<?> superclass : ClassUtils.getAllSuperclasses(cls)) {
+				if (superclass.getSimpleName().equals(theAbstractBase)) {
+					result.add(concreteType);
+					break;
+				}
+			}
+		}
+		return result;
+	}
+
+	public static List<String> getBaseAsStrings(FhirContext theContext, IBaseResource theResource) {
+		Validate.notNull(theContext, "theContext must not be null");
+		Validate.notNull(theResource, "theResource must not be null");
+		RuntimeResourceDefinition def = theContext.getResourceDefinition(theResource);
+
+		BaseRuntimeChildDefinition base = def.getChildByName("base");
+		List<IBase> baseValues = base.getAccessor().getValues(theResource);
+		List<String> retVal = new ArrayList<>();
+		for (IBase next : baseValues) {
+			IPrimitiveType<?> nextPrimitive = (IPrimitiveType<?>) next;
+			retVal.add(nextPrimitive.getValueAsString());
+		}
+
+		return retVal;
+	}
+
+	/**
+	 * Given the resource type, fetch its patient-based search parameter name
+	 * 1. Attempt to find one called 'patient'
+	 * 2. If that fails, find one called 'subject'
+	 * 3. If that fails, find one by Patient Compartment.
+	 * 3.1 If that returns exactly 1 result then return it
+	 * 3.2 If that doesn't return exactly 1 result and is R4, fall to 3.3, otherwise, 3.5
+	 * 3.3 If that returns >1 result, throw an error
+	 * 3.4 If that returns 1 result, return it
+	 * 3.5 Find the search parameters by patient compartment using the R4 FHIR path, and return it if there is 1 result,
+	 * otherwise, fall to 3.3
+	 */
+	public static Optional<RuntimeSearchParam> getOnlyPatientSearchParamForResourceType(
+			FhirContext theFhirContext, String theResourceType) {
+		RuntimeSearchParam myPatientSearchParam = null;
+		RuntimeResourceDefinition runtimeResourceDefinition = theFhirContext.getResourceDefinition(theResourceType);
+		myPatientSearchParam = runtimeResourceDefinition.getSearchParam("patient");
+		if (myPatientSearchParam == null) {
+			myPatientSearchParam = runtimeResourceDefinition.getSearchParam("subject");
+			if (myPatientSearchParam == null) {
+				final List<RuntimeSearchParam> searchParamsForCurrentVersion =
+						runtimeResourceDefinition.getSearchParamsForCompartmentName("Patient");
+				final List<RuntimeSearchParam> searchParamsToUse;
+				// We want to handle a narrow code path in which attempting to process SearchParameters for a non-R4
+				// resource would have failed, and instead make another attempt to process them with the R4-equivalent
+				// FHIR path.
+				if (FhirVersionEnum.R4 == theFhirContext.getVersion().getVersion()
+						|| searchParamsForCurrentVersion.size() == 1) {
+					searchParamsToUse = searchParamsForCurrentVersion;
+				} else {
+					searchParamsToUse =
+							checkR4PatientCompartmentForMatchingSearchParam(runtimeResourceDefinition, theResourceType);
+				}
+				myPatientSearchParam =
+						validateSearchParamsAndReturnOnlyOne(runtimeResourceDefinition, searchParamsToUse);
+			}
+		}
+		return Optional.of(myPatientSearchParam);
+	}
+
+	@Nonnull
+	private static List<RuntimeSearchParam> checkR4PatientCompartmentForMatchingSearchParam(
+			RuntimeResourceDefinition theRuntimeResourceDefinition, String theResourceType) {
+		final RuntimeSearchParam patientSearchParamForR4 =
+				FhirContext.forR4Cached().getResourceDefinition(theResourceType).getSearchParam("patient");
+
+		return Optional.ofNullable(patientSearchParamForR4)
+				.map(patientSearchParamForR4NonNull ->
+						theRuntimeResourceDefinition.getSearchParamsForCompartmentName("Patient").stream()
+								.filter(searchParam -> searchParam.getPath() != null)
+								.filter(searchParam ->
+										searchParam.getPath().equals(patientSearchParamForR4NonNull.getPath()))
+								.collect(Collectors.toList()))
+				.orElse(Collections.emptyList());
+	}
+
+	/**
+	 * Given the resource type, fetch all its patient-based search parameter name that's available
+	 */
+	public static Set<String> getPatientSearchParamsForResourceType(
+			FhirContext theFhirContext, String theResourceType) {
+		RuntimeResourceDefinition runtimeResourceDefinition = theFhirContext.getResourceDefinition(theResourceType);
+
+		List<RuntimeSearchParam> searchParams =
+				new ArrayList<>(runtimeResourceDefinition.getSearchParamsForCompartmentName("Patient"));
+		// add patient search parameter for resources that's not in the compartment
+		RuntimeSearchParam myPatientSearchParam = runtimeResourceDefinition.getSearchParam("patient");
+		if (myPatientSearchParam != null) {
+			searchParams.add(myPatientSearchParam);
+		}
+		RuntimeSearchParam mySubjectSearchParam = runtimeResourceDefinition.getSearchParam("subject");
+		if (mySubjectSearchParam != null) {
+			searchParams.add(mySubjectSearchParam);
+		}
+		if (CollectionUtils.isEmpty(searchParams)) {
+			String errorMessage = String.format(
+					"Resource type [%s] is not eligible for this type of export, as it contains no Patient compartment, and no `patient` or `subject` search parameter",
+					runtimeResourceDefinition.getName());
+			throw new IllegalArgumentException(Msg.code(2222) + errorMessage);
+		}
+		// deduplicate list of searchParams and get their names
+		return searchParams.stream().map(RuntimeSearchParam::getName).collect(Collectors.toSet());
+	}
+
+	/**
+	 * Search the resource definition for a compartment named 'patient' and return its related Search Parameter.
+	 */
+	public static RuntimeSearchParam getOnlyPatientCompartmentRuntimeSearchParam(
+			FhirContext theFhirContext, String theResourceType) {
+		RuntimeResourceDefinition resourceDefinition = theFhirContext.getResourceDefinition(theResourceType);
+		return getOnlyPatientCompartmentRuntimeSearchParam(resourceDefinition);
+	}
+
+	public static RuntimeSearchParam getOnlyPatientCompartmentRuntimeSearchParam(
+			RuntimeResourceDefinition runtimeResourceDefinition) {
+		return validateSearchParamsAndReturnOnlyOne(
+				runtimeResourceDefinition, runtimeResourceDefinition.getSearchParamsForCompartmentName("Patient"));
+	}
+
+	public static RuntimeSearchParam getOnlyPatientCompartmentRuntimeSearchParam(
+			RuntimeResourceDefinition runtimeResourceDefinition, List<RuntimeSearchParam> theSearchParams) {
+		return validateSearchParamsAndReturnOnlyOne(runtimeResourceDefinition, theSearchParams);
+	}
+
+	@Nonnull
+	private static RuntimeSearchParam validateSearchParamsAndReturnOnlyOne(
+			RuntimeResourceDefinition theRuntimeResourceDefinition, List<RuntimeSearchParam> theSearchParams) {
+		final RuntimeSearchParam patientSearchParam;
+		if (CollectionUtils.isEmpty(theSearchParams)) {
+			String errorMessage = String.format(
+					"Resource type [%s] for ID [%s] and version: [%s] is not eligible for this type of export, as it contains no Patient compartment, and no `patient` or `subject` search parameter",
+					theRuntimeResourceDefinition.getName(),
+					theRuntimeResourceDefinition.getId(),
+					theRuntimeResourceDefinition.getStructureVersion());
+			throw new IllegalArgumentException(Msg.code(1774) + errorMessage);
+		} else if (theSearchParams.size() == 1) {
+			patientSearchParam = theSearchParams.get(0);
+		} else {
+			String errorMessage = String.format(
+					"Resource type [%s] for ID [%s] and version: [%s] has more than one Search Param which references a patient compartment. We are unable to disambiguate which patient search parameter we should be searching by.",
+					theRuntimeResourceDefinition.getName(),
+					theRuntimeResourceDefinition.getId(),
+					theRuntimeResourceDefinition.getStructureVersion());
+			throw new IllegalArgumentException(Msg.code(1775) + errorMessage);
+		}
+		return patientSearchParam;
+	}
+
+	public static List<RuntimeSearchParam> getAllPatientCompartmentRuntimeSearchParamsForResourceType(
+			FhirContext theFhirContext, String theResourceType) {
+		RuntimeResourceDefinition runtimeResourceDefinition = theFhirContext.getResourceDefinition(theResourceType);
+		return getAllPatientCompartmentRuntimeSearchParams(runtimeResourceDefinition);
+	}
+
+	public static List<RuntimeSearchParam> getAllPatientCompartmenRuntimeSearchParams(FhirContext theFhirContext) {
+		return theFhirContext.getResourceTypes().stream()
+				.flatMap(type ->
+						getAllPatientCompartmentRuntimeSearchParamsForResourceType(theFhirContext, type).stream())
+				.collect(Collectors.toList());
+	}
+
+	public static Set<String> getAllResourceTypesThatAreInPatientCompartment(FhirContext theFhirContext) {
+		return theFhirContext.getResourceTypes().stream()
+				.filter(type -> CollectionUtils.isNotEmpty(
+						getAllPatientCompartmentRuntimeSearchParamsForResourceType(theFhirContext, type)))
+				.collect(Collectors.toSet());
+	}
+
+	private static List<RuntimeSearchParam> getAllPatientCompartmentRuntimeSearchParams(
+			RuntimeResourceDefinition theRuntimeResourceDefinition) {
+		List<RuntimeSearchParam> patient = theRuntimeResourceDefinition.getSearchParamsForCompartmentName("Patient");
+		return patient;
+	}
+
+	/**
+	 * Return true if any search parameter in the resource can point at a patient, false otherwise
+	 */
+	public static boolean isResourceTypeInPatientCompartment(FhirContext theFhirContext, String theResourceType) {
+		RuntimeResourceDefinition runtimeResourceDefinition = theFhirContext.getResourceDefinition(theResourceType);
+		return CollectionUtils.isNotEmpty(getAllPatientCompartmentRuntimeSearchParams(runtimeResourceDefinition));
+	}
+
+	@Nullable
+	public static String getCode(FhirContext theContext, IBaseResource theResource) {
+		return getStringChild(theContext, theResource, "code");
+	}
+
+	@Nullable
+	public static String getURL(FhirContext theContext, IBaseResource theResource) {
+		return getStringChild(theContext, theResource, "url");
+	}
+
+	@Nullable
+	public static String getExpression(FhirContext theFhirContext, IBaseResource theResource) {
+		return getStringChild(theFhirContext, theResource, "expression");
+	}
+
+	private static String getStringChild(FhirContext theFhirContext, IBaseResource theResource, String theChildName) {
+		Validate.notNull(theFhirContext, "theContext must not be null");
+		Validate.notNull(theResource, "theResource must not be null");
+		RuntimeResourceDefinition def = theFhirContext.getResourceDefinition(theResource);
+
+		BaseRuntimeChildDefinition base = def.getChildByName(theChildName);
+		return base.getAccessor()
+				.getFirstValueOrNull(theResource)
+				.map(t -> ((IPrimitiveType<?>) t))
+				.map(t -> t.getValueAsString())
+				.orElse(null);
+	}
+
+	public static String stripModifier(String theSearchParam) {
+		String retval;
+		int colonIndex = theSearchParam.indexOf(":");
+		if (colonIndex == -1) {
+			retval = theSearchParam;
+		} else {
+			retval = theSearchParam.substring(0, colonIndex);
+		}
+		return retval;
+	}
+
+	/**
+	 * Many SearchParameters combine a series of potential expressions into a single concatenated
+	 * expression. For example, in FHIR R5 the "encounter" search parameter has an expression like:
+	 * <code>AuditEvent.encounter | CarePlan.encounter | ChargeItem.encounter | ......</code>.
+	 * This method takes such a FHIRPath expression and splits it into a series of separate
+	 * expressions. To achieve this, we iteratively splits a string on any <code> or </code> or <code>|</code> that
+	 * is <b>not</b> contained inside a set of parentheses. e.g.
+	 * <p>
+	 * "Patient.select(a or b)" -->  ["Patient.select(a or b)"]
+	 * "Patient.select(a or b) or Patient.select(c or d )" --> ["Patient.select(a or b)", "Patient.select(c or d)"]
+	 * "Patient.select(a|b) or Patient.select(c or d )" --> ["Patient.select(a|b)", "Patient.select(c or d)"]
+	 * "Patient.select(b) | Patient.select(c)" -->  ["Patient.select(b)", "Patient.select(c)"]
+	 *
+	 * @param thePaths The FHIRPath expression to split
+	 * @return The split strings
+	 */
+	public static String[] splitSearchParameterExpressions(String thePaths) {
+		if (!StringUtils.containsAny(thePaths, " or ", " |")) {
+			return new String[] {thePaths};
+		}
+		List<String> topLevelOrExpressions = splitOutOfParensToken(thePaths, " or ");
+		return topLevelOrExpressions.stream()
+				.flatMap(s -> splitOutOfParensToken(s, " |").stream())
+				.toArray(String[]::new);
+	}
+
+	private static List<String> splitOutOfParensToken(String thePath, String theToken) {
+		int tokenLength = theToken.length();
+		int index = thePath.indexOf(theToken);
+		int rightIndex = 0;
+		List<String> retVal = new ArrayList<>();
+		while (index > -1) {
+			String left = thePath.substring(rightIndex, index);
+			if (allParensHaveBeenClosed(left)) {
+				retVal.add(left.trim());
+				rightIndex = index + tokenLength;
+			}
+			index = thePath.indexOf(theToken, index + tokenLength);
+		}
+		String pathTrimmed = thePath.substring(rightIndex).trim();
+		if (!pathTrimmed.isEmpty()) {
+			retVal.add(pathTrimmed);
+		}
+		return retVal;
+	}
+
+	private static boolean allParensHaveBeenClosed(String thePaths) {
+		int open = StringUtils.countMatches(thePaths, "(");
+		int close = StringUtils.countMatches(thePaths, ")");
+		return open == close;
+	}
+
+	/**
+	 * Given a FHIRPath expression which presumably addresses a FHIR reference or
+	 * canonical reference element (i.e. a FHIRPath expression used in a "reference"
+	 * SearchParameter), tries to determine whether the path could potentially resolve
+	 * to a canonical reference.
+	 * <p>
+	 * Just because a SearchParameter is a Reference SP, doesn't necessarily mean that it
+	 * can reference a canonical. So first we try to rule out the SP based on the path it
+	 * contains. This matters because a SearchParameter of type Reference can point to
+	 * a canonical element (in which case we need to _include any canonical targets). Or it
+	 * can point to a Reference element (in which case we only need to _include actual
+	 * references by ID).
+	 * </p>
+	 * <p>
+	 * This isn't perfect because there's really no definitive and comprehensive
+	 * way of determining the datatype that a SearchParameter or a FHIRPath point to. But
+	 * we do our best if the path is simple enough to just manually check the type it
+	 * points to, or if it ends in an explicit type declaration.
+	 * </p>
+	 * <p>
+	 * Because it is not possible to deterministically determine the datatype for a
+	 * FHIRPath expression in all cases, this method is cautious: it will return
+	 * {@literal true} if it isn't sure.
+	 * </p>
+	 *
+	 * @return Returns {@literal true} if the path could return a {@literal canonical} or {@literal CanonicalReference}, or returns {@literal false} if the path could only return a {@literal Reference}.
+	 */
+	public static boolean referencePathCouldPotentiallyReferenceCanonicalElement(
+			FhirContext theContext, String theResourceType, String thePath, boolean theReverse) {
+
+		// If this path explicitly wants a reference and not a canonical, we can ignore it since we're
+		// only looking for canonicals here
+		if (thePath.endsWith(".ofType(Reference)")) {
+			return false;
+		}
+
+		BaseRuntimeElementCompositeDefinition<?> currentDef = theContext.getResourceDefinition(theResourceType);
+
+		String remainingPath = thePath;
+		boolean firstSegment = true;
+		while (remainingPath != null) {
+
+			int dotIdx = remainingPath.indexOf(".");
+			String currentSegment;
+			if (dotIdx == -1) {
+				currentSegment = remainingPath;
+				remainingPath = null;
+			} else {
+				currentSegment = remainingPath.substring(0, dotIdx);
+				remainingPath = remainingPath.substring(dotIdx + 1);
+			}
+
+			if (isBlank(currentSegment)) {
+				return true;
+			}
+
+			if (firstSegment) {
+				firstSegment = false;
+				// The first segment is typically just the resource name, and we assume it is
+				// as long as the first character is upper case.
+				if (Character.isUpperCase(currentSegment.charAt(0))) {
+
+					// If we're in forward-include mode, and the first segment is the resource type,
+					// we can ignore any paths where the resource type isn't actually the one
+					// we're matching on
+					if (!theReverse && !theResourceType.equals(currentSegment)) {
+						return false;
+					}
+
+					// Set the working definition to be the resource type specified in the path
+					try {
+						currentDef = theContext.getResourceDefinition(currentSegment);
+					} catch (DataFormatException e) {
+						ourLog.warn("Search parameter path defines an invalid resource type: {}", currentSegment);
+					}
+					continue;
+				}
+			}
+
+			BaseRuntimeChildDefinition child = currentDef.getChildByName(currentSegment);
+			if (child == null) {
+				return true;
+			}
+			BaseRuntimeElementDefinition<?> def = child.getChildByName(currentSegment);
+			if (def == null) {
+				return true;
+			}
+			if (def.getName().equals("Reference")) {
+				return false;
+			}
+			if (!(def instanceof BaseRuntimeElementCompositeDefinition)) {
+				return true;
+			}
+
+			currentDef = (BaseRuntimeElementCompositeDefinition<?>) def;
+		}
+
+		return true;
+	}
+}

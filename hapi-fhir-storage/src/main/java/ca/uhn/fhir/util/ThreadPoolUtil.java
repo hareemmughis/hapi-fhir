@@ -1,0 +1,103 @@
+/*-
+ * #%L
+ * HAPI FHIR Storage api
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.util;
+
+import ca.uhn.fhir.jpa.search.reindex.BlockPolicy;
+import jakarta.annotation.Nonnull;
+import org.apache.commons.lang3.Validate;
+import org.springframework.core.task.TaskDecorator;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import java.util.concurrent.RejectedExecutionHandler;
+
+public final class ThreadPoolUtil {
+	private ThreadPoolUtil() {}
+
+	/**
+	 * Creates a fixed-size thread pool with {@literal thePoolSize} threads
+	 * and an unlimited-length work queue.
+	 *
+	 * @param thePoolSize The number of threads in the pool
+	 * @param theThreadNamePrefix Threads in the pool will be named with this prefix followed by a dash and a number
+	 *
+	 * @since 8.4.0
+	 */
+	@Nonnull
+	public static ThreadPoolTaskExecutor newThreadPool(int thePoolSize, String theThreadNamePrefix) {
+		return newThreadPool(thePoolSize, thePoolSize, theThreadNamePrefix, 0);
+	}
+
+	@Nonnull
+	public static ThreadPoolTaskExecutor newThreadPool(
+			int theCorePoolSize, int theMaxPoolSize, String theThreadNamePrefix) {
+		return newThreadPool(theCorePoolSize, theMaxPoolSize, theThreadNamePrefix, 0);
+	}
+
+	@Nonnull
+	public static ThreadPoolTaskExecutor newThreadPool(
+			int theCorePoolSize, int theMaxPoolSize, String theThreadNamePrefix, int theQueueCapacity) {
+		return newThreadPool(
+				theCorePoolSize, theMaxPoolSize, theThreadNamePrefix, theQueueCapacity, null, new BlockPolicy());
+	}
+
+	@Nonnull
+	public static ThreadPoolTaskExecutor newThreadPool(
+			int theCorePoolSize,
+			int theMaxPoolSize,
+			String theThreadNamePrefix,
+			int theQueueCapacity,
+			RejectedExecutionHandler theRejectedExecutionHandler) {
+		return newThreadPool(
+				theCorePoolSize,
+				theMaxPoolSize,
+				theThreadNamePrefix,
+				theQueueCapacity,
+				null,
+				theRejectedExecutionHandler);
+	}
+
+	@Nonnull
+	public static ThreadPoolTaskExecutor newThreadPool(
+			int theCorePoolSize,
+			int theMaxPoolSize,
+			String theThreadNamePrefix,
+			int theQueueCapacity,
+			TaskDecorator taskDecorator,
+			RejectedExecutionHandler theRejectedExecutionHandler) {
+		Validate.isTrue(
+				theCorePoolSize == theMaxPoolSize || theQueueCapacity == 0,
+				"If the queue capacity is greater than 0, core pool size needs to match max pool size or the system won't grow the queue");
+		Validate.notBlank(theThreadNamePrefix, "Thread name prefix must not be blank");
+		String threadNamePrefix = theThreadNamePrefix;
+		if (!threadNamePrefix.endsWith("-")) {
+			threadNamePrefix = threadNamePrefix + "-";
+		}
+		ThreadPoolTaskExecutor asyncTaskExecutor = new ThreadPoolTaskExecutor();
+		asyncTaskExecutor.setCorePoolSize(theCorePoolSize);
+		asyncTaskExecutor.setMaxPoolSize(theMaxPoolSize);
+		asyncTaskExecutor.setQueueCapacity(theQueueCapacity);
+		asyncTaskExecutor.setAllowCoreThreadTimeOut(true);
+		asyncTaskExecutor.setThreadNamePrefix(threadNamePrefix);
+		asyncTaskExecutor.setRejectedExecutionHandler(theRejectedExecutionHandler);
+		asyncTaskExecutor.setTaskDecorator(taskDecorator);
+		asyncTaskExecutor.initialize();
+		return asyncTaskExecutor;
+	}
+}

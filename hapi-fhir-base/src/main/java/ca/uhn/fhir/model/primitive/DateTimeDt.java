@@ -1,17 +1,15 @@
-package ca.uhn.fhir.model.primitive;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,14 +17,15 @@ package ca.uhn.fhir.model.primitive;
  * limitations under the License.
  * #L%
  */
-
-import java.util.Date;
-import java.util.TimeZone;
+package ca.uhn.fhir.model.primitive;
 
 import ca.uhn.fhir.model.api.TemporalPrecisionEnum;
 import ca.uhn.fhir.model.api.annotation.DatatypeDef;
 import ca.uhn.fhir.model.api.annotation.SimpleSetter;
 import ca.uhn.fhir.parser.DataFormatException;
+
+import java.util.Date;
+import java.util.TimeZone;
 
 /**
  * Represents a FHIR dateTime datatype. Valid precisions values for this type are:
@@ -70,18 +69,20 @@ public class DateTimeDt extends BaseDateTimeDt {
 	 * <li>{@link TemporalPrecisionEnum#SECOND}
 	 * <li>{@link TemporalPrecisionEnum#MILLI}
 	 * </ul>
-	 * 
+	 *
 	 * @throws DataFormatException
 	 *             If the specified precision is not allowed for this type
 	 */
 	@SimpleSetter
-	public DateTimeDt(@SimpleSetter.Parameter(name = "theDate") Date theDate, @SimpleSetter.Parameter(name = "thePrecision") TemporalPrecisionEnum thePrecision) {
+	public DateTimeDt(
+			@SimpleSetter.Parameter(name = "theDate") Date theDate,
+			@SimpleSetter.Parameter(name = "thePrecision") TemporalPrecisionEnum thePrecision) {
 		super(theDate, thePrecision, TimeZone.getDefault());
 	}
 
 	/**
 	 * Create a new instance using a string date/time
-	 * 
+	 *
 	 * @throws DataFormatException
 	 *             If the specified precision is not allowed for this type
 	 */
@@ -105,16 +106,16 @@ public class DateTimeDt extends BaseDateTimeDt {
 	}
 
 	@Override
-	boolean isPrecisionAllowed(TemporalPrecisionEnum thePrecision) {
+	protected boolean isPrecisionAllowed(TemporalPrecisionEnum thePrecision) {
 		switch (thePrecision) {
-		case YEAR:
-		case MONTH:
-		case DAY:
-		case SECOND:
-		case MILLI:
-			return true;
-		default:
-			return false;
+			case YEAR:
+			case MONTH:
+			case DAY:
+			case SECOND:
+			case MILLI:
+				return true;
+			default:
+				return false;
 		}
 	}
 
@@ -128,12 +129,11 @@ public class DateTimeDt extends BaseDateTimeDt {
 
 	/**
 	 * Returns the default precision for this datatype
-	 * 
+	 *
 	 * @see #DEFAULT_PRECISION
 	 */
 	@Override
 	protected TemporalPrecisionEnum getDefaultPrecisionForDatatype() {
 		return DEFAULT_PRECISION;
 	}
-
 }

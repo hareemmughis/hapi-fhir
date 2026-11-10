@@ -1,9 +1,10 @@
 package ca.uhn.fhir.model;
 
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import org.hl7.fhir.dstu3.model.DecimalType;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 public class DecimalTypeTest {
 

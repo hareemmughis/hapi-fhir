@@ -1,28 +1,20 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.not;
-import static org.hamcrest.Matchers.stringContainsInOrder;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
-
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.entity.ContentType;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.rest.annotation.Create;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.annotation.Read;
+import ca.uhn.fhir.rest.annotation.ResourceParam;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.api.MethodOutcome;
+import ca.uhn.fhir.rest.client.MyPatientWithExtensions;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
 import org.hl7.fhir.dstu3.model.DateType;
 import org.hl7.fhir.dstu3.model.IdType;
 import org.hl7.fhir.dstu3.model.OperationOutcome;
@@ -30,28 +22,30 @@ import org.hl7.fhir.dstu3.model.OperationOutcome.OperationOutcomeIssueComponent;
 import org.hl7.fhir.dstu3.model.Patient;
 import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
 import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.rest.annotation.*;
-import ca.uhn.fhir.rest.api.MethodOutcome;
-import ca.uhn.fhir.rest.client.MyPatientWithExtensions;
-import ca.uhn.fhir.util.PortUtil;
-import ca.uhn.fhir.util.TestUtil;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class CreateDstu3Test {
-	private static CloseableHttpClient ourClient;
 
-	private static FhirContext ourCtx = FhirContext.forDstu3();
+	private static final FhirContext ourCtx = FhirContext.forDstu3();
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(CreateDstu3Test.class);
-	private static int ourPort;
-	private static Server ourServer;
 	public static IBaseOperationOutcome ourReturnOo;
 
-	@Before
+	@RegisterExtension
+	private RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		 .setDefaultResponseEncoding(EncodingEnum.XML)
+		 .registerProvider(new PatientProvider())
+		 .withPagingProvider(new FifoMemoryPagingProvider(100))
+		 .setDefaultPrettyPrint(false);
+
+	@BeforeEach
 	public void before() {
 		ourReturnOo = null;
 	}
@@ -60,184 +54,137 @@ public class CreateDstu3Test {
 	 * #472
 	 */
 	@Test
-	public void testCreateReturnsLocationHeader() throws Exception {
+	public void testCreateReturnsLocationHeader() {
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient");
-		httpPost.setEntity(new StringEntity("{\"resourceType\":\"Patient\", \"status\":\"active\"}", ContentType.parse("application/fhir+json; charset=utf-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		HttpTestResponse response = ourServer.fhirRequest("/Patient")
+			.post("{\"resourceType\":\"Patient\", \"status\":\"active\"}", "application/fhir+json; charset=utf-8");
+		String responseContent = response.assertStatus(201).getBody();
 
 		ourLog.info("Response was:\n{}", responseContent);
 
-		assertEquals(201, status.getStatusLine().getStatusCode());
-
-		assertEquals(1, status.getHeaders("Location").length);
-		assertEquals(0, status.getHeaders("Content-Location").length);
-		assertEquals("http://localhost:" + ourPort + "/Patient/1", status.getFirstHeader("Location").getValue());
+		assertThat(response.getHeaders("Location").size()).isEqualTo(1);
+		assertThat(response.getHeaders(Constants.HEADER_CONTENT_LOCATION).size()).isEqualTo(1);
+		response.assertHeader(Constants.HEADER_LOCATION, ourServer.getBaseUrl() + "/Patient/1");
 
 	}
 
 	@Test
-	public void testCreateReturnsOperationOutcome() throws Exception {
+	public void testCreateReturnsRepresentation() {
 		ourReturnOo = new OperationOutcome().addIssue(new OperationOutcomeIssueComponent().setDiagnostics("DIAG"));
+		String expectedResponseContent = "{\"resourceType\":\"Patient\",\"id\":\"1\",\"meta\":{\"versionId\":\"1\"},\"gender\":\"male\"}";
 		
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient");
-		httpPost.setEntity(new StringEntity("{\"resourceType\":\"Patient\", \"status\":\"active\"}", ContentType.parse("application/fhir+json; charset=utf-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient")
+			.post("{\"resourceType\":\"Patient\", \"gender\":\"male\"}", "application/fhir+json; charset=utf-8")
+			.assertStatus(201)
+			.getBody();
 
 		ourLog.info("Response was:\n{}", responseContent);
+		assertEquals(expectedResponseContent, responseContent);
 
-		assertEquals(201, status.getStatusLine().getStatusCode());
-
-		assertThat(responseContent, containsString("DIAG"));
 	}
 
 	/**
 	 * #342
 	 */
 	@Test
-	public void testCreateWithInvalidContent() throws Exception {
+	public void testCreateWithInvalidContent() {
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient");
-		httpPost.setEntity(new StringEntity("FOO", ContentType.parse("application/xml+fhir; charset=utf-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient")
+			.post("FOO", "application/xml+fhir; charset=utf-8")
+			.assertStatus(400)
+			.getBody();
 
 		ourLog.info("Response was:\n{}", responseContent);
 
-		assertEquals(400, status.getStatusLine().getStatusCode());
-
-		assertThat(responseContent, containsString("<OperationOutcome xmlns=\"http://hl7.org/fhir\"><issue><severity value=\"error\"/><code value=\"processing\"/><diagnostics value=\""));
-		assertThat(responseContent, containsString("Failed to parse request body as XML resource. Error was: com.ctc.wstx.exc.WstxUnexpectedCharException: Unexpected character 'F'"));
+		assertThat(responseContent).contains("<OperationOutcome xmlns=\"http://hl7.org/fhir\"><issue><severity value=\"error\"/><code value=\"processing\"/><diagnostics value=\"");
+		assertThat(responseContent).contains("Unexpected character 'F'");
+		assertThat(responseContent).contains("Failed to parse request body as XML resource. Error was: " + Msg.code(1852));
 
 	}
 
 	@Test
-	public void testCreateWithIncorrectContent1() throws Exception {
+	public void testCreateWithIncorrectContent1() {
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient");
-		httpPost.setEntity(new StringEntity("{\"foo\":\"bar\"}", ContentType.parse("application/xml+fhir; charset=utf-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient")
+			.post("{\"foo\":\"bar\"}", "application/xml+fhir; charset=utf-8")
+			.assertStatus(400)
+			.getBody();
 
 		ourLog.info("Response was:\n{}", responseContent);
 
-		assertEquals(400, status.getStatusLine().getStatusCode());
-
-		assertThat(responseContent, containsString("<OperationOutcome xmlns=\"http://hl7.org/fhir\"><issue><severity value=\"error\"/><code value=\"processing\"/><diagnostics value=\""));
-		assertThat(responseContent, containsString("Failed to parse request body as XML resource."));
+		assertThat(responseContent).contains("<OperationOutcome xmlns=\"http://hl7.org/fhir\"><issue><severity value=\"error\"/><code value=\"processing\"/><diagnostics value=\"");
+		assertThat(responseContent).contains("Failed to parse request body as XML resource.");
 
 	}
 
 	@Test
-	public void testCreateWithIncorrectContent2() throws Exception {
+	public void testCreateWithIncorrectContent2() {
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient");
-		httpPost.setEntity(new StringEntity("{\"foo\":\"bar\"}", ContentType.parse("application/fhir+xml; charset=utf-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient")
+			.post("{\"foo\":\"bar\"}", "application/fhir+xml; charset=utf-8")
+			.assertStatus(400)
+			.getBody();
 
 		ourLog.info("Response was:\n{}", responseContent);
 
-		assertEquals(400, status.getStatusLine().getStatusCode());
-
-		assertThat(responseContent, containsString("<OperationOutcome xmlns=\"http://hl7.org/fhir\"><issue><severity value=\"error\"/><code value=\"processing\"/><diagnostics value=\""));
-		assertThat(responseContent, containsString("Failed to parse request body as XML resource."));
+		assertThat(responseContent).contains("<OperationOutcome xmlns=\"http://hl7.org/fhir\"><issue><severity value=\"error\"/><code value=\"processing\"/><diagnostics value=\"");
+		assertThat(responseContent).contains("Failed to parse request body as XML resource.");
 
 	}
 
 	@Test
-	public void testCreateWithIncorrectContent3() throws Exception {
+	public void testCreateWithIncorrectContent3() {
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient");
-		httpPost.setEntity(new StringEntity("{\"foo\":\"bar\"}", ContentType.parse("application/fhir+json; charset=utf-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient")
+			.post("{\"foo\":\"bar\"}", "application/fhir+json; charset=utf-8")
+			.assertStatus(400)
+			.getBody();
 
 		ourLog.info("Response was:\n{}", responseContent);
 
-		assertEquals(400, status.getStatusLine().getStatusCode());
-
-		assertThat(responseContent, containsString("Failed to parse request body as JSON resource."));
+		assertThat(responseContent).contains("Failed to parse request body as JSON resource.");
 
 	}
 
 	@Test
-	public void testSearch() throws Exception {
+	public void testSearch() {
 
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient?_format=xml&_pretty=true");
-		HttpResponse status = ourClient.execute(httpGet);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient?_format=xml&_pretty=true")
+			.get()
+			.assertStatus(200)
+			.getBody();
 
 		ourLog.info("Response was:\n{}", responseContent);
-
-		assertEquals(200, status.getStatusLine().getStatusCode());
 
 		//@formatter:off
-		assertThat(responseContent, stringContainsInOrder(
-			"<Patient xmlns=\"http://hl7.org/fhir\">", 
-				"<id value=\"0\"/>", 
-				"<meta>", 
-					"<profile value=\"http://example.com/StructureDefinition/patient_with_extensions\"/>", 
-				"</meta>", 
-				"<modifierExtension url=\"http://example.com/ext/date\">", 
-					"<valueDate value=\"2011-01-01\"/>", 
-				"</modifierExtension>", 
-			"</Patient>"));
+		assertThat(responseContent).contains(
+			"<Patient xmlns=\"http://hl7.org/fhir\">",
+				"<id value=\"0\"/>",
+				"<meta>",
+					"<profile value=\"http://example.com/StructureDefinition/patient_with_extensions\"/>",
+				"</meta>",
+				"<modifierExtension url=\"http://example.com/ext/date\">",
+					"<valueDate value=\"2011-01-01\"/>",
+				"</modifierExtension>",
+			"</Patient>");
 		//@formatter:on
 
-		assertThat(responseContent, not(containsString("http://hl7.org/fhir/")));
+		assertThat(responseContent).doesNotContain("http://hl7.org/fhir/");
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		PatientProvider patientProvider = new PatientProvider();
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-
-		servlet.setResourceProviders(patientProvider);
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
-	}
-
-	public static class PatientProvider implements IResourceProvider {
+	private static class PatientProvider implements IResourceProvider {
 
 		@Create()
 		public MethodOutcome create(@ResourceParam Patient theIdParam) {
-			return new MethodOutcome(new IdType("Patient", "1"), true).setOperationOutcome(ourReturnOo);
+			theIdParam.setId("1");
+			theIdParam.getMeta().setVersionId("1");
+			
+			return new MethodOutcome(new IdType("Patient", "1"), true).setOperationOutcome(ourReturnOo).setResource(theIdParam);
 		}
 
 		@Override
@@ -255,7 +202,7 @@ public class CreateDstu3Test {
 
 		@Search
 		public List<IBaseResource> search() {
-			ArrayList<IBaseResource> retVal = new ArrayList<IBaseResource>();
+			ArrayList<IBaseResource> retVal = new ArrayList<>();
 
 			MyPatientWithExtensions p0 = new MyPatientWithExtensions();
 			p0.setId(new IdType("Patient/0"));

@@ -1,21 +1,15 @@
-package ca.uhn.fhir.model.primitive;
-
-import java.io.IOException;
-import java.io.ObjectInput;
-import java.io.ObjectOutput;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,11 +17,15 @@ import java.io.ObjectOutput;
  * limitations under the License.
  * #L%
  */
-
-import org.apache.commons.lang3.Validate;
+package ca.uhn.fhir.model.primitive;
 
 import ca.uhn.fhir.model.api.IValueSetEnumBinder;
 import ca.uhn.fhir.model.api.annotation.DatatypeDef;
+import org.apache.commons.lang3.Validate;
+
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
 
 @DatatypeDef(name = "code", isSpecialization = true)
 public class BoundCodeDt<T extends Enum<?>> extends CodeDt {
@@ -56,9 +54,10 @@ public class BoundCodeDt<T extends Enum<?>> extends CodeDt {
 	public IValueSetEnumBinder<T> getBinder() {
 		return myBinder;
 	}
-	
+
 	public T getValueAsEnum() {
-		Validate.notNull(myBinder, "This object does not have a binder. Constructor BoundCodeDt() should not be called!");
+		Validate.notNull(
+				myBinder, "This object does not have a binder. Constructor BoundCodeDt() should not be called!");
 		T retVal = myBinder.fromCodeString(getValue());
 		if (retVal == null) {
 			// TODO: throw special exception type?
@@ -74,8 +73,9 @@ public class BoundCodeDt<T extends Enum<?>> extends CodeDt {
 	}
 
 	public void setValueAsEnum(T theValue) {
-		Validate.notNull(myBinder, "This object does not have a binder. Constructor BoundCodeDt() should not be called!");
-		if (theValue==null) {
+		Validate.notNull(
+				myBinder, "This object does not have a binder. Constructor BoundCodeDt() should not be called!");
+		if (theValue == null) {
 			setValue(null);
 		} else {
 			setValue(myBinder.toCodeString(theValue));

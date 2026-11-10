@@ -1,17 +1,15 @@
-package ca.uhn.fhir.jpa.entity;
-
 /*
  * #%L
  * HAPI FHIR JPA Server
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,24 +17,28 @@ package ca.uhn.fhir.jpa.entity;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.jpa.entity;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.ForeignKey;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Index;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.SequenceGenerator;
+import jakarta.persistence.Table;
 
 import java.io.Serializable;
 
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.ForeignKey;
-import javax.persistence.GeneratedValue;
-import javax.persistence.GenerationType;
-import javax.persistence.Id;
-import javax.persistence.JoinColumn;
-import javax.persistence.ManyToOne;
-import javax.persistence.SequenceGenerator;
-import javax.persistence.Table;
-
-//@formatter:off
+// @formatter:off
 @Entity
-@Table(name = "HFJ_SEARCH_INCLUDE")
-//@formatter:on
+@Table(
+		name = "HFJ_SEARCH_INCLUDE",
+		indexes = {@Index(name = "FK_SEARCHINC_SEARCH", columnList = "SEARCH_PID")})
+// @formatter:on
 public class SearchInclude implements Serializable {
 
 	private static final long serialVersionUID = 1L;
@@ -58,10 +60,16 @@ public class SearchInclude implements Serializable {
 	private String myInclude;
 
 	@ManyToOne
-	@JoinColumn(name = "SEARCH_PID", referencedColumnName = "PID", foreignKey = @ForeignKey(name = "FK_SEARCHINC_SEARCH"), insertable = true, updatable = false, nullable = false)
+	@JoinColumn(
+			name = "SEARCH_PID",
+			referencedColumnName = "PID",
+			foreignKey = @ForeignKey(name = "FK_SEARCHINC_SEARCH"),
+			insertable = true,
+			updatable = false,
+			nullable = false)
 	private Search mySearch;
 
-	@Column(name="SEARCH_PID", insertable=false, updatable=false, nullable=false)
+	@Column(name = "SEARCH_PID", insertable = false, updatable = false, nullable = false)
 	private Long mySearchPid;
 
 	@Column(name = "INC_RECURSE", insertable = true, updatable = false, nullable = false)
@@ -107,5 +115,4 @@ public class SearchInclude implements Serializable {
 	public boolean isRecurse() {
 		return myRecurse;
 	}
-
 }

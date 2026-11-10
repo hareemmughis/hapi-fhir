@@ -1,0 +1,520 @@
+/*-
+ * #%L
+ * HAPI FHIR - Master Data Management
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.mdm.util;
+
+import ca.uhn.fhir.context.BaseRuntimeChildDefinition;
+import ca.uhn.fhir.context.BaseRuntimeElementCompositeDefinition;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.context.RuntimeResourceDefinition;
+import ca.uhn.fhir.fhirpath.IFhirPath;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.mdm.api.IMdmSettings;
+import ca.uhn.fhir.mdm.api.IMdmSurvivorshipService;
+import ca.uhn.fhir.mdm.log.Logs;
+import ca.uhn.fhir.mdm.model.CanonicalEID;
+import ca.uhn.fhir.mdm.model.MdmMatchAbortReason;
+import ca.uhn.fhir.mdm.model.MdmTransactionContext;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.util.FhirTerser;
+import jakarta.annotation.Nonnull;
+import org.hl7.fhir.instance.model.api.IAnyResource;
+import org.hl7.fhir.instance.model.api.IBase;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+import org.slf4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static ca.uhn.fhir.context.FhirVersionEnum.DSTU3;
+import static ca.uhn.fhir.context.FhirVersionEnum.R4;
+import static ca.uhn.fhir.context.FhirVersionEnum.R5;
+
+@Service
+public class GoldenResourceHelper {
+
+	private static final Logger ourLog = Logs.getMdmTroubleshootingLog();
+
+	static final String FIELD_NAME_IDENTIFIER = "identifier";
+
+	private final IMdmSettings myMdmSettings;
+
+	private final EIDHelper myEIDHelper;
+
+	private final MdmPartitionHelper myMdmPartitionHelper;
+
+	private final FhirContext myFhirContext;
+
+	@Autowired
+	public GoldenResourceHelper(
+			FhirContext theFhirContext,
+			IMdmSettings theMdmSettings,
+			EIDHelper theEIDHelper,
+			MdmPartitionHelper theMdmPartitionHelper) {
+		myFhirContext = theFhirContext;
+		myMdmSettings = theMdmSettings;
+		myEIDHelper = theEIDHelper;
+		myMdmPartitionHelper = theMdmPartitionHelper;
+	}
+
+	/**
+	 * Creates a copy of the specified resource. This method will carry over resource EID if it exists. If it does not exist,
+	 * a randomly generated UUID EID will be created.
+	 *
+	 * @param <T>                      Supported MDM resource type (e.g. Patient, Practitioner)
+	 * @param theIncomingResource 	  The resource to build the golden resource off of.
+	 *                                 Could be the source resource or another golden resource.
+	 *                                 If a golden resource, do not provide an IMdmSurvivorshipService
+	 * @param theMdmTransactionContext The mdm transaction context
+	 * @param theMdmSurvivorshipService IMdmSurvivorshipSvc. Provide only if survivorshipskills are desired
+	 *                                  to be applied. Provide null otherwise.
+	 */
+	@Nonnull
+	public <T extends IAnyResource> T createGoldenResourceFromMdmSourceResource(
+			T theIncomingResource,
+			MdmTransactionContext theMdmTransactionContext,
+			IMdmSurvivorshipService theMdmSurvivorshipService) {
+		validateContextSupported();
+
+		// get a ref to the actual ID Field
+		RuntimeResourceDefinition resourceDefinition = myFhirContext.getResourceDefinition(theIncomingResource);
+		IBaseResource newGoldenResource = resourceDefinition.newInstance();
+
+		if (theMdmSurvivorshipService != null) {
+			theMdmSurvivorshipService.applySurvivorshipRulesToGoldenResource(
+					theIncomingResource, newGoldenResource, theMdmTransactionContext);
+		}
+
+		// hapi has 2 metamodels: for children and types
+		BaseRuntimeChildDefinition goldenResourceIdentifier = resourceDefinition.getChildByName(FIELD_NAME_IDENTIFIER);
+
+		cloneMDMEidsIntoNewGoldenResource(goldenResourceIdentifier, theIncomingResource, newGoldenResource);
+
+		addHapiEidIfNoExternalEidIsPresent(newGoldenResource, goldenResourceIdentifier, theIncomingResource);
+
+		MdmResourceUtil.setMdmManaged(newGoldenResource);
+		MdmResourceUtil.setGoldenResource(newGoldenResource);
+
+		// TODO - on updating links, if resolving a link, this should go away?
+		// blocked resource's golden resource will be marked special
+		// they are not part of MDM matching algorithm (will not link to other resources)
+		// but other resources can link to them
+		if (theMdmTransactionContext.getReason() == MdmMatchAbortReason.BLOCKED) {
+			MdmResourceUtil.setGoldenResourceAsBlockedResourceGoldenResource(newGoldenResource);
+		}
+
+		// add the partition id to the new resource
+		newGoldenResource.setUserData(
+				Constants.RESOURCE_PARTITION_ID,
+				myMdmPartitionHelper.getRequestPartitionIdForNewGoldenResources(theIncomingResource));
+
+		return (T) newGoldenResource;
+	}
+
+	/**
+	 * If there are no external EIDs on the incoming resource, create a new HAPI EID on the new Golden Resource.
+	 */
+	// TODO GGG ask james if there is any way we can convert this canonical EID into a generic STU-agnostic IBase.
+	private <T extends IAnyResource> void addHapiEidIfNoExternalEidIsPresent(
+			IBaseResource theNewGoldenResource,
+			BaseRuntimeChildDefinition theGoldenResourceIdentifier,
+			IAnyResource theSourceResource) {
+
+		List<CanonicalEID> eidsToApply = myEIDHelper.getExternalEid(theNewGoldenResource);
+		if (!eidsToApply.isEmpty()) {
+			return;
+		}
+
+		CanonicalEID hapiEid = myEIDHelper.createHapiEid();
+		theGoldenResourceIdentifier
+				.getMutator()
+				.addValue(theNewGoldenResource, IdentifierUtil.toId(myFhirContext, hapiEid));
+
+		// set identifier on the source resource
+		cloneEidIntoResource(myFhirContext, theSourceResource, hapiEid);
+	}
+
+	private void cloneMDMEidsIntoNewGoldenResource(
+			BaseRuntimeChildDefinition theGoldenResourceIdentifier,
+			IAnyResource theIncomingResource,
+			IBaseResource theNewGoldenResource) {
+		String incomingResourceType = myFhirContext.getResourceType(theIncomingResource);
+		Set<String> mdmEIDSystems =
+				new HashSet<>(myMdmSettings.getMdmRules().getEnterpriseEIDSystemsForResourceType(incomingResourceType));
+
+		if (mdmEIDSystems.isEmpty()) {
+			return;
+		}
+
+		// FHIR choice types - fields within fhir where we have a choice of ids
+		IFhirPath fhirPath = myFhirContext.newFhirPath();
+		List<IBase> incomingResourceIdentifiers =
+				theGoldenResourceIdentifier.getAccessor().getValues(theIncomingResource);
+
+		for (IBase incomingResourceIdentifier : incomingResourceIdentifiers) {
+			Optional<IPrimitiveType> incomingIdentifierSystem =
+					fhirPath.evaluateFirst(incomingResourceIdentifier, "system", IPrimitiveType.class);
+			if (incomingIdentifierSystem.isPresent()) {
+				String incomingIdentifierSystemString =
+						incomingIdentifierSystem.get().getValueAsString();
+				if (mdmEIDSystems.contains(incomingIdentifierSystemString)) {
+					ourLog.debug(
+							"Incoming resource EID System {} matches an EID system in the MDM rules.  Copying to Golden Resource.",
+							incomingIdentifierSystemString);
+					ca.uhn.fhir.util.TerserUtil.cloneIdentifierIntoResource(
+							myFhirContext,
+							theGoldenResourceIdentifier,
+							incomingResourceIdentifier,
+							theNewGoldenResource);
+				} else {
+					ourLog.debug(
+							"Incoming resource EID System {} is not one of the EID systems in the MDM rules {}.  Not copying to Golden Resource.",
+							incomingIdentifierSystemString,
+							mdmEIDSystems);
+				}
+			} else {
+				ourLog.debug("Incoming resource identifier has no system.  Not copying to Golden Resource.");
+			}
+		}
+	}
+
+	private void validateContextSupported() {
+		FhirVersionEnum fhirVersion = myFhirContext.getVersion().getVersion();
+		if (fhirVersion == R4 || fhirVersion == DSTU3 || fhirVersion == R5) {
+			return;
+		}
+		throw new UnsupportedOperationException(Msg.code(1489) + "Version not supported: "
+				+ myFhirContext.getVersion().getVersion());
+	}
+
+	/**
+	 * Updates EIDs on a Golden Resource, based on the incoming source resource.
+	 * <ul>
+	 * <li>The Golden Resource has no external EID, or multiple EIDs are permitted: the incoming EIDs are
+	 * added.</li>
+	 * <li>They share an EID, so they are the same entity. Each incoming EID is then merged by EID system:
+	 * a system the Golden Resource has no EID in is filled in (GR has MRN 1, incoming has MRN 1 + NPI 7:
+	 * NPI 7 is added); a system it already has an EID in is left alone and the drop logged (GR has MRN 1 +
+	 * NPI 9, incoming has MRN 1 + NPI 7: NPI 7 is dropped, as two NPIs would make the GR ambiguous).</li>
+	 * <li>They share no EID, so they contradict each other and {@link IllegalArgumentException} is thrown
+	 * (GR has MRN 1, incoming has MRN 2).</li>
+	 * </ul>
+	 * <p>
+	 * With a single EID system configured for the resource type, the fill-in case never applies: a shared
+	 * EID already means the Golden Resource has an EID in that one system.
+	 * </p>
+	 *
+	 * @param theGoldenResource The golden resource to update the external EID on.
+	 * @param theSourceResource The source we will retrieve the external EID from.
+	 * @return the modified {@link IBaseResource} representing the Golden Resource.
+	 */
+	public IAnyResource updateGoldenResourceExternalEidFromSourceResource(
+			IAnyResource theGoldenResource,
+			IAnyResource theSourceResource,
+			MdmTransactionContext theMdmTransactionContext) {
+		// This handles overwriting an automatically assigned EID if a patient that links is coming in with an official
+		// EID.
+		List<CanonicalEID> incomingSourceEids = myEIDHelper.getExternalEid(theSourceResource);
+		List<CanonicalEID> goldenResourceOfficialEids = myEIDHelper.getExternalEid(theGoldenResource);
+
+		if (incomingSourceEids.isEmpty()) {
+			return theGoldenResource;
+		}
+
+		if (goldenResourceOfficialEids.isEmpty() || !myMdmSettings.isPreventMultipleEids()) {
+			if (addCanonicalEidsToGoldenResourceIfAbsent(theGoldenResource, incomingSourceEids)) {
+				log(
+						theMdmTransactionContext,
+						"Incoming resource:" + theSourceResource.getIdElement().toUnqualifiedVersionless()
+								+ " + with EID "
+								+ incomingSourceEids.stream()
+										.map(CanonicalEID::toString)
+										.collect(Collectors.joining(","))
+								+ " is applying this EID to its related Golden Resource, as this Golden Resource does not yet have an external EID");
+			}
+		} else if (!goldenResourceOfficialEids.isEmpty()
+				&& myEIDHelper.eidMatchExists(goldenResourceOfficialEids, incomingSourceEids)) {
+			// The resources agree on at least one EID, so they are the same entity. Any EID the incoming
+			// resource carries from an EID system the Golden Resource has no EID in is new information and
+			// is applied; an EID from a system the Golden Resource already uses is not, because a Golden
+			// Resource holding two EIDs of one system would be rejected by the "prevent multiple EIDs"
+			// safeguard on the next write.
+			if (addCanonicalEidsForEidSystemsAbsentFromGoldenResource(
+					theGoldenResource, goldenResourceOfficialEids, incomingSourceEids)) {
+				log(
+						theMdmTransactionContext,
+						"Incoming resource:" + theSourceResource.getIdElement().toVersionless() + " with EIDs "
+								+ incomingSourceEids.stream()
+										.map(CanonicalEID::toString)
+										.collect(Collectors.joining(","))
+								+ " is applying to its related Golden Resource the EIDs of the EID systems that Golden Resource does not yet have an EID for");
+			} else {
+				log(
+						theMdmTransactionContext,
+						"Incoming resource:" + theSourceResource.getIdElement().toVersionless() + " with EIDs "
+								+ incomingSourceEids.stream()
+										.map(CanonicalEID::toString)
+										.collect(Collectors.joining(","))
+								+ " does not need to overwrite the EID in the Golden Resource, as this EID is already present in the Golden Resource");
+			}
+			logEidsDroppedForOccupiedEidSystems(
+					theMdmTransactionContext, theSourceResource, goldenResourceOfficialEids, incomingSourceEids);
+		} else {
+			throw new IllegalArgumentException(Msg.code(1490)
+					+ String.format(
+							"Incoming resource EID %s would create a duplicate Golden Resource, as Golden Resource EID %s already exists!",
+							incomingSourceEids.toString(), goldenResourceOfficialEids.toString()));
+		}
+		return theGoldenResource;
+	}
+
+	/**
+	 * Replaces the Golden Resource's EIDs with the given ones, within the EID systems those EIDs belong to.
+	 * EID systems the incoming EIDs say nothing about are left alone: where a resource type is identified
+	 * by several EID systems, replacing its MRN is not a statement about its NPI, and clearing both would
+	 * silently delete an identifier nothing in the update mentioned.
+	 * <p>
+	 * With a single configured EID system this is exactly the previous behaviour, since the system being
+	 * overwritten is the only one a Golden Resource of that type can carry an EID in.
+	 * </p>
+	 *
+	 * @param theGoldenResource the Golden Resource to overwrite EIDs on
+	 * @param theNewEid the EIDs to write; the EID systems they belong to are the ones cleared first
+	 * @return the same Golden Resource, modified in place
+	 */
+	public IBaseResource overwriteExternalEids(IBaseResource theGoldenResource, List<CanonicalEID> theNewEid) {
+		Set<String> systemsBeingOverwritten =
+				theNewEid.stream().map(CanonicalEID::getSystem).collect(Collectors.toSet());
+		clearExternalEids(theGoldenResource, systemsBeingOverwritten);
+		addCanonicalEidsToGoldenResourceIfAbsent(theGoldenResource, theNewEid);
+		return theGoldenResource;
+	}
+
+	private void clearExternalEidsFromTheGoldenResource(
+			BaseRuntimeChildDefinition theGoldenResourceIdentifier,
+			IBaseResource theGoldenResource,
+			Set<String> theEidSystemsToClear) {
+		IFhirPath fhirPath = myFhirContext.newFhirPath();
+		List<IBase> goldenResourceIdentifiers =
+				theGoldenResourceIdentifier.getAccessor().getValues(theGoldenResource);
+		List<IBase> clonedIdentifiers = new ArrayList<>();
+		FhirTerser terser = myFhirContext.newTerser();
+
+		for (IBase base : goldenResourceIdentifiers) {
+			Optional<IPrimitiveType> system = fhirPath.evaluateFirst(base, "system", IPrimitiveType.class);
+			if (system.isPresent()) {
+				String baseSystem = system.get().getValueAsString();
+				if (theEidSystemsToClear.contains(baseSystem)) {
+					ourLog.debug(
+							"Found EID confirming to MDM rules {}. It does not need to be copied, skipping",
+							baseSystem);
+					continue;
+				}
+			}
+
+			BaseRuntimeElementCompositeDefinition<?> childIdentifier = (BaseRuntimeElementCompositeDefinition<?>)
+					theGoldenResourceIdentifier.getChildByName(FIELD_NAME_IDENTIFIER);
+			IBase goldenResourceNewIdentifier = childIdentifier.newInstance();
+			terser.cloneInto(base, goldenResourceNewIdentifier, true);
+
+			clonedIdentifiers.add(goldenResourceNewIdentifier);
+		}
+
+		goldenResourceIdentifiers.clear();
+		goldenResourceIdentifiers.addAll(clonedIdentifiers);
+	}
+
+	private void clearExternalEids(IBaseResource theGoldenResource, Set<String> theEidSystemsToClear) {
+		// validate the system - if it's set to EID system - then clear it - type and STU version
+		validateContextSupported();
+
+		// get a ref to the actual ID Field
+		RuntimeResourceDefinition resourceDefinition = myFhirContext.getResourceDefinition(theGoldenResource);
+		BaseRuntimeChildDefinition goldenResourceIdentifier = resourceDefinition.getChildByName(FIELD_NAME_IDENTIFIER);
+		clearExternalEidsFromTheGoldenResource(goldenResourceIdentifier, theGoldenResource, theEidSystemsToClear);
+	}
+
+	/**
+	 * Given a list of incoming External EIDs, and a Golden Resource, apply all the EIDs to this resource, which did not already exist on it.
+	 * @return true if an EID was added
+	 */
+	private boolean addCanonicalEidsToGoldenResourceIfAbsent(
+			IBaseResource theGoldenResource, List<CanonicalEID> theIncomingSourceExternalEids) {
+		return addCanonicalEidsToGoldenResource(
+				theGoldenResource,
+				myEIDHelper.getExternalEid(theGoldenResource),
+				theIncomingSourceExternalEids,
+				CanonicalEID::getSystemAndValueKey);
+	}
+
+	/**
+	 * Applies the incoming EIDs belonging to an EID system the Golden Resource carries no EID in at all.
+	 * An EID from a system the Golden Resource already uses is left alone whatever its value, and at most
+	 * one EID per absent system is applied - so this can never leave the Golden Resource holding two EIDs
+	 * issued by one system, which the "prevent multiple EIDs" safeguard would reject on the next write.
+	 * <p>
+	 * Where a single EID system is configured for the resource type and the Golden Resource already
+	 * carries an EID, this provably adds nothing: every EID extracted for that resource type carries that
+	 * one system, so the system is already represented.
+	 * </p>
+	 *
+	 * @return true if an EID was added
+	 */
+	private boolean addCanonicalEidsForEidSystemsAbsentFromGoldenResource(
+			IBaseResource theGoldenResource,
+			List<CanonicalEID> theGoldenResourceExternalEids,
+			List<CanonicalEID> theIncomingSourceExternalEids) {
+		return addCanonicalEidsToGoldenResource(
+				theGoldenResource,
+				theGoldenResourceExternalEids,
+				theIncomingSourceExternalEids,
+				CanonicalEID::getSystem);
+	}
+
+	/**
+	 * Applies to the Golden Resource each incoming EID whose key is not already represented on it. The set
+	 * of represented keys is seeded from the Golden Resource and grown as EIDs are applied, so an incoming
+	 * list carrying two EIDs that share a key contributes only the first.
+	 *
+	 * @param theAlreadyRepresentedKey what makes an incoming EID redundant - its system and value, or its
+	 *                                 system alone
+	 * @return true if an EID was added
+	 */
+	private boolean addCanonicalEidsToGoldenResource(
+			IBaseResource theGoldenResource,
+			List<CanonicalEID> theGoldenResourceExternalEids,
+			List<CanonicalEID> theIncomingSourceExternalEids,
+			Function<CanonicalEID, String> theAlreadyRepresentedKey) {
+		Set<String> alreadyRepresented = theGoldenResourceExternalEids.stream()
+				.map(theAlreadyRepresentedKey)
+				.collect(Collectors.toSet());
+		boolean addedEid = false;
+		for (CanonicalEID incomingExternalEid : theIncomingSourceExternalEids) {
+			if (!alreadyRepresented.add(theAlreadyRepresentedKey.apply(incomingExternalEid))) {
+				continue;
+			}
+			cloneEidIntoResource(myFhirContext, theGoldenResource, incomingExternalEid);
+			addedEid = true;
+		}
+		return addedEid;
+	}
+
+	public boolean hasIdentifier(IBaseResource theResource) {
+		return ca.uhn.fhir.util.TerserUtil.hasValues(myFhirContext, theResource, FIELD_NAME_IDENTIFIER);
+	}
+
+	public void mergeIndentifierFields(
+			IBaseResource theFromGoldenResource,
+			IBaseResource theToGoldenResource,
+			MdmTransactionContext theMdmTransactionContext) {
+		ca.uhn.fhir.util.TerserUtil.cloneCompositeField(
+				myFhirContext, theFromGoldenResource, theToGoldenResource, FIELD_NAME_IDENTIFIER);
+	}
+
+	/**
+	 * An incoming resource is a potential duplicate if it matches a source that has a golden resource with an official
+	 * EID, but the incoming resource also has an EID that does not match.
+	 */
+	public boolean isPotentialDuplicate(
+			IAnyResource theExistingGoldenResource, IAnyResource theComparingGoldenResource) {
+		List<CanonicalEID> externalEidsGoldenResource = myEIDHelper.getExternalEid(theExistingGoldenResource);
+		List<CanonicalEID> externalEidsResource = myEIDHelper.getExternalEid(theComparingGoldenResource);
+		return !externalEidsGoldenResource.isEmpty()
+				&& !externalEidsResource.isEmpty()
+				&& !myEIDHelper.eidMatchExists(externalEidsResource, externalEidsGoldenResource);
+	}
+
+	/**
+	 * Records, in the MDM transaction log, every incoming EID that was not applied because the Golden
+	 * Resource already carries a different EID from that same EID system. Such an EID is a contradiction
+	 * between two issuing authorities rather than new information, and it cannot be applied without making
+	 * the Golden Resource ambiguous within that system - but discarding it silently would leave no trace
+	 * of an identifier the caller supplied.
+	 */
+	private void logEidsDroppedForOccupiedEidSystems(
+			MdmTransactionContext theMdmTransactionContext,
+			IAnyResource theSourceResource,
+			List<CanonicalEID> theGoldenResourceExternalEids,
+			List<CanonicalEID> theIncomingSourceExternalEids) {
+		Set<String> goldenResourceKeys = theGoldenResourceExternalEids.stream()
+				.map(CanonicalEID::getSystemAndValueKey)
+				.collect(Collectors.toSet());
+		for (CanonicalEID incomingExternalEid : theIncomingSourceExternalEids) {
+			if (goldenResourceKeys.contains(incomingExternalEid.getSystemAndValueKey())) {
+				continue;
+			}
+			theGoldenResourceExternalEids.stream()
+					.filter(goldenEid -> Objects.equals(goldenEid.getSystem(), incomingExternalEid.getSystem()))
+					.findFirst()
+					.ifPresent(conflicting -> log(
+							theMdmTransactionContext,
+							"Incoming resource:"
+									+ theSourceResource.getIdElement().toVersionless() + " carries EID "
+									+ incomingExternalEid
+									+ " which was not applied to its Golden Resource, as that Golden Resource already has the EID "
+									+ conflicting + " for the same EID system."));
+		}
+	}
+
+	private void log(MdmTransactionContext theMdmTransactionContext, String theMessage) {
+		theMdmTransactionContext.addTransactionLogMessage(theMessage);
+		ourLog.debug(theMessage);
+	}
+
+	public void handleExternalEidAddition(
+			IAnyResource theGoldenResource,
+			IAnyResource theSourceResource,
+			MdmTransactionContext theMdmTransactionContext) {
+		List<CanonicalEID> eidFromResource = myEIDHelper.getExternalEid(theSourceResource);
+		if (!eidFromResource.isEmpty()) {
+			updateGoldenResourceExternalEidFromSourceResource(
+					theGoldenResource, theSourceResource, theMdmTransactionContext);
+		}
+	}
+
+	/**
+	 * Clones the specified canonical EID into the identifier field on the resource
+	 *
+	 * @param theFhirContext         Context to pull resource definitions from
+	 * @param theResourceToCloneInto Resource to set the EID on
+	 * @param theEid                 EID to be set
+	 */
+	public void cloneEidIntoResource(
+			FhirContext theFhirContext, IBaseResource theResourceToCloneInto, CanonicalEID theEid) {
+		// get a ref to the actual ID Field
+		RuntimeResourceDefinition resourceDefinition = theFhirContext.getResourceDefinition(theResourceToCloneInto);
+		// hapi has 2 metamodels: for children and types
+		BaseRuntimeChildDefinition resourceIdentifier = resourceDefinition.getChildByName(FIELD_NAME_IDENTIFIER);
+		ca.uhn.fhir.util.TerserUtil.cloneIdentifierIntoResource(
+				theFhirContext,
+				resourceIdentifier,
+				IdentifierUtil.toId(theFhirContext, theEid),
+				theResourceToCloneInto);
+	}
+}

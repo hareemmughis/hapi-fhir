@@ -1,0 +1,172 @@
+/*
+ * #%L
+ * HAPI FHIR JPA Server
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.provider;
+
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.IValidationSupport.CodeValidationResult;
+import ca.uhn.fhir.jpa.api.dao.IFhirResourceDaoCodeSystem;
+import ca.uhn.fhir.jpa.model.util.JpaConstants;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.annotation.Operation;
+import ca.uhn.fhir.rest.annotation.OperationParam;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.util.UrlUtil;
+import jakarta.annotation.Nullable;
+import jakarta.servlet.http.HttpServletRequest;
+import org.hl7.fhir.instance.model.api.IBaseCoding;
+import org.hl7.fhir.instance.model.api.IBaseDatatype;
+import org.hl7.fhir.instance.model.api.IBaseParameters;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+
+import java.util.List;
+
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+public abstract class BaseJpaResourceProviderCodeSystem<T extends IBaseResource> extends BaseJpaResourceProvider<T> {
+
+	/**
+	 * $lookup operation
+	 */
+	@SuppressWarnings("unchecked")
+	@Operation(
+			name = JpaConstants.OPERATION_LOOKUP,
+			idempotent = true,
+			returnParameters = {
+				@OperationParam(name = "name", typeName = "string", min = 1),
+				@OperationParam(name = "version", typeName = "string", min = 0),
+				@OperationParam(name = "display", typeName = "string", min = 1),
+				@OperationParam(name = "abstract", typeName = "boolean", min = 1),
+				@OperationParam(name = "property", min = 0, max = OperationParam.MAX_UNLIMITED, typeName = "code")
+			})
+	public IBaseParameters lookup(
+			HttpServletRequest theServletRequest,
+			@OperationParam(name = "code", min = 0, max = 1, typeName = "code") IPrimitiveType<String> theCode,
+			@OperationParam(name = "system", min = 0, max = 1, typeName = "uri") IPrimitiveType<String> theSystem,
+			@OperationParam(name = "coding", min = 0, max = 1, typeName = "Coding") IBaseCoding theCoding,
+			@OperationParam(name = "version", min = 0, max = 1, typeName = "string") IPrimitiveType<String> theVersion,
+			@OperationParam(name = "displayLanguage", min = 0, max = 1, typeName = "code")
+					IPrimitiveType<String> theDisplayLanguage,
+			@OperationParam(name = "property", min = 0, max = OperationParam.MAX_UNLIMITED, typeName = "code")
+					List<IPrimitiveType<String>> thePropertyNames,
+			RequestDetails theRequestDetails) {
+
+		startRequest(theServletRequest);
+		try {
+			IFhirResourceDaoCodeSystem dao = (IFhirResourceDaoCodeSystem) getDao();
+			IValidationSupport.LookupCodeResult result;
+			result = dao.lookupCode(
+					theCode, theSystem, theVersion, theCoding, theDisplayLanguage, thePropertyNames, theRequestDetails);
+			result.throwNotFoundIfAppropriate();
+			return result.toParameters(theRequestDetails.getFhirContext(), thePropertyNames);
+		} finally {
+			endRequest(theServletRequest);
+		}
+	}
+
+	/**
+	 * $subsumes operation
+	 */
+	@Operation(
+			name = JpaConstants.OPERATION_SUBSUMES,
+			idempotent = true,
+			returnParameters = {
+				@OperationParam(name = "outcome", typeName = "code", min = 1),
+			})
+	public IBaseParameters subsumes(
+			HttpServletRequest theServletRequest,
+			@OperationParam(name = "codeA", min = 0, max = 1, typeName = "code") IPrimitiveType<String> theCodeA,
+			@OperationParam(name = "codeB", min = 0, max = 1, typeName = "code") IPrimitiveType<String> theCodeB,
+			@OperationParam(name = "system", min = 0, max = 1, typeName = "uri") IPrimitiveType<String> theSystem,
+			@OperationParam(name = "codingA", min = 0, max = 1, typeName = "Coding") IBaseCoding theCodingA,
+			@OperationParam(name = "codingB", min = 0, max = 1, typeName = "Coding") IBaseCoding theCodingB,
+			@OperationParam(name = "version", min = 0, max = 1, typeName = "string") IPrimitiveType<String> theVersion,
+			RequestDetails theRequestDetails) {
+
+		startRequest(theServletRequest);
+		try {
+			IFhirResourceDaoCodeSystem dao = (IFhirResourceDaoCodeSystem) getDao();
+			IFhirResourceDaoCodeSystem.SubsumesResult result;
+			applyVersionToSystem(theSystem, theVersion);
+			result = dao.subsumes(theCodeA, theCodeB, theSystem, theCodingA, theCodingB, theRequestDetails);
+			return result.toParameters(theRequestDetails.getFhirContext());
+		} finally {
+			endRequest(theServletRequest);
+		}
+	}
+
+	static void applyVersionToSystem(IPrimitiveType<String> theSystem, IPrimitiveType<String> theVersion) {
+		if (theSystem != null && theVersion != null && isNotBlank(theVersion.getValueAsString())) {
+			theSystem.setValue(UrlUtil.toCanonicalUrl(theSystem.getValueAsString(), theVersion.getValueAsString()));
+		}
+	}
+
+	/**
+	 * $validate-code operation
+	 */
+	@SuppressWarnings("unchecked")
+	@Operation(
+			name = JpaConstants.OPERATION_VALIDATE_CODE,
+			idempotent = true,
+			returnParameters = {
+				@OperationParam(name = "result", typeName = "boolean", min = 1),
+				@OperationParam(name = "message", typeName = "string"),
+				@OperationParam(name = "display", typeName = "string")
+			})
+	public IBaseParameters validateCode(
+			HttpServletRequest theServletRequest,
+			@IdParam(optional = true) IIdType theId,
+			@OperationParam(name = "url", min = 0, max = 1, typeName = "uri") IPrimitiveType<String> theUrl,
+			@OperationParam(name = "version", min = 0, max = 1, typeName = "string") IPrimitiveType<String> theVersion,
+			@OperationParam(name = "code", min = 0, max = 1, typeName = "code") IPrimitiveType<String> theCode,
+			@OperationParam(name = "display", min = 0, max = 1, typeName = "string") IPrimitiveType<String> theDisplay,
+			@OperationParam(name = "coding", min = 0, max = 1, typeName = "Coding") IBaseCoding theCoding,
+			@OperationParam(name = "codeableConcept", min = 0, max = 1, typeName = "CodeableConcept")
+					IBaseDatatype theCodeableConcept,
+			RequestDetails theRequestDetails) {
+
+		startRequest(theServletRequest);
+		try {
+			IPrimitiveType<String> url = theUrl;
+			if (theId == null
+					&& getStringFromPrimitiveType(theUrl) == null
+					&& theCoding != null
+					&& isNotBlank(theCoding.getSystem())) {
+				// the Coding names the code system, so the url may be left out
+				url = (IPrimitiveType<String>)
+						getContext().getElementDefinitionNotNull("uri").newInstance(theCoding.getSystem());
+			}
+
+			IFhirResourceDaoCodeSystem<?> dao = (IFhirResourceDaoCodeSystem<?>) getDao();
+			CodeValidationResult result = dao.validateCode(
+					theId, url, theVersion, theCode, theDisplay, theCoding, theCodeableConcept, theRequestDetails);
+			return result.toParameters(getContext());
+		} finally {
+			endRequest(theServletRequest);
+		}
+	}
+
+	private static @Nullable String getStringFromPrimitiveType(IPrimitiveType<String> thePrimitiveString) {
+		return (thePrimitiveString != null && thePrimitiveString.hasValue())
+				? thePrimitiveString.getValueAsString()
+				: null;
+	}
+}

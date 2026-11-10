@@ -1,29 +1,7 @@
 package ca.uhn.fhir.tinder.parser;
 
-import static org.apache.commons.lang3.StringUtils.isBlank;
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
-
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
-import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.text.WordUtils;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.MojoFailureException;
-import org.hl7.fhir.instance.hapi.validation.DefaultProfileValidationSupport;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.NodeList;
-
 import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
 import ca.uhn.fhir.model.dstu2.resource.Bundle;
 import ca.uhn.fhir.model.dstu2.resource.Bundle.Entry;
 import ca.uhn.fhir.model.dstu2.resource.ValueSet;
@@ -36,17 +14,39 @@ import ca.uhn.fhir.tinder.model.ResourceBlockCopy;
 import ca.uhn.fhir.tinder.model.SearchParameter;
 import ca.uhn.fhir.tinder.model.SimpleChild;
 import ca.uhn.fhir.tinder.util.XMLUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.text.WordUtils;
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.MojoFailureException;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser {
 
-	public BaseStructureSpreadsheetParser(String theVersion, String theBaseDir) {
+	public BaseStructureSpreadsheetParser(String theVersion, String theBaseDir) throws MojoFailureException {
 		super(theVersion, theBaseDir);
 
-		myBindingStrengths = new HashMap<String, String>();
-		myBindingRefs = new HashMap<String, String>();
+		myBindingStrengths = new HashMap<>();
+		myBindingRefs = new HashMap<>();
 	}
 
-	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BaseStructureSpreadsheetParser.class);
+	private static final org.slf4j.Logger ourLog =
+			org.slf4j.LoggerFactory.getLogger(BaseStructureSpreadsheetParser.class);
 	private int myColBinding = -1;
 	private int myColModifier = -1;
 	private int myColSummary = -1;
@@ -67,9 +67,10 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 		if (getVersion().equals("dstu2")) {
 			ourLog.info("Loading ValueSets...");
 			FhirContext ctx = FhirContext.forDstu2();
-			String path = ctx.getVersion().getPathToSchemaDefinitions().replace("/schema", "/valueset") + "/valuesets.xml";
+			String path =
+					ctx.getVersion().getPathToSchemaDefinitions().replace("/schema", "/valueset") + "/valuesets.xml";
 
-			InputStream valuesetText = DefaultProfileValidationSupport.class.getResourceAsStream(path);
+			InputStream valuesetText = BaseStructureSpreadsheetParser.class.getResourceAsStream(path);
 			Bundle bundle = ctx.newXmlParser().parseResource(Bundle.class, new InputStreamReader(valuesetText));
 			for (Entry next : bundle.getEntry()) {
 				ValueSet nextVs = (ValueSet) next.getResource();
@@ -88,7 +89,7 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 			try {
 				file = XMLUtils.parse(nextInputStream, false);
 			} catch (Exception e) {
-				throw new Exception("Failed during reading: " + spreadsheetName, e);
+				throw new Exception(Msg.code(164) + "Failed during reading: " + spreadsheetName, e);
 			}
 
 			Element bindingsSheet = findSheetByName(spreadsheetName, "Bindings", file, false);
@@ -126,7 +127,6 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 			// Map<String,String> blockFullNameToShortName = new
 			// HashMap<String,String>();
 
-			Map<String, List<String>> pathToResourceTypes = new HashMap<String, List<String>>();
 			List<Child> blockCopies = new ArrayList<Child>();
 			for (int i = 2; i < rows.getLength(); i++) {
 				Element nextRow = (Element) rows.item(i);
@@ -166,7 +166,8 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 				elements.put(elem.getName(), elem);
 				BaseElement parent = elements.get(elem.getElementParentName());
 				if (parent == null) {
-					throw new Exception("Can't find element " + elem.getElementParentName() + "  -  Valid values are: " + elements.keySet());
+					throw new Exception(Msg.code(165) + "Can't find element " + elem.getElementParentName()
+							+ "  -  Valid values are: " + elements.keySet());
 				}
 				parent.addChild(elem);
 
@@ -176,9 +177,6 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 				if (elem instanceof Child) {
 					scanForSimpleSetters(elem);
 				}
-
-				pathToResourceTypes.put(name, elem.getType());
-
 			}
 
 			postProcess(resource);
@@ -210,24 +208,25 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 					BaseElement parent = elements.get(element.getElementParentName());
 					List<BaseElement> children = parent.getChildren();
 					for (BaseElement child : children) {
-						if (!child.equals(blockCopy) && child instanceof ResourceBlock 
-						&& child.getElementName().equals(blockCopy.getElementName())) {
-							((ResourceBlockCopy)blockCopy).setReferencedBlock((ResourceBlock)child);
+						if (!child.equals(blockCopy)
+								&& child instanceof ResourceBlock
+								&& child.getElementName().equals(blockCopy.getElementName())) {
+							((ResourceBlockCopy) blockCopy).setReferencedBlock((ResourceBlock) child);
 							break refLoop;
 						}
 					}
 					element = parent;
 				}
 			}
-			
+
 			index++;
 		}
 
 		ourLog.info("Parsed {} spreadsheet structures", getResources().size());
-
 	}
 
-	private Element findSheetByName(String spreadsheetName, String wantedName, Document file, boolean theFailIfNotFound) throws Exception {
+	private Element findSheetByName(String spreadsheetName, String wantedName, Document file, boolean theFailIfNotFound)
+			throws Exception {
 		Element retVal = null;
 		for (int i = 0; i < file.getElementsByTagName("Worksheet").getLength() && retVal == null; i++) {
 			retVal = (Element) file.getElementsByTagName("Worksheet").item(i);
@@ -237,7 +236,8 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 		}
 
 		if (retVal == null && theFailIfNotFound) {
-			throw new Exception("Failed to find worksheet with name '" + wantedName + "' in spreadsheet: " + spreadsheetName);
+			throw new Exception(Msg.code(166) + "Failed to find worksheet with name '" + wantedName
+					+ "' in spreadsheet: " + spreadsheetName);
 		}
 		return retVal;
 	}
@@ -257,12 +257,17 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 				continue;
 			}
 			nextName = nextName.toLowerCase().trim().replace(".", "");
-			if ("name".equals(nextName) || "binding name".equals(nextName)) {
-				colName = j;
-			} else if ("reference".equals(nextName)) {
-				colRef = j;
-			} else if ("conformance".equals(nextName)) {
-				colStrength = j;
+			switch (nextName) {
+				case "name":
+				case "binding name":
+					colName = j;
+					break;
+				case "reference":
+					colRef = j;
+					break;
+				case "conformance":
+					colStrength = j;
+					break;
 			}
 		}
 
@@ -359,11 +364,14 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 					// if(true)continue;
 
 					if (isBlank(nextCompositeParam.getPath())) {
-						throw new MojoExecutionException("Composite param " + nextCompositeParam.getName() + " has no path");
+						throw new MojoExecutionException(
+								Msg.code(167) + "Composite param " + nextCompositeParam.getName() + " has no path");
 					}
 
 					if (nextCompositeParam.getPath().indexOf('&') == -1) {
-						throw new MojoExecutionException("Composite param " + nextCompositeParam.getName() + " has path with no '&': " + nextCompositeParam.getPath());
+						throw new MojoExecutionException(
+								Msg.code(168) + "Composite param " + nextCompositeParam.getName()
+										+ " has path with no '&': " + nextCompositeParam.getPath());
 					}
 
 					String[] parts = nextCompositeParam.getPath().split("\\&");
@@ -387,7 +395,8 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 						possibleMatches.add(theResource.getName() + "." + nextPart.replace("-[x]", "[x]"));
 
 						for (SearchParameter nextParam : theResource.getSearchParameters()) {
-							if (possibleMatches.contains(nextParam.getPath()) || possibleMatches.contains(nextParam.getName())) {
+							if (possibleMatches.contains(nextParam.getPath())
+									|| possibleMatches.contains(nextParam.getName())) {
 								part.add(nextParam);
 							}
 						}
@@ -396,23 +405,27 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 						 * Paths have changed in DSTU2
 						 */
 						for (SearchParameter nextParam : theResource.getSearchParameters()) {
-							if (nextPart.equals("value[x]") && (nextParam.getName().startsWith("value-"))) {
+							if (nextPart.equals("value[x]")
+									&& (nextParam.getName().startsWith("value-"))) {
 								part.add(nextParam);
 							}
-							if (nextPart.equals("component-value[x]") && (nextParam.getName().startsWith("component-value-"))) {
+							if (nextPart.equals("component-value[x]")
+									&& (nextParam.getName().startsWith("component-value-"))) {
 								part.add(nextParam);
 							}
 						}
 
 						if (part.isEmpty()) {
-							throw new MojoExecutionException("Composite param " + nextCompositeParam.getName() + " has path that doesn't seem to correspond to any other params: " + nextPart);
+							throw new MojoExecutionException(Msg.code(169) + "Composite param "
+									+ nextCompositeParam.getName()
+									+ " has path that doesn't seem to correspond to any other params: " + nextPart);
 						}
-
 					}
 
 					if (compositeOf.size() > 2) {
 						// TODO: change back to exception maybe? Grahame says these aren't allowed..
-						ourLog.warn("Composite param " + nextCompositeParam.getName() + " has >2 parts, this isn't supported yet");
+						ourLog.warn("Composite param " + nextCompositeParam.getName()
+								+ " has >2 parts, this isn't supported yet");
 						continue;
 					}
 
@@ -425,10 +438,10 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 							composite.setPath(nextCompositeParam.getPath());
 							composite.setType("composite");
 							composite.setCompositeOf(Arrays.asList(part1.getName(), part2.getName()));
-							composite.setCompositeTypes(Arrays.asList(WordUtils.capitalize(part1.getType()), WordUtils.capitalize(part2.getType())));
+							composite.setCompositeTypes(Arrays.asList(
+									WordUtils.capitalize(part1.getType()), WordUtils.capitalize(part2.getType())));
 						}
 					}
-
 				}
 			}
 		}
@@ -469,28 +482,28 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 		}
 
 		if (myColName == -1) {
-			throw new IllegalArgumentException("Unable to determine column: name");
+			throw new IllegalArgumentException(Msg.code(170) + "Unable to determine column: name");
 		}
 		if (myColModifier == -1) {
-			throw new IllegalArgumentException("Unable to determine column: modifier");
+			throw new IllegalArgumentException(Msg.code(171) + "Unable to determine column: modifier");
 		}
 		if (myColCard == -1) {
-			throw new IllegalArgumentException("Unable to determine column: card");
+			throw new IllegalArgumentException(Msg.code(172) + "Unable to determine column: card");
 		}
 		if (myColType == -1) {
-			throw new IllegalArgumentException("Unable to determine column: type");
+			throw new IllegalArgumentException(Msg.code(173) + "Unable to determine column: type");
 		}
 		if (myColBinding == -1) {
-			throw new IllegalArgumentException("Unable to determine column: binding");
+			throw new IllegalArgumentException(Msg.code(174) + "Unable to determine column: binding");
 		}
 		if (myColDefinition == -1) {
-			throw new IllegalArgumentException("Unable to determine column: definition");
+			throw new IllegalArgumentException(Msg.code(175) + "Unable to determine column: definition");
 		}
 		if (myColRequirements == -1) {
-			throw new IllegalArgumentException("Unable to determine column: requirements");
+			throw new IllegalArgumentException(Msg.code(176) + "Unable to determine column: requirements");
 		}
 		if (myColV2Mapping == -1) {
-			throw new IllegalArgumentException("Unable to determine column: v2 mapping");
+			throw new IllegalArgumentException(Msg.code(177) + "Unable to determine column: v2 mapping");
 		}
 	}
 
@@ -533,7 +546,6 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 				}
 			}
 		}
-
 	}
 
 	/**
@@ -542,5 +554,4 @@ public abstract class BaseStructureSpreadsheetParser extends BaseStructureParser
 	protected void postProcess(BaseElement theTarget) throws MojoFailureException {
 		// nothing
 	}
-
 }

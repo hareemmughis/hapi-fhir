@@ -1,17 +1,15 @@
-package ca.uhn.fhir.context;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,16 +17,22 @@ package ca.uhn.fhir.context;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.context;
 
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.Map.Entry;
-
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.api.annotation.Child;
 import org.hl7.fhir.instance.model.api.IBase;
 import org.hl7.fhir.instance.model.api.IBaseReference;
 
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Optional;
+import java.util.Set;
+
 public abstract class BaseRuntimeChildDefinition {
+
+	private BaseRuntimeChildDefinition myReplacedParentDefinition;
 
 	public abstract IAccessor getAccessor();
 
@@ -58,32 +62,61 @@ public abstract class BaseRuntimeChildDefinition {
 
 	public abstract boolean isSummary();
 
-	abstract void sealAndInitialize(FhirContext theContext, Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions);
+	abstract void sealAndInitialize(
+			FhirContext theContext,
+			Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions);
 
 	@Override
 	public String toString() {
 		return getClass().getSimpleName() + "[" + getElementName() + "]";
 	}
 
+	public BaseRuntimeChildDefinition getReplacedParentDefinition() {
+		return myReplacedParentDefinition;
+	}
+
+	public void setReplacedParentDefinition(BaseRuntimeChildDefinition myReplacedParentDefinition) {
+		this.myReplacedParentDefinition = myReplacedParentDefinition;
+	}
+
+	public boolean isMultipleCardinality() {
+		return this.getMax() > 1 || this.getMax() == Child.MAX_UNLIMITED;
+	}
+
 	public interface IAccessor {
-		List<IBase> getValues(Object theTarget);
+		List<IBase> getValues(IBase theTarget);
+
+		default <T extends IBase> Optional<T> getFirstValueOrNull(IBase theTarget) {
+			return (Optional<T>) getValues(theTarget).stream().findFirst();
+		}
 	}
 
 	public interface IMutator {
-		void addValue(Object theTarget, IBase theValue);
+		void addValue(IBase theTarget, IBase theValue);
 
-		void setValue(Object theTarget, IBase theValue);
+		void setValue(IBase theTarget, IBase theValue);
+
+		/**
+		 * Remove an item from a list of values
+		 * @param theTarget field to remove the item from (e.g. patient.name)
+		 * @param theIndex the index of the item to be removed (e.g. 1 for patient.name[1])
+		 */
+		default void remove(IBase theTarget, int theIndex) {
+			// implemented in subclasses
+		}
 	}
 
-	BaseRuntimeElementDefinition<?> findResourceReferenceDefinition(Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
-		for (Entry<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> next : theClassToElementDefinitions.entrySet()) {
+	BaseRuntimeElementDefinition<?> findResourceReferenceDefinition(
+			Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
+		for (Entry<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> next :
+				theClassToElementDefinitions.entrySet()) {
 			if (IBaseReference.class.isAssignableFrom(next.getKey())) {
 				return next.getValue();
 			}
 		}
-		
+
 		// Shouldn't happen
-		throw new IllegalStateException("Unable to find reference type");
+		throw new IllegalStateException(Msg.code(1692) + "Unable to find reference type");
 	}
 
 	// public String getExtensionUrl() {

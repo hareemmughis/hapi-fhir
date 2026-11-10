@@ -1,0 +1,77 @@
+package ca.uhn.fhir.jpa.provider.dstu3;
+
+import ca.uhn.fhir.jpa.provider.GraphQLProviderTestUtil;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class GraphQLProviderDstu3Test extends BaseResourceProviderDstu3Test {
+	private IIdType myPatientId0;
+
+	@Test
+	public void testInstanceSimpleRead() {
+		initTestPatients();
+
+		String query = "{name{family,given}}";
+		String resp = myServer.fhirRequest("/Patient/" + myPatientId0.getIdPart() + "/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.getBody();
+		assertThat(TestUtil.stripWhitespace(resp)).isEqualTo(TestUtil.stripWhitespace(GraphQLProviderTestUtil.DATA_PREFIX + "{\n" +
+			"  \"name\":[{\n" +
+			"    \"family\":\"FAM\",\n" +
+			"    \"given\":[\"GIVEN1\",\"GIVEN2\"]\n" +
+			"  },{\n" +
+			"    \"given\":[\"GivenOnly1\",\"GivenOnly2\"]\n" +
+			"  }]\n" +
+			"}" + GraphQLProviderTestUtil.DATA_SUFFIX));
+	}
+
+	@Test
+	public void testSystemSimpleSearch() {
+		initTestPatients();
+
+		String query = "{PatientList(given:\"given\"){name{family,given}}}";
+		String resp = myServer.fhirRequest("/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.getBody();
+		assertThat(TestUtil.stripWhitespace(resp)).isEqualTo(TestUtil.stripWhitespace(GraphQLProviderTestUtil.DATA_PREFIX + "{\n" +
+			"  \"PatientList\":[{\n" +
+			"    \"name\":[{\n" +
+			"      \"family\":\"FAM\",\n" +
+			"      \"given\":[\"GIVEN1\",\"GIVEN2\"]\n" +
+			"    },{\n" +
+			"      \"given\":[\"GivenOnly1\",\"GivenOnly2\"]\n" +
+			"    }]\n" +
+			"  },{\n" +
+			"    \"name\":[{\n" +
+			"      \"given\":[\"GivenOnlyB1\",\"GivenOnlyB2\"]\n" +
+			"    }]\n" +
+			"  }]\n" +
+			"}" + GraphQLProviderTestUtil.DATA_SUFFIX));
+	}
+
+	private void initTestPatients() {
+		Patient p = new Patient();
+		p.addName()
+			.setFamily("FAM")
+			.addGiven("GIVEN1")
+			.addGiven("GIVEN2");
+		p.addName()
+			.addGiven("GivenOnly1")
+			.addGiven("GivenOnly2");
+		myPatientId0 = myClient.create().resource(p).execute().getId().toUnqualifiedVersionless();
+
+		p = new Patient();
+		p.addName()
+			.addGiven("GivenOnlyB1")
+			.addGiven("GivenOnlyB2");
+		myClient.create().resource(p).execute();
+	}
+
+
+}

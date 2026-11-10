@@ -1,32 +1,38 @@
 package ca.uhn.fhir.util;
 
-import static org.junit.Assert.fail;
-
-import javax.xml.parsers.FactoryConfigurationError;
-import javax.xml.stream.XMLStreamException;
-
-import org.hl7.fhir.dstu3.model.Patient;
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.Test;
-
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import ca.uhn.fhir.context.ConfigurationException;
 import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.model.api.Bundle;
 import ca.uhn.fhir.parser.DataFormatException;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.w3c.dom.Document;
+import org.xml.sax.SAXException;
+
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.stream.FactoryConfigurationError;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.transform.TransformerException;
+import java.io.IOException;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.fail;
+
 
 public class XmlUtilDstu3Test {
 
 	private static FhirContext ourCtx = FhirContext.forDstu3();
 	private Patient myPatient;
 	
-	@After
+	@AfterEach
 	public void after() {
 		XmlUtil.setThrowExceptionForUnitTest(null);
 	}
 	
-	@Before
+	@BeforeEach
 	public void before() {
 		myPatient = new Patient();
 		myPatient.setId("1");
@@ -36,55 +42,65 @@ public class XmlUtilDstu3Test {
 	public void testParseMalformed() {
 		try {
 			ourCtx.newXmlParser().parseResource("AAAAA");
-			fail();
-		} catch (DataFormatException e) {
+			fail();		} catch (DataFormatException e) {
 			// good
 		}
 	}
-	
+
+	@Test
 	public void testXmlFactoryThrowsXmlStreamException() {
 		XmlUtil.setThrowExceptionForUnitTest(new XMLStreamException("FOO"));
 		
 		try {
 			ourCtx.newXmlParser().parseResource("AAAAA");
-			fail();
-		} catch (DataFormatException e) {
+			fail();		} catch (DataFormatException e) {
 			// good
 		}
 		try {
 			ourCtx.newXmlParser().encodeResourceToString(myPatient);
-			fail();
-		} catch (ConfigurationException e) {
-			// good
-		}
-		try {
-			ourCtx.newXmlParser().encodeBundleToString(new Bundle());
-			fail();
-		} catch (ConfigurationException e) {
+			fail();		} catch (ConfigurationException e) {
 			// good
 		}
 	}
-	
+
+	@Test
 	public void testXmlFactoryThrowsFactoryConfigurationError() {
 		XmlUtil.setThrowExceptionForUnitTest(new FactoryConfigurationError("FOO"));
 		
 		try {
 			ourCtx.newXmlParser().parseResource("AAAAA");
-			fail();
-		} catch (DataFormatException e) {
-			// good
-		}
-		try {
-			ourCtx.newXmlParser().encodeResourceToString(myPatient);
-			fail();
-		} catch (ConfigurationException e) {
+			fail();		} catch (ConfigurationException e) {
 			// good
 		}
 	}
 
-	@AfterClass
+	@Test
+	public void testEncodePrettyPrint() throws IOException, SAXException, TransformerException {
+		String input = "<document><tag id=\"1\"/></document>";
+		Document parsed = XmlUtil.parseDocument(input);
+		String output = XmlUtil.encodeDocument(parsed, true)
+			.replace("\r\n", "\n");
+		int initialLen;
+		do {
+			initialLen = output.length();
+			output = output.replace("\n ", "\n");
+		} while (output.length() != initialLen);
+		assertThat(output).isEqualTo("<document>\n" +
+			"<tag id=\"1\"/>\n" +
+			"</document>\n");
+	}
+
+	@Test
+	public void testApplyUnsupportedFeature() throws IOException, SAXException {
+		assertNotNull(XmlUtil.parseDocument("<document></document>"));
+
+		XmlUtil.setThrowExceptionForUnitTest(new ParserConfigurationException("AA"));
+		assertNotNull(XmlUtil.parseDocument("<document></document>"));
+	}
+
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 	
 }

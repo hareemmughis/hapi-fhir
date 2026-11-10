@@ -1,0 +1,523 @@
+package ca.uhn.fhir.jpa.term;
+
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.LookupCodeRequest;
+import ca.uhn.fhir.context.support.ValidationSupportContext;
+import ca.uhn.fhir.jpa.api.dao.IFhirResourceDao;
+import ca.uhn.fhir.jpa.entity.TermConcept;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
+import ca.uhn.fhir.jpa.test.BaseJpaR4Test;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.param.TokenParam;
+import ca.uhn.fhir.rest.param.UriParam;
+import ca.uhn.fhir.rest.server.servlet.ServletRequestDetails;
+import com.google.common.collect.Lists;
+import jakarta.persistence.EntityManager;
+import jakarta.servlet.http.HttpServletResponse;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.CodeSystem;
+import org.hl7.fhir.r4.model.CodeType;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.StringType;
+import org.hl7.fhir.r4.model.UriType;
+import org.hl7.fhir.r4.model.ValueSet;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Answers;
+import org.mockito.Mock;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.hl7.fhir.common.hapi.validation.support.ValidationConstants.LOINC_ALL_VALUESET_ID;
+import static org.hl7.fhir.common.hapi.validation.support.ValidationConstants.LOINC_LOW;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.when;
+
+/**
+ * Tests load and validate CodeSystem and ValueSet so test names as uploadFirstCurrent... mean uploadCodeSystemAndValueSetCurrent...
+ */
+class TerminologySvcImplCurrentVersionR4Test extends BaseJpaR4Test {
+	private static final String BASE_LOINC_URL = "http://loinc.org";
+	private static final String BASE_LOINC_VS_URL = BASE_LOINC_URL + "/vs/";
+
+	private static final String LOINC_ALL_VS_URL = BASE_LOINC_URL + "/vs";
+
+	// some ValueSets have a version specified independent of the CS version being uploaded. This one doesn't
+	private static final String VS_NO_VERSIONED_ON_UPLOAD_ID = "loinc-rsna-radiology-playbook";
+	private static final String VS_NO_VERSIONED_ON_UPLOAD = BASE_LOINC_VS_URL + VS_NO_VERSIONED_ON_UPLOAD_ID;
+	private static final String VS_NO_VERSIONED_ON_UPLOAD_FIRST_CODE = "17787-3";
+	private static final String VS_NO_VERSIONED_ON_UPLOAD_FIRST_DISPLAY = "NM Thyroid gland Study report";
+
+	// some ValueSets have a version specified independent of the CS version being uploaded. This is one of them
+	private static final String VS_VERSIONED_ON_UPLOAD_ID = "LL1000-0";
+	private static final String VS_VERSIONED_ON_UPLOAD = BASE_LOINC_VS_URL + VS_VERSIONED_ON_UPLOAD_ID;
+	private static final String VS_VERSIONED_ON_UPLOAD_FIRST_CODE = "LA13825-7";
+	private static final String VS_VERSIONED_ON_UPLOAD_FIRST_DISPLAY = "1 slice or 1 dinner roll";
+
+	@Mock
+	private HttpServletResponse mockServletResponse;
+
+	@Mock(answer = Answers.RETURNS_DEEP_STUBS)
+	private ServletRequestDetails mockRequestDetails;
+
+	@Autowired
+	private EntityManager myEntityManager;
+
+	@Autowired
+	private TerminologyTestHelper myTerminologyTestHelper;
+
+	private final ServletRequestDetails myRequestDetails = new ServletRequestDetails();
+
+	private IFhirResourceDao<ValueSet> myValueSetIFhirResourceDao;
+
+
+	@BeforeEach
+	void beforeEach() {
+		myValueSetIFhirResourceDao = myDaoRegistry.getResourceDao(ValueSet.class);
+
+		when(mockRequestDetails.getServer().getDefaultPageSize()).thenReturn(25);
+	}
+
+	/**
+	 * For input version or for current (when input is null) validates search, expand, lookup and validateCode operations
+	 */
+	private void validateOperations(String currentVersion, Collection<String> theExpectedVersions) {
+		validateValueSetSearch(theExpectedVersions);
+
+		validateValueExpand(currentVersion, theExpectedVersions);
+
+		validateValueLookup(currentVersion, theExpectedVersions);
+
+		validateValidateCode(currentVersion, theExpectedVersions);
+
+		// nothing to test for subsumes operation as it works only for concepts which share CodeSystem and  version
+	}
+
+
+	private void validateValidateCode(String theCurrentVersion, Collection<String> allVersions) {
+		validateValidateCodeForVersion(theCurrentVersion);
+
+		allVersions.forEach(this::validateValidateCodeForVersion);
+	}
+
+
+	private void validateValidateCodeForVersion(String theVersion) {
+		IValidationSupport.CodeValidationResult resultNoVersioned = myCodeSystemDao.validateCode(null,
+			new UriType(BASE_LOINC_URL), new StringType(theVersion), new CodeType(VS_NO_VERSIONED_ON_UPLOAD_FIRST_CODE),
+			null, null, null, null);
+		assertNotNull(resultNoVersioned);
+		assertEquals(prefixWithVersion(theVersion, VS_NO_VERSIONED_ON_UPLOAD_FIRST_DISPLAY), resultNoVersioned.getDisplay());
+
+		IValidationSupport.CodeValidationResult resultVersioned = myCodeSystemDao.validateCode(null,
+			new UriType(BASE_LOINC_URL), new StringType(theVersion), new CodeType(VS_VERSIONED_ON_UPLOAD_FIRST_CODE),
+			null, null, null, null);
+		assertNotNull(resultVersioned);
+		assertEquals(prefixWithVersion(theVersion, VS_VERSIONED_ON_UPLOAD_FIRST_DISPLAY), resultVersioned.getDisplay());
+	}
+
+
+	private void validateValueLookup(String theCurrentVersion, Collection<String> allVersions) {
+		IValidationSupport.LookupCodeResult resultNoVer = myValidationSupport.lookupCode(
+			new ValidationSupportContext(myValidationSupport),
+			new LookupCodeRequest(BASE_LOINC_URL, VS_NO_VERSIONED_ON_UPLOAD_FIRST_CODE));
+		assertNotNull(resultNoVer);
+		String expectedNoVer = prefixWithVersion(theCurrentVersion, VS_NO_VERSIONED_ON_UPLOAD_FIRST_DISPLAY);
+		assertEquals(expectedNoVer, resultNoVer.getCodeDisplay());
+
+		IValidationSupport.LookupCodeResult resultWithVer = myValidationSupport.lookupCode(
+			new ValidationSupportContext(myValidationSupport),
+			new LookupCodeRequest(BASE_LOINC_URL, VS_VERSIONED_ON_UPLOAD_FIRST_CODE));
+		assertNotNull(resultWithVer);
+		String expectedWithVer = prefixWithVersion(theCurrentVersion, VS_VERSIONED_ON_UPLOAD_FIRST_DISPLAY);
+		assertEquals(expectedWithVer, resultWithVer.getCodeDisplay());
+
+		allVersions.forEach(this::lookupForVersion);
+	}
+
+
+	private void lookupForVersion(String theVersion) {
+		IValidationSupport.LookupCodeResult resultNoVer = myValidationSupport.lookupCode(
+			new ValidationSupportContext(myValidationSupport),
+            new LookupCodeRequest(BASE_LOINC_URL + "|" + theVersion, VS_NO_VERSIONED_ON_UPLOAD_FIRST_CODE));
+		assertNotNull(resultNoVer);
+		String expectedNoVer = prefixWithVersion(theVersion, VS_NO_VERSIONED_ON_UPLOAD_FIRST_DISPLAY);
+		assertEquals(expectedNoVer, resultNoVer.getCodeDisplay());
+
+		IValidationSupport.LookupCodeResult resultWithVer = myValidationSupport.lookupCode(
+			new ValidationSupportContext(myValidationSupport),
+            new LookupCodeRequest(BASE_LOINC_URL + "|" + theVersion, VS_VERSIONED_ON_UPLOAD_FIRST_CODE));
+		assertNotNull(resultWithVer);
+		String expectedWithVer = prefixWithVersion(theVersion, VS_VERSIONED_ON_UPLOAD_FIRST_DISPLAY);
+		assertEquals(expectedWithVer, resultWithVer.getCodeDisplay());
+	}
+
+
+	private String prefixWithVersion(String version, String suffix) {
+		return (version == null ? "" : "v" + version + " ") + suffix;
+
+	}
+
+	private void validateValueExpand(String currentVersion, Collection<String> theAllVersions) {
+		// for CS ver = null, VS ver = null
+		ValueSet vs = myValueSetDao.expandByIdentifier(VS_NO_VERSIONED_ON_UPLOAD, null);
+		assertThat(vs.getExpansion().getContains()).hasSize(1);
+
+		// version was added prefixing code display to validate
+		assertEquals(prefixWithVersion(currentVersion, VS_NO_VERSIONED_ON_UPLOAD_FIRST_DISPLAY), vs.getExpansion().getContains().iterator().next().getDisplay());
+
+
+		// for CS ver = null, VS ver != null
+		ValueSet vs1 = myValueSetDao.expandByIdentifier(
+			VS_VERSIONED_ON_UPLOAD + "|" + currentVersion, null);
+		assertThat(vs1.getExpansion().getContains()).hasSize(3);
+
+		assertEquals(prefixWithVersion(currentVersion, VS_VERSIONED_ON_UPLOAD_FIRST_DISPLAY), vs1.getExpansion().getContains().iterator().next().getDisplay());
+
+
+		// now for each uploaded version
+		theAllVersions.forEach(this::validateValueExpandForVersion);
+	}
+
+
+	private void validateValueExpandForVersion(String theVersion) {
+		// for CS ver != null, VS ver = null
+
+		ValueSet vs2 = myValueSetDao.expandByIdentifier(
+			VS_NO_VERSIONED_ON_UPLOAD + "|" + theVersion, null);
+		assertThat(vs2.getExpansion().getContains()).hasSize(1);
+
+		// version was added before code display to validate
+		assertEquals(prefixWithVersion(theVersion, VS_NO_VERSIONED_ON_UPLOAD_FIRST_DISPLAY), vs2.getExpansion().getContains().iterator().next().getDisplay());
+
+
+		// for CS ver != null, VS ver != null
+
+		ValueSet vs3 = myValueSetDao.expandByIdentifier(
+			VS_VERSIONED_ON_UPLOAD + "|" + theVersion, null);
+		assertThat(vs3.getExpansion().getContains()).hasSize(3);
+
+		// version was added before code display to validate
+		assertEquals(prefixWithVersion(theVersion, VS_VERSIONED_ON_UPLOAD_FIRST_DISPLAY), vs3.getExpansion().getContains().iterator().next().getDisplay());
+	}
+
+
+	private void validateValueSetSearch(Collection<String> theExpectedIdVersions) {
+		// first validate search for CS ver = null VS ver = null
+
+		SearchParameterMap paramsNoUploadVer = new SearchParameterMap("url", new UriParam(VS_NO_VERSIONED_ON_UPLOAD));
+		int expectedResultQty = theExpectedIdVersions.size();
+		IBundleProvider noUploadVerResult = myValueSetIFhirResourceDao.search(paramsNoUploadVer, mockRequestDetails, mockServletResponse);
+		List<IBaseResource> noUploadVerValueSets = noUploadVerResult.getAllResources();
+		assertThat(noUploadVerValueSets).hasSize(expectedResultQty);
+
+		matchUnqualifiedIds(noUploadVerValueSets, theExpectedIdVersions, VS_NO_VERSIONED_ON_UPLOAD_ID);
+
+		// now  validate search for CS ver = null VS ver != null
+		for (String version : theExpectedIdVersions) {
+			SearchParameterMap paramsUploadVer = new SearchParameterMap("url", new UriParam(VS_VERSIONED_ON_UPLOAD));
+			paramsUploadVer.add("version", new TokenParam(version));
+
+			IBundleProvider uploadVerResult = myValueSetIFhirResourceDao.search(paramsUploadVer, mockRequestDetails, mockServletResponse);
+			List<IBaseResource> uploadVerValueSets = uploadVerResult.getAllResources();
+			assertThat(uploadVerValueSets).hasSize(1);
+
+			assertEquals(VS_VERSIONED_ON_UPLOAD_ID + "-" + version, uploadVerValueSets.get(0).getIdElement().getIdPart());
+			assertEquals(version, ((ValueSet) uploadVerValueSets.get(0)).getVersion());
+		}
+
+		// now validate each specific uploaded version
+		theExpectedIdVersions.forEach(this::validateValueSetSearchForVersion);
+	}
+
+
+	/**
+	 * Some ValueSets (IE: AnswerLists), can have a specific version, different from the version of the
+	 * CodeSystem with which they were uploaded. That version is what we distinguish in both sets of tests here,
+	 * no the CodeSystem version.
+	 */
+	private void validateValueSetSearchForVersion(String theVersion) {
+		// for no versioned VS (VS version, different from CS version)
+
+		SearchParameterMap paramsUploadNoVer = new SearchParameterMap("url", new UriParam(VS_NO_VERSIONED_ON_UPLOAD));
+		paramsUploadNoVer.add("version", new TokenParam(theVersion));
+
+		IBundleProvider uploadNoVerResult = myValueSetIFhirResourceDao.search(paramsUploadNoVer, mockRequestDetails, mockServletResponse);
+		List<IBaseResource> uploadNoVerValueSets = uploadNoVerResult.getAllResources();
+		assertThat(uploadNoVerValueSets).hasSize(1);
+
+		ValueSet loadNoVersionValueSet = (ValueSet) uploadNoVerValueSets.get(0);
+		String expectedLoadNoVersionUnqualifiedId = VS_NO_VERSIONED_ON_UPLOAD_ID + (theVersion == null ? "" : "-" + theVersion);
+		assertEquals(expectedLoadNoVersionUnqualifiedId, loadNoVersionValueSet.getIdElement().getIdPart());
+
+
+		// versioned VS (VS version, different from CS version)
+
+		SearchParameterMap paramsUploadVer = new SearchParameterMap("url", new UriParam(VS_VERSIONED_ON_UPLOAD));
+		paramsUploadVer.add("version", new TokenParam(theVersion));
+
+		IBundleProvider uploadVerResult = myValueSetIFhirResourceDao.search(paramsUploadVer, mockRequestDetails, mockServletResponse);
+		List<IBaseResource> uploadVerValueSets = uploadVerResult.getAllResources();
+		assertThat(uploadVerValueSets).hasSize(1);
+
+		ValueSet loadVersionValueSet = (ValueSet) uploadVerValueSets.get(0);
+		String expectedLoadVersionUnqualifiedId = VS_VERSIONED_ON_UPLOAD_ID + (theVersion == null ? "" : "-" + theVersion);
+		assertEquals(expectedLoadVersionUnqualifiedId, loadVersionValueSet.getIdElement().getIdPart());
+	}
+
+
+	/**
+	 * Validates that the collection of unqualified IDs of each element of theValueSets matches the expected
+	 * unqualifiedIds corresponding to the uploaded versions - one per version, each id being
+	 * theUnqualifiedIdPrefix suffixed with its version.
+	 *
+	 * @param theValueSets            the ValueSet collection
+	 * @param theExpectedIdVersions   the collection of expected versions
+	 * @param theUnqualifiedIdPrefix  the id prefix the searched ValueSets are stored under
+	 */
+	private void matchUnqualifiedIds(
+			List<IBaseResource> theValueSets, Collection<String> theExpectedIdVersions, String theUnqualifiedIdPrefix) {
+		List<String> expectedUnqualifiedIds = theExpectedIdVersions.stream()
+			.map(expVer -> theUnqualifiedIdPrefix + "-" + expVer)
+			.toList();
+
+		List<String> resultUnqualifiedIds = theValueSets.stream()
+			.map(r -> r.getIdElement().getIdPart()).toList();
+
+		assertThat(resultUnqualifiedIds).containsExactlyInAnyOrderElementsOf(expectedUnqualifiedIds);
+
+		List<String> valueSetVersions = theValueSets.stream().map(r -> ((ValueSet) r).getVersion()).toList();
+		assertThat(valueSetVersions).containsExactlyInAnyOrderElementsOf(theExpectedIdVersions);
+	}
+
+
+	/**
+	 * Validates that:
+	 * for CodeSystem:
+	 * _ current CS has no version
+	 * _ current TCS has no version
+	 * for ValueSet:
+	 * _ current TVSs with upload version have upload-version with no version append
+	 * _ current TVSs with no upload version have null version
+	 */
+	private void runCommonValidations(List<String> theAllVersions) {
+		// for CodeSystem:
+
+		// Validate that CS was created
+		for (String version : theAllVersions) {
+			CodeSystem codeSystem = myCodeSystemDao.read(new IdType(LOINC_LOW + "-" + version), myRequestDetails);
+			assertEquals(version, codeSystem.getVersion());
+
+			// Fetch from validation context
+			codeSystem = (CodeSystem) myValidationSupport.fetchCodeSystem(BASE_LOINC_URL + "|" + version);
+			assertNotNull(codeSystem);
+			assertEquals(version, codeSystem.getVersion());
+
+			// for ValueSet resource
+			ValueSet vs = (ValueSet) myValidationSupport.fetchValueSet(VS_NO_VERSIONED_ON_UPLOAD + "|" + version);
+			assertNotNull(vs);
+			assertEquals(VS_NO_VERSIONED_ON_UPLOAD, vs.getUrl());
+			assertEquals(version, vs.getVersion());
+		}
+
+	}
+
+	@Test
+	void uploadWithVersion() throws Exception {
+		String ver = "2.67";
+		myTerminologyTestHelper.startImportLoincJobAndWaitForCompletion(ver, true);
+
+		runCommonValidations(Collections.singletonList(ver));
+
+		//	validate operation for specific version
+		validateOperations(ver, Collections.singleton(ver));
+
+		//	tests conditions which were failing after VS expansion (before fix for issue-2995)
+		validateTermConcepts(Lists.newArrayList(ver));
+	}
+
+
+	@Test
+	void uploadWithVersionThenNoCurrent() throws Exception {
+		logAllCodeSystemsAndVersionsCodeSystemsAndVersions();
+
+		String currentVer = "2.67";
+		myTerminologyTestHelper.startImportLoincJobAndWaitForCompletion(currentVer, true);
+
+		logAllCodeSystemsAndVersionsCodeSystemsAndVersions();
+
+		String nonCurrentVer = "2.68";
+		myTerminologyTestHelper.startImportLoincJobAndWaitForCompletion(nonCurrentVer, false);
+
+		logAllCodeSystemsAndVersionsCodeSystemsAndVersions();
+		logAllUriIndexes();
+		logAllTokenIndexes("version");
+		logAllConcepts();
+
+		runCommonValidations(Lists.newArrayList(currentVer, nonCurrentVer));
+
+
+		//	validate operation for specific version
+		validateOperations(currentVer, Lists.newArrayList(currentVer, nonCurrentVer));
+
+		//	tests conditions which were failing after VS expansion (before fix for issue-2995)
+		validateTermConcepts(Lists.newArrayList(currentVer, nonCurrentVer));
+
+
+		// this test also checks specifically the loinc-all ValueSet
+		validateOperationsLoincAllVS(currentVer, Lists.newArrayList(currentVer, nonCurrentVer));
+	}
+
+
+	/**
+	 * For input version or for current (when input is null) validates search, expand, lookup and validateCode operations
+	 */
+	private void validateOperationsLoincAllVS(String currentVersion, Collection<String> theExpectedVersions) {
+		validateValueSetSearchLoincAllVS(theExpectedVersions);
+
+		validateValueExpandLoincAllVS(currentVersion, theExpectedVersions);
+	}
+
+
+	private void validateValueSetSearchLoincAllVS(Collection<String> theExpectedIdVersions) {
+		// first validate search for CS ver = null VS ver = null
+
+		SearchParameterMap params = new SearchParameterMap("url", new UriParam(LOINC_ALL_VS_URL));
+		int expectedResultQty = theExpectedIdVersions.size();
+		IBundleProvider result = myValueSetIFhirResourceDao.search(params, mockRequestDetails, mockServletResponse);
+		List<IBaseResource> valueSets = result.getAllResources();
+		assertThat(valueSets).hasSize(expectedResultQty);
+
+		matchUnqualifiedIds(valueSets, theExpectedIdVersions, LOINC_ALL_VALUESET_ID);
+
+		// now validate each specific uploaded version
+		theExpectedIdVersions.forEach(this::validateValueSetSearchForVersionLoincAllVS);
+	}
+
+
+	private void validateValueSetSearchForVersionLoincAllVS(String theVersion) {
+		SearchParameterMap paramsUploadNoVer = new SearchParameterMap("url", new UriParam(LOINC_ALL_VS_URL));
+		paramsUploadNoVer.add("version", new TokenParam(theVersion));
+
+		IBundleProvider result = myValueSetIFhirResourceDao.search(paramsUploadNoVer, mockRequestDetails, mockServletResponse);
+		List<IBaseResource> valueSets = result.getAllResources();
+		assertThat(valueSets).hasSize(1);
+
+		ValueSet loadNoVersionValueSet = (ValueSet) valueSets.get(0);
+		String expectedUnqualifiedId = LOINC_ALL_VALUESET_ID + "-" + theVersion;
+		assertEquals(expectedUnqualifiedId, loadNoVersionValueSet.getIdElement().getIdPart());
+	}
+
+
+
+
+	private void validateValueExpandLoincAllVS(String currentVersion, Collection<String> theAllVersions) {
+		ValueSet vs = myValueSetDao.expandByIdentifier(LOINC_ALL_VS_URL, null);
+		assertThat(vs.getExpansion().getContains()).isNotEmpty();
+
+		// version was added prefixing to some code display to validate
+		checkContainsElementVersion(vs, currentVersion);
+
+		// now for each uploaded version
+		theAllVersions.forEach(this::validateValueExpandLoincAllVsForVersion);
+	}
+
+	private void checkContainsElementVersion(ValueSet vs, String version) {
+		Optional<String> vsContainsDisplay = vs.getExpansion().getContains().stream()
+			.filter(c -> c.getCode().equals(VS_VERSIONED_ON_UPLOAD_FIRST_CODE))
+			.map(ValueSet.ValueSetExpansionContainsComponent::getDisplay)
+			.findAny();
+		assertThat(vsContainsDisplay).isPresent();
+		String expectedDisplay = prefixWithVersion(version, VS_VERSIONED_ON_UPLOAD_FIRST_DISPLAY);
+		assertThat(vsContainsDisplay).contains(expectedDisplay);
+	}
+
+	private void validateValueExpandLoincAllVsForVersion(String theVersion) {
+		ValueSet vs = myValueSetDao.expandByIdentifier(LOINC_ALL_VS_URL + "|" + theVersion, null);
+		switch (theVersion) {
+			case "2.67", "2.68" ->
+				assertThat(vs.getExpansion().getContains()).hasSize(82);
+			default -> fail("Don't know how to handle version: " + theVersion);
+		}
+
+		// version was added before code display to validate
+		checkContainsElementVersion(vs, theVersion);
+	}
+
+	/**
+	 * Validates that exactly one TermConcept exists per expected CodeSystem version, and that each one's
+	 * display matches its version. A TermConcept belonging to a superseded (DELETED_) version therefore
+	 * fails this check.
+	 * <p>
+	 * Concepts are keyed by CodeSystem version rather than by PID, because the
+	 * {@link ca.uhn.fhir.jpa.term.TermDeferredStorageSvcImpl} drain persists them in a separate transaction
+	 * from the import job. PID order therefore does not necessarily follow upload order.
+	 */
+	private void validateTermConcepts(List<String> theExpectedVersions) {
+		validateTermConceptDisplaysByVersion(
+			VS_NO_VERSIONED_ON_UPLOAD_FIRST_CODE, VS_NO_VERSIONED_ON_UPLOAD_FIRST_DISPLAY, theExpectedVersions);
+
+		validateTermConceptDisplaysByVersion(
+			VS_VERSIONED_ON_UPLOAD_FIRST_CODE, VS_VERSIONED_ON_UPLOAD_FIRST_DISPLAY, theExpectedVersions);
+	}
+
+	/**
+	 * Asserts that the TermConcepts for theCode are exactly one per expected version, each displaying
+	 * theDisplay prefixed with its own version. Displays are collected into lists per version so that a
+	 * duplicated version surfaces as a readable map difference rather than an exception.
+	 */
+	private void validateTermConceptDisplaysByVersion(
+			String theCode, String theDisplay, List<String> theExpectedVersions) {
+
+		Map<String, List<String>> expectedDisplaysByVersion = theExpectedVersions.stream()
+			.collect(Collectors.toMap(
+				version -> version,
+				version -> List.of(prefixWithVersion(version, theDisplay))));
+
+		Map<String, List<String>> actualDisplaysByVersion = runInTransaction(() -> {
+			List<TermConcept> concepts = myEntityManager.createQuery(
+					"select tc from TermConcept tc join fetch tc.myCodeSystem tcsv where tc.myCode = :code",
+					TermConcept.class)
+				.setParameter("code", theCode)
+				.getResultList();
+
+			return concepts.stream()
+				.collect(Collectors.groupingBy(
+					concept -> concept.getCodeSystemVersion().getCodeSystemVersionId(),
+					Collectors.mapping(TermConcept::getDisplay, Collectors.toList())));
+		});
+
+		assertThat(actualDisplaysByVersion)
+			.as("TermConcept displays by CodeSystem version for code: %s", theCode)
+			.containsExactlyInAnyOrderEntriesOf(expectedDisplaysByVersion);
+	}
+
+
+	@Test
+	void uploadWithVersionThenNoCurrentThenCurrent() throws Exception {
+		String firstCurrentVer = "2.67";
+		myTerminologyTestHelper.startImportLoincJobAndWaitForCompletion(firstCurrentVer, true);
+
+		String noCurrentVer = "2.68";
+		myTerminologyTestHelper.startImportLoincJobAndWaitForCompletion(noCurrentVer, false);
+
+		String lastCurrentVer = "2.69";
+		myTerminologyTestHelper.startImportLoincJobAndWaitForCompletion(lastCurrentVer, true);
+
+		runCommonValidations(Lists.newArrayList(firstCurrentVer, noCurrentVer, lastCurrentVer));
+
+		//	validate operation for specific version
+		validateOperations(lastCurrentVer, Lists.newArrayList(firstCurrentVer, noCurrentVer, lastCurrentVer));
+
+		//	tests conditions which were failing after VS expansion (before fix for issue-2995)
+		validateTermConcepts(Lists.newArrayList(firstCurrentVer, noCurrentVer, lastCurrentVer));
+	}
+}

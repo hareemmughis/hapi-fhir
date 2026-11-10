@@ -1,17 +1,15 @@
-package ca.uhn.fhir.context;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,37 +17,42 @@ package ca.uhn.fhir.context;
  * limitations under the License.
  * #L%
  */
-import static org.apache.commons.lang3.StringUtils.isBlank;
+package ca.uhn.fhir.context;
 
-import java.lang.reflect.Method;
-import java.lang.reflect.ParameterizedType;
-import java.lang.reflect.Type;
-import java.lang.reflect.TypeVariable;
-import java.util.Map;
-
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.api.annotation.DatatypeDef;
+import ca.uhn.fhir.model.api.annotation.ResourceDef;
 import org.hl7.fhir.instance.model.api.IBase;
 import org.hl7.fhir.instance.model.api.IBaseDatatype;
 import org.hl7.fhir.instance.model.api.IPrimitiveType;
 
-import ca.uhn.fhir.model.api.BasePrimitive;
-import ca.uhn.fhir.model.api.IPrimitiveDatatype;
-import ca.uhn.fhir.model.api.annotation.DatatypeDef;
-import ca.uhn.fhir.model.api.annotation.ResourceDef;
-import ca.uhn.fhir.util.CoverageIgnore;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 
-public class RuntimePrimitiveDatatypeDefinition extends BaseRuntimeElementDefinition<IPrimitiveType<?>> implements IRuntimeDatatypeDefinition {
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+public class RuntimePrimitiveDatatypeDefinition extends BaseRuntimeElementDefinition<IPrimitiveType<?>>
+		implements IRuntimeDatatypeDefinition {
 
 	private Class<?> myNativeType;
 	private BaseRuntimeElementDefinition<?> myProfileOf;
 	private Class<? extends IBaseDatatype> myProfileOfType;
 	private boolean mySpecialization;
+	private List<BaseRuntimeChildDefinition> myChildren;
+	private RuntimeChildExt myRuntimeChildExt;
 
-	public RuntimePrimitiveDatatypeDefinition(DatatypeDef theDef, Class<? extends IPrimitiveType<?>> theImplementingClass, boolean theStandardType) {
+	public RuntimePrimitiveDatatypeDefinition(
+			DatatypeDef theDef, Class<? extends IPrimitiveType<?>> theImplementingClass, boolean theStandardType) {
 		super(theDef.name(), theImplementingClass, theStandardType);
 
 		String resourceName = theDef.name();
 		if (isBlank(resourceName)) {
-			throw new ConfigurationException("Resource type @" + ResourceDef.class.getSimpleName() + " annotation contains no resource name: " + theImplementingClass.getCanonicalName());
+			throw new ConfigurationException(Msg.code(1689) + "Resource type @" + ResourceDef.class.getSimpleName()
+					+ " annotation contains no resource name: " + theImplementingClass.getCanonicalName());
 		}
 
 		mySpecialization = theDef.isSpecialization();
@@ -61,6 +64,19 @@ public class RuntimePrimitiveDatatypeDefinition extends BaseRuntimeElementDefini
 		determineNativeType(theImplementingClass);
 	}
 
+	@Override
+	public List<BaseRuntimeChildDefinition> getChildren() {
+		return myChildren;
+	}
+
+	@Override
+	public BaseRuntimeChildDefinition getChildByName(String theChildName) {
+		if ("extension".equals(theChildName)) {
+			return myRuntimeChildExt;
+		}
+		return null;
+	}
+
 	private void determineNativeType(Class<? extends IPrimitiveType<?>> theImplementingClass) {
 		Class<?> clazz = theImplementingClass;
 		while (clazz.equals(Object.class) == false) {
@@ -70,7 +86,8 @@ public class RuntimePrimitiveDatatypeDefinition extends BaseRuntimeElementDefini
 				Type rawType = superPt.getRawType();
 				if (rawType instanceof Class) {
 					Class<?> rawClass = (Class<?>) rawType;
-					if (rawClass.getName().endsWith(".BasePrimitive") || rawClass.getName().endsWith(".PrimitiveType")) {
+					if (rawClass.getName().endsWith(".BasePrimitive")
+							|| rawClass.getName().endsWith(".PrimitiveType")) {
 						Type typeVariable = superPt.getActualTypeArguments()[0];
 						if (typeVariable instanceof Class) {
 							myNativeType = (Class<?>) typeVariable;
@@ -115,7 +132,9 @@ public class RuntimePrimitiveDatatypeDefinition extends BaseRuntimeElementDefini
 	}
 
 	@Override
-	void sealAndInitialize(FhirContext theContext, Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
+	void sealAndInitialize(
+			FhirContext theContext,
+			Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
 		super.sealAndInitialize(theContext, theClassToElementDefinitions);
 
 		if (myProfileOfType != null) {
@@ -128,9 +147,16 @@ public class RuntimePrimitiveDatatypeDefinition extends BaseRuntimeElementDefini
 				b.append(getImplementingClass().getName());
 				b.append(" - Valid types: ");
 				b.append(theClassToElementDefinitions.keySet());
-				throw new ConfigurationException(b.toString());
+				throw new ConfigurationException(Msg.code(1690) + b.toString());
 			}
 		}
-	}
 
+		myRuntimeChildExt = new RuntimeChildExt();
+		myRuntimeChildExt.sealAndInitialize(theContext, theClassToElementDefinitions);
+
+		myChildren = new ArrayList<>();
+		myChildren.addAll(super.getChildren());
+		myChildren.add(myRuntimeChildExt);
+		myChildren = Collections.unmodifiableList(myChildren);
+	}
 }

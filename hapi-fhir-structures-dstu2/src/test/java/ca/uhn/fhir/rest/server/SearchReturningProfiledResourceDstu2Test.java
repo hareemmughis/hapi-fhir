@@ -1,31 +1,7 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.not;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.api.AddProfileTagEnum;
 import ca.uhn.fhir.model.api.ResourceMetadataKeyEnum;
 import ca.uhn.fhir.model.api.annotation.Description;
 import ca.uhn.fhir.model.dstu2.resource.Bundle;
@@ -33,26 +9,57 @@ import ca.uhn.fhir.model.dstu2.resource.Patient;
 import ca.uhn.fhir.model.primitive.IdDt;
 import ca.uhn.fhir.rest.annotation.OptionalParam;
 import ca.uhn.fhir.rest.annotation.Search;
-import ca.uhn.fhir.rest.client.IGenericClient;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.param.DateRangeParam;
 import ca.uhn.fhir.rest.param.StringParam;
 import ca.uhn.fhir.rest.server.interceptor.ResponseHighlighterInterceptor;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
 import ca.uhn.fhir.util.TestUtil;
 import ca.uhn.fhir.validation.PatientProfileDstu2;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class SearchReturningProfiledResourceDstu2Test {
 
-	private static CloseableHttpClient ourClient;
-	private static FhirContext ourCtx = FhirContext.forDstu2();
+	private static final FhirContext ourCtx = FhirContext.forDstu2Cached();
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(SearchReturningProfiledResourceDstu2Test.class);
-	private static int ourPort;
-	private static Server ourServer;
 
+	@RegisterExtension
+	public static final RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		.setDefaultResponseEncoding(EncodingEnum.XML)
+		.registerProvider(new DummyPatientResourceProvider())
+		.registerInterceptor(new ResponseHighlighterInterceptor())
+		.withPagingProvider(new FifoMemoryPagingProvider(100))
+		.setDefaultPrettyPrint(false);
+
+
+	@BeforeEach
+	public void before() {
+		ourCtx.setAddProfileTagWhenEncoding(AddProfileTagEnum.ONLY_FOR_CUSTOM);
+	}
+
+	@AfterEach
+	public void after() {
+		ourCtx.setDefaultTypeForProfile("http://ahr.copa.inso.tuwien.ac.at/StructureDefinition/Patient", null);
+	}
+	
+	
 	@Test
 	public void testClientTypedRequest() throws Exception {
-		ourCtx = FhirContext.forDstu2();
-		IGenericClient client = ourCtx.newRestfulGenericClient("http://localhost:" + ourPort + "/");
+		IGenericClient client = ourCtx.newRestfulGenericClient(ourServer.getBaseUrl() + "/");
 		Bundle bundle = client.search().forResource(PatientProfileDstu2.class).returnBundle(Bundle.class).execute();
 
 		assertEquals(PatientProfileDstu2.class, bundle.getEntry().get(0).getResource().getClass());
@@ -60,9 +67,8 @@ public class SearchReturningProfiledResourceDstu2Test {
 
 	@Test
 	public void testClientUntypedRequestWithHint() throws Exception {
-		ourCtx = FhirContext.forDstu2();
 		ourCtx.setDefaultTypeForProfile("http://ahr.copa.inso.tuwien.ac.at/StructureDefinition/Patient", PatientProfileDstu2.class);
-		IGenericClient client = ourCtx.newRestfulGenericClient("http://localhost:" + ourPort + "/");
+		IGenericClient client = ourCtx.newRestfulGenericClient(ourServer.getBaseUrl() + "/");
 		Bundle bundle = client.search().forResource(Patient.class).returnBundle(Bundle.class).execute();
 
 		assertEquals(PatientProfileDstu2.class, bundle.getEntry().get(0).getResource().getClass());
@@ -70,8 +76,7 @@ public class SearchReturningProfiledResourceDstu2Test {
 
 	@Test
 	public void testClientUntypedRequestWithoutHint() throws Exception {
-		ourCtx = FhirContext.forDstu2();
-		IGenericClient client = ourCtx.newRestfulGenericClient("http://localhost:" + ourPort + "/");
+		IGenericClient client = ourCtx.newRestfulGenericClient(ourServer.getBaseUrl() + "/");
 		Bundle bundle = client.search().forResource(Patient.class).returnBundle(Bundle.class).execute();
 
 		assertEquals(Patient.class, bundle.getEntry().get(0).getResource().getClass());
@@ -79,59 +84,29 @@ public class SearchReturningProfiledResourceDstu2Test {
 
 	@Test
 	public void testProfilesGetAdded() throws Exception {
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient?_pretty=true");
-		HttpResponse status = ourClient.execute(httpGet);
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient?_pretty=true").get().getBody();
 		ourLog.info(responseContent);
 
-		assertThat(responseContent, not(containsString("html")));
-		assertThat(responseContent, containsString("<profile value=\"http://foo\"/>"));
-		assertThat(responseContent, containsString("<profile value=\"http://ahr.copa.inso.tuwien.ac.at/StructureDefinition/Patient\"/>"));
+		assertThat(responseContent).doesNotContain("html");
+		assertThat(responseContent).contains("<profile value=\"http://foo\"/>");
+		assertThat(responseContent).contains("<profile value=\"http://ahr.copa.inso.tuwien.ac.at/StructureDefinition/Patient\"/>");
 
 	}
 
 	@Test
 	public void testProfilesGetAddedHtml() throws Exception {
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient?_format=html");
-		HttpResponse status = ourClient.execute(httpGet);
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient?_format=html").get().getBody();
 		ourLog.info(responseContent);
 
-		assertThat(responseContent, containsString("html"));
-		assertThat(responseContent, containsString("http://foo"));
-		assertThat(responseContent, containsString("http://ahr.copa.inso.tuwien.ac.at/StructureDefinition/Patient"));
+		assertThat(responseContent).contains("html");
+		assertThat(responseContent).contains("http://foo");
+		assertThat(responseContent).contains("http://ahr.copa.inso.tuwien.ac.at/StructureDefinition/Patient");
 
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
-	}
-
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-
-		servlet.registerInterceptor(new ResponseHighlighterInterceptor());
-		
-		servlet.setResourceProviders(new DummyPatientResourceProvider());
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 	public static class DummyPatientResourceProvider implements IResourceProvider {

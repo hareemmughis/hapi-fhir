@@ -1,11 +1,11 @@
 package ca.uhn.fhirtest;
 
+import ca.uhn.fhir.jpa.provider.BaseJpaProvider;
+import ca.uhn.fhir.rest.api.Constants;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.ui.ModelMap;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.context.request.WebRequestInterceptor;
-
-import ca.uhn.fhir.jpa.provider.BaseJpaProvider;
 
 public class RequestInterceptor implements WebRequestInterceptor {
 
@@ -25,7 +25,7 @@ public class RequestInterceptor implements WebRequestInterceptor {
 	@Override
 	public void preHandle(WebRequest theRequest) throws Exception {
 
-		String[] forwardedFors = theRequest.getHeaderValues("x-forwarded-for");
+		String[] forwardedFors = theRequest.getHeaderValues(Constants.HEADER_X_FORWARDED_FOR);
 		StringBuilder b = new StringBuilder();
 		if (forwardedFors != null) {
 			for (String enums : forwardedFors) {
@@ -43,7 +43,5 @@ public class RequestInterceptor implements WebRequestInterceptor {
 		org.slf4j.MDC.put(BaseJpaProvider.REMOTE_UA, userAgent);
 
 		ourLog.trace("User agent is: {}", userAgent);
-
 	}
-
 }

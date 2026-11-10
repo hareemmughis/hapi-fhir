@@ -1,27 +1,28 @@
 package ca.uhn.fhir.to.model;
 
-import static org.apache.commons.lang3.StringUtils.*;
-
-import javax.servlet.http.HttpServletRequest;
-
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.HttpRequestBase;
-import org.springframework.web.bind.annotation.ModelAttribute;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.context.FhirVersionEnum;
 import ca.uhn.fhir.parser.IParser;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
 import ca.uhn.fhir.rest.api.SummaryEnum;
-import ca.uhn.fhir.rest.client.GenericClient;
-import ca.uhn.fhir.rest.client.IClientInterceptor;
-import ca.uhn.fhir.rest.client.ServerValidationModeEnum;
+import ca.uhn.fhir.rest.client.api.IClientInterceptor;
 import ca.uhn.fhir.rest.client.api.IHttpRequest;
 import ca.uhn.fhir.rest.client.api.IHttpResponse;
-import ca.uhn.fhir.rest.server.EncodingEnum;
+import ca.uhn.fhir.rest.client.api.ServerValidationModeEnum;
+import ca.uhn.fhir.rest.client.impl.GenericClient;
 import ca.uhn.fhir.rest.server.IncomingRequestAddressStrategy;
+import ca.uhn.fhir.rest.server.util.ITestingUiClientFactory;
 import ca.uhn.fhir.to.Controller;
 import ca.uhn.fhir.to.TesterConfig;
-import ca.uhn.fhir.util.ITestingUiClientFactory;
+import jakarta.annotation.Nullable;
+import jakarta.servlet.http.HttpServletRequest;
+import org.apache.commons.lang3.Validate;
+import org.springframework.web.bind.annotation.ModelAttribute;
+
+import static org.apache.commons.lang3.StringUtils.defaultString;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 public class HomeRequest {
 
@@ -58,6 +59,8 @@ public class HomeRequest {
 		} else {
 			retVal = theConfig.getIdToServerBase().get(myServerId);
 		}
+
+		Validate.notNull(retVal, "No definition for server: %s", myServerId);
 
 		if (retVal.contains("${serverBase}")) {
 			IncomingRequestAddressStrategy strategy = new IncomingRequestAddressStrategy();
@@ -124,19 +127,26 @@ public class HomeRequest {
 		myServerId = theServerId;
 	}
 
-	public GenericClient newClient(HttpServletRequest theRequest, FhirContext theContext, TesterConfig theConfig, Controller.CaptureInterceptor theInterceptor) {
+	public GenericClient newClient(
+			HttpServletRequest theRequest,
+			FhirContext theContext,
+			TesterConfig theConfig,
+			@Nullable Controller.CaptureInterceptor theInterceptor) {
 		theContext.getRestfulClientFactory().setServerValidationMode(ServerValidationModeEnum.NEVER);
+		theContext.getRestfulClientFactory().setConnectTimeout(60 * 1000);
+		theContext.getRestfulClientFactory().setConnectionRequestTimeout(60 * 1000);
+		theContext.getRestfulClientFactory().setSocketTimeout(60 * 1000);
 
 		GenericClient retVal;
 		ITestingUiClientFactory clientFactory = theConfig.getClientFactory();
 		if (clientFactory != null) {
-			retVal = (GenericClient) clientFactory.newClient(
-					theContext,
-					theRequest,
-					getServerBase(theRequest, theConfig));
+			retVal = (GenericClient)
+					clientFactory.newClient(theContext, theRequest, getServerBase(theRequest, theConfig));
 		} else {
 			retVal = (GenericClient) theContext.newRestfulGenericClient(getServerBase(theRequest, theConfig));
 		}
+
+		retVal.registerInterceptor(new BufferResponseInterceptor());
 
 		retVal.setKeepResponses(true);
 
@@ -158,8 +168,10 @@ public class HomeRequest {
 				retVal.setSummary(summary);
 			}
 		}
-		
-		retVal.registerInterceptor(theInterceptor);
+
+		if (theInterceptor != null) {
+			retVal.registerInterceptor(theInterceptor);
+		}
 
 		final String remoteAddr = org.slf4j.MDC.get("req.remoteAddr");
 		retVal.registerInterceptor(new IClientInterceptor() {
@@ -172,7 +184,7 @@ public class HomeRequest {
 			@Override
 			public void interceptRequest(IHttpRequest theRequest) {
 				if (isNotBlank(remoteAddr)) {
-					theRequest.addHeader("x-forwarded-for", remoteAddr);
+					theRequest.addHeader(Constants.HEADER_X_FORWARDED_FOR, remoteAddr);
 				}
 			}
 		});
@@ -190,15 +202,15 @@ public class HomeRequest {
 	public String getApiKey(HttpServletRequest theServletRequest, TesterConfig theConfig) {
 		Boolean allowsApiKey;
 		if (isBlank(myServerId) && !theConfig.getIdToFhirVersion().containsKey(myServerId)) {
-			allowsApiKey = theConfig.getIdToAllowsApiKey().entrySet().iterator().next().getValue();
+			allowsApiKey =
+					theConfig.getIdToAllowsApiKey().entrySet().iterator().next().getValue();
 		} else {
 			allowsApiKey = theConfig.getIdToAllowsApiKey().get(myServerId);
 		}
 		if (!Boolean.TRUE.equals(allowsApiKey)) {
 			return null;
 		}
-		
+
 		return defaultString(theServletRequest.getParameter("apiKey"));
 	}
-
 }

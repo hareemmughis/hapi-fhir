@@ -1,17 +1,15 @@
-package ca.uhn.fhir.jpa.search;
-
 /*
  * #%L
  * HAPI FHIR JPA Server
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,56 +17,70 @@ package ca.uhn.fhir.jpa.search;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.jpa.search;
 
-import javax.persistence.EntityManager;
-
-import org.apache.commons.lang3.builder.EqualsBuilder;
+import ca.uhn.fhir.jpa.api.svc.ISearchCoordinatorSvc;
+import ca.uhn.fhir.jpa.model.dao.JpaPid;
+import ca.uhn.fhir.jpa.search.exec.BaseCacheAwareJpaSearchBundleProvider;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.server.BasePagingProvider;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.transaction.PlatformTransactionManager;
 
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.jpa.dao.IDao;
-import ca.uhn.fhir.jpa.dao.IFhirSystemDao;
-import ca.uhn.fhir.jpa.dao.data.ISearchResultDao;
-import ca.uhn.fhir.rest.server.FifoMemoryPagingProvider;
-import ca.uhn.fhir.rest.server.IBundleProvider;
-
-public class DatabaseBackedPagingProvider extends FifoMemoryPagingProvider {
+// Note: this class is not annotated with @Service because we want to
+// explicitly define it in BaseConfig.java. This is done so that
+// implementors can override if they want to.
+public class DatabaseBackedPagingProvider extends BasePagingProvider {
 
 	@Autowired
-	private PlatformTransactionManager thePlatformTransactionManager;
-	@Autowired
-	private ISearchResultDao theSearchResultDao;
-	@Autowired
-	private EntityManager theEntityManager;
-	@Autowired
-	private FhirContext theContext;
-	@Autowired
-	private IFhirSystemDao<?, ?> theDao;
+	private ISearchCoordinatorSvc<JpaPid> mySearchCoordinatorSvc;
 
+	/**
+	 * Constructor
+	 */
+	public DatabaseBackedPagingProvider() {
+		super();
+	}
+
+	/**
+	 * Constructor
+	 *
+	 * @deprecated Use {@link DatabaseBackedPagingProvider} as this constructor has no purpose
+	 */
+	@Deprecated
 	public DatabaseBackedPagingProvider(int theSize) {
-		super(theSize);
+		this();
 	}
 
 	@Override
-	public synchronized IBundleProvider retrieveResultList(String theId) {
-		IBundleProvider retVal = super.retrieveResultList(theId);
-		if (retVal == null) {
-			PersistedJpaBundleProvider provider = new PersistedJpaBundleProvider(theId, theDao);
-			if (!provider.ensureSearchEntityLoaded()) {
-				return null;
-			}
-			retVal = provider;
-		}
+	public IBundleProvider retrieveResultList(RequestDetails theRequestDetails, @Nonnull String theId) {
+
+		// mySearchCoordinatorSvc.continueExistingSearch returns IBundleProvider, but the JPA server
+		// implementation will always return a BaseCacheAwareJpaSearchBundleProvider so this is a
+		// safe cast. Note that mySearchCoordinatorSvc.continueExistingSearch will never return null
+		// since we don't want to actually open a database transaction more than once, so we only actually
+		// check the DB once we try to fetch resources. At that time we'll throw a ResourceGoneException
+		// if the UUID is not known.
+		BaseCacheAwareJpaSearchBundleProvider retVal = (BaseCacheAwareJpaSearchBundleProvider)
+				mySearchCoordinatorSvc.continueExistingSearch(theId, theRequestDetails);
+		retVal = validateAndReturnBundleProvider(retVal);
 		return retVal;
 	}
 
-	@Override
-	public synchronized String storeResultList(IBundleProvider theList) {
-		if (theList instanceof PersistedJpaBundleProvider) {
-			return ((PersistedJpaBundleProvider)theList).getSearchUuid();
-		}
-		return super.storeResultList(theList);
+	/**
+	 * Subclasses may override and validate, modify or replace the bundle provider being returned.
+	 * The default implementation returns the bundle provider as is.
+	 */
+	@Nullable
+	protected BaseCacheAwareJpaSearchBundleProvider validateAndReturnBundleProvider(
+			BaseCacheAwareJpaSearchBundleProvider theBundleProvider) {
+		return theBundleProvider;
 	}
 
+	@Override
+	public synchronized String storeResultList(RequestDetails theRequestDetails, IBundleProvider theList) {
+		return theList.getUuid();
+	}
 }

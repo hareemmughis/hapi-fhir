@@ -1,0 +1,256 @@
+/*-
+ * #%L
+ * HAPI FHIR - Master Data Management
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.mdm.rules.config;
+
+import ca.uhn.fhir.context.ConfigurationException;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.mdm.api.IMdmRuleValidator;
+import ca.uhn.fhir.mdm.api.IMdmSettings;
+import ca.uhn.fhir.mdm.api.MdmModeEnum;
+import ca.uhn.fhir.mdm.rules.json.InvalidEidSystemsException;
+import ca.uhn.fhir.mdm.rules.json.MdmRulesJson;
+import ca.uhn.fhir.util.JsonUtil;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+
+import static ca.uhn.fhir.mdm.api.MdmModeEnum.MATCH_AND_LINK;
+
+@Component
+public class MdmSettings implements IMdmSettings {
+	public static final int DEFAULT_CANDIDATE_SEARCH_LIMIT = 10000;
+	public static final int DEFAULT_WARN_LIMIT = 50;
+	private final IMdmRuleValidator myMdmRuleValidator;
+
+	private boolean myEnabled;
+	private final int myConcurrentConsumers = MDM_DEFAULT_CONCURRENT_CONSUMERS;
+	private String myScriptText;
+	private String mySurvivorshipRules;
+	private MdmRulesJson myMdmRules;
+	private MdmRulesJson myMatchOnlyMdmRules;
+	private boolean myPreventEidUpdates;
+	private String myGoldenResourcePartitionName;
+	private boolean mySearchAllPartitionForMatch = false;
+	private boolean myShouldAutoDeleteGoldenResources = true;
+	private MdmModeEnum myMdmMode = MATCH_AND_LINK;
+	/**
+	 * Whether or not MDM matching should skip placeholder resources
+	 * instead of trying to match them.
+	 * By default, false. But could be set true for
+	 * added efficiency.
+	 */
+	private boolean myIgnorePlaceholderResources = false;
+
+	/**
+	 * If disabled, the underlying MDM system will operate under the following assumptions:
+	 * <p>
+	 * 1. Source resource may have more than 1 EID of the same system simultaneously.
+	 * 2. During linking, incoming patient EIDs will be merged with existing Golden Resource EIDs.
+	 */
+	private boolean myPreventMultipleEids;
+
+	/**
+	 * When searching for matching candidates, this is the maximum number of candidates that will be retrieved.  If the
+	 * number matched is equal to or higher than this, the resource is omitted from MDM matching and tagged
+	 * as having too many candidates
+	 */
+	private int myCandidateSearchHardLimit = DEFAULT_CANDIDATE_SEARCH_LIMIT;
+
+	private int myCandidateSearchWarnLimit = DEFAULT_WARN_LIMIT;
+
+	@Autowired
+	public MdmSettings(IMdmRuleValidator theMdmRuleValidator) {
+		myMdmRuleValidator = theMdmRuleValidator;
+	}
+
+	@Override
+	public boolean isEnabled() {
+		return myEnabled;
+	}
+
+	public MdmSettings setEnabled(boolean theEnabled) {
+		myEnabled = theEnabled;
+		return this;
+	}
+
+	@Override
+	public boolean isIgnorePlaceholderResources() {
+		return myIgnorePlaceholderResources;
+	}
+
+	/**
+	 * Set IgnorePlaceholderResources.
+	 * Placeholder resources (provided they are allowed) are ignored during MDM
+	 * match operations.
+	 */
+	public void setIgnorePlaceholderResources(boolean theIgnorePlaceholderResources) {
+		myIgnorePlaceholderResources = theIgnorePlaceholderResources;
+	}
+
+	@Override
+	public int getConcurrentConsumers() {
+		return myConcurrentConsumers;
+	}
+
+	public String getScriptText() {
+		return myScriptText;
+	}
+
+	/**
+	 * @throws ConfigurationException if the rules document configures {@code eidSystems} incorrectly, that
+	 * being an error in a document the implementer wrote rather than an internal one
+	 */
+	public MdmSettings setScriptText(String theScriptText) throws IOException {
+		myScriptText = theScriptText;
+		// Read through the stream overload rather than JsonUtil.deserialize(String, Class), which reports
+		// every parse failure as an internal error, so that an invalid eidSystems entry can be told apart
+		// from the rest and reported as the configuration error it is.
+		try (ByteArrayInputStream scriptStream =
+				new ByteArrayInputStream(theScriptText.getBytes(StandardCharsets.UTF_8))) {
+			setMdmRules(JsonUtil.deserialize(scriptStream, MdmRulesJson.class));
+		} catch (InvalidEidSystemsException e) {
+			throw new ConfigurationException(Msg.code(3046) + e.getOriginalMessage(), e);
+		}
+		return this;
+	}
+
+	@Override
+	public MdmRulesJson getMdmRules() {
+		return myMdmRules;
+	}
+
+	@Override
+	public boolean isPreventEidUpdates() {
+		return myPreventEidUpdates;
+	}
+
+	public MdmSettings setPreventEidUpdates(boolean thePreventEidUpdates) {
+		myPreventEidUpdates = thePreventEidUpdates;
+		return this;
+	}
+
+	public MdmSettings setMdmRules(MdmRulesJson theMdmRules) {
+		myMdmRuleValidator.validate(theMdmRules);
+		myMdmRules = theMdmRules;
+		return this;
+	}
+
+	@Override
+	public MdmRulesJson getMatchOnlyMdmRules() {
+		return myMatchOnlyMdmRules != null ? myMatchOnlyMdmRules : getMdmRules();
+	}
+
+	/**
+	 * Sets the rules the read-only {@code $match} and {@code $mdm-match} operations score with.
+	 *
+	 * @param theMatchOnlyMdmRules the match only rules, or {@code null}
+	 * @throws ConfigurationException if the match only rules are invalid
+	 */
+	public MdmSettings setMatchOnlyMdmRules(MdmRulesJson theMatchOnlyMdmRules) {
+		if (theMatchOnlyMdmRules != null) {
+			myMdmRuleValidator.validate(theMatchOnlyMdmRules);
+		}
+		myMatchOnlyMdmRules = theMatchOnlyMdmRules;
+		return this;
+	}
+
+	public boolean isPreventMultipleEids() {
+		return myPreventMultipleEids;
+	}
+
+	@Override
+	public String getRuleVersion() {
+		return myMdmRules.getVersion();
+	}
+
+	public MdmSettings setPreventMultipleEids(boolean thePreventMultipleEids) {
+		myPreventMultipleEids = thePreventMultipleEids;
+		return this;
+	}
+
+	@Override
+	public String getSurvivorshipRules() {
+		return mySurvivorshipRules;
+	}
+
+	public void setSurvivorshipRules(String theSurvivorshipRules) {
+		mySurvivorshipRules = theSurvivorshipRules;
+	}
+
+	@Override
+	public int getCandidateSearchLimit() {
+		return myCandidateSearchHardLimit;
+	}
+
+	@Override
+	public int getCandidateSearchWarnLimit() {
+		return myCandidateSearchWarnLimit;
+	}
+
+	public void setCandidateSearchWarnLimit(int theWarnLimit) {
+		myCandidateSearchWarnLimit = theWarnLimit;
+	}
+
+	public void setCandidateSearchLimit(int theCandidateSearchLimit) {
+		myCandidateSearchHardLimit = theCandidateSearchLimit;
+	}
+
+	@Override
+	public String getGoldenResourcePartitionName() {
+		return myGoldenResourcePartitionName;
+	}
+
+	@Override
+	public void setGoldenResourcePartitionName(String theGoldenResourcePartitionName) {
+		myGoldenResourcePartitionName = theGoldenResourcePartitionName;
+	}
+
+	@Override
+	public boolean getSearchAllPartitionForMatch() {
+		return mySearchAllPartitionForMatch;
+	}
+
+	@Override
+	public void setSearchAllPartitionForMatch(boolean theSearchAllPartitionForMatch) {
+		mySearchAllPartitionForMatch = theSearchAllPartitionForMatch;
+	}
+
+	@Override
+	public boolean isAutoExpungeGoldenResources() {
+		return myShouldAutoDeleteGoldenResources;
+	}
+
+	@Override
+	public void setAutoExpungeGoldenResources(boolean theShouldAutoExpunge) {
+		myShouldAutoDeleteGoldenResources = theShouldAutoExpunge;
+	}
+
+	public void setMdmMode(MdmModeEnum theMdmMode) {
+		myMdmMode = theMdmMode;
+	}
+
+	@Override
+	public MdmModeEnum getMode() {
+		return myMdmMode;
+	}
+}

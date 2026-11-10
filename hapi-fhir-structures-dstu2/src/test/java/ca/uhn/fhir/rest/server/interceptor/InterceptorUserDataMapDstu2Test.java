@@ -1,34 +1,9 @@
 package ca.uhn.fhir.rest.server.interceptor;
 
-import static org.hamcrest.Matchers.contains;
-import static org.hamcrest.Matchers.containsInAnyOrder;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertThat;
-import static org.mockito.Mockito.mock;
-
-import java.lang.reflect.Method;
-import java.util.*;
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
-
 import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.interceptor.api.Hook;
+import ca.uhn.fhir.interceptor.api.Interceptor;
+import ca.uhn.fhir.interceptor.api.Pointcut;
 import ca.uhn.fhir.model.dstu2.composite.HumanNameDt;
 import ca.uhn.fhir.model.dstu2.composite.IdentifierDt;
 import ca.uhn.fhir.model.dstu2.resource.Bundle;
@@ -44,116 +19,141 @@ import ca.uhn.fhir.rest.annotation.OperationParam;
 import ca.uhn.fhir.rest.annotation.Read;
 import ca.uhn.fhir.rest.annotation.RequiredParam;
 import ca.uhn.fhir.rest.annotation.Search;
-import ca.uhn.fhir.rest.method.RequestDetails;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.server.FifoMemoryPagingProvider;
 import ca.uhn.fhir.rest.server.IResourceProvider;
-import ca.uhn.fhir.rest.server.RestfulServer;
 import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
-import ca.uhn.fhir.rest.server.interceptor.IServerInterceptor.ActionRequestDetails;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.rest.server.servlet.ServletRequestDetails;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
 import ca.uhn.fhir.util.TestUtil;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 public class InterceptorUserDataMapDstu2Test {
 
-	private static CloseableHttpClient ourClient;
-	private static FhirContext ourCtx = FhirContext.forDstu2();
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(InterceptorUserDataMapDstu2Test.class);
-	private static int ourPort;
-	private static Server ourServer;
-	private static RestfulServer servlet;
-	private IServerInterceptor myInterceptor;
+	private static final FhirContext ourCtx = FhirContext.forDstu2Cached();
 	private final Object myKey = "KEY";
+	private final Object myValue = "VALUE";
 	private Map<Object, Object> myMap;
 	private Set<String> myMapCheckMethods;
-	private final Object myValue = "VALUE";
 
-	@Before
+	@RegisterExtension
+	public static final RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		.setDefaultResponseEncoding(EncodingEnum.JSON)
+		.registerProvider(new DummyPatientResourceProvider())
+		.registerProvider(new PlainProvider())
+		.withPagingProvider(new FifoMemoryPagingProvider(100))
+		.setDefaultPrettyPrint(false);
+
+	@BeforeEach
 	public void before() {
-		myInterceptor = mock(IServerInterceptor.class);
-		servlet.setInterceptors(Collections.singletonList(myInterceptor));
+		ourServer.getInterceptorService().unregisterAllInterceptors();
+		ourServer.getInterceptorService().registerInterceptor(new MyInterceptor());
 	}
 
 
-	@Before
+	@BeforeEach
 	public void beforePurgeMap() {
 		myMap = null;
-		myMapCheckMethods= new LinkedHashSet<String>();
+		myMapCheckMethods = Collections.synchronizedSet(new LinkedHashSet<>());
 	}
 
-	
+
 	@Test
 	public void testException() throws Exception {
 
-		IServerInterceptor interceptor = mock(IServerInterceptor.class, new MyInterceptorAnswer());
-		
-		servlet.setInterceptors(Collections.singletonList((IServerInterceptor) interceptor));
+		ourServer.fhirRequest("/Patient?_id=foo").get().assertStatus(400);
 
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient?_id=foo");
-		HttpResponse status = ourClient.execute(httpGet);
-		IOUtils.closeQuietly(status.getEntity().getContent());
-
-		ourLog.info(myMapCheckMethods.toString());
-		assertThat(myMapCheckMethods, contains("incomingRequestPostProcessed", "incomingRequestPreHandled", "preProcessOutgoingException", "handleException"));
+		await().untilAsserted(() ->
+			assertThat(myMapCheckMethods).containsExactly(
+				"incomingRequestPostProcessed",
+				"incomingRequestPreHandled",
+				"preProcessOutgoingException",
+				"handleException",
+				"processingCompleted"
+			)
+		);
 	}
 
 	@Test
 	public void testRead() throws Exception {
 
-		IServerInterceptor interceptor = mock(IServerInterceptor.class, new MyInterceptorAnswer());
-		
-		servlet.setInterceptors(Collections.singletonList((IServerInterceptor) interceptor));
+		String response = ourServer.fhirRequest("/Patient/1").get().getBody();
+		assertThat(response).contains("\"id\":\"1\"");
+		await().untilAsserted(() -> assertThat(myMapCheckMethods).contains("incomingRequestPostProcessed", "incomingRequestPreHandled", "outgoingResponse", "processingCompletedNormally", "processingCompleted"));
 
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient/1");
-		HttpResponse status = ourClient.execute(httpGet);
-		IOUtils.closeQuietly(status.getEntity().getContent());
-
-		for (int i = 0; i < 10; i++) {
-			if (!myMapCheckMethods.contains("processingCompletedNormally")) {
-				Thread.sleep(100);
-			}
-		}
-		
-		ourLog.info(myMapCheckMethods.toString());
-		assertThat(myMapCheckMethods.toString(), myMapCheckMethods, contains("incomingRequestPostProcessed", "incomingRequestPreHandled", "outgoingResponse", "processingCompletedNormally"));
 	}
 
-	protected void updateMapUsing(Map<Object, Object> theUserData, Method theMethod) {
+	private void updateMapUsing(Map<Object, Object> theUserData, String theMethod) {
 		assertNotNull(theUserData);
 		if (myMap == null) {
 			myMap = theUserData;
 			myMap.put(myKey, myValue);
 		} else {
-			assertSame(myMap, theUserData);
-			assertEquals(myValue, myMap.get(myKey));
+			assertThat(theUserData).isSameAs(myMap);
+			assertThat(myMap).containsEntry(myKey, myValue);
 		}
-		myMapCheckMethods.add(theMethod.getName());
+		myMapCheckMethods.add(theMethod);
 	}
 
-	@AfterClass
-	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
-	}
+	@Interceptor
+	public class MyInterceptor {
 
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
+		@Hook(Pointcut.SERVER_INCOMING_REQUEST_POST_PROCESSED)
+		public void incomingRequestPostProcessed(RequestDetails theRequestDetails, ServletRequestDetails theServletRequestDetails) {
+			updateMapUsing(theRequestDetails.getUserData(), "incomingRequestPostProcessed");
+			updateMapUsing(theServletRequestDetails.getUserData(), "incomingRequestPostProcessed");
+		}
 
-		ServletHandler proxyHandler = new ServletHandler();
-		servlet = new RestfulServer(ourCtx);
-		
-		servlet.setResourceProviders(new DummyPatientResourceProvider());
-		servlet.setPlainProviders(new PlainProvider());
-		
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
+		@Hook(Pointcut.SERVER_INCOMING_REQUEST_PRE_HANDLED)
+		public void incomingRequestPreHandled(RequestDetails theRequestDetails) {
+			updateMapUsing(theRequestDetails.getUserData(), "incomingRequestPreHandled");
+		}
 
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
+		@Hook(Pointcut.SERVER_OUTGOING_RESPONSE)
+		public void outgoingResponse(RequestDetails theRequestDetails, ServletRequestDetails theServletRequestDetails) {
+			updateMapUsing(theRequestDetails.getUserData(), "outgoingResponse");
+			updateMapUsing(theServletRequestDetails.getUserData(), "outgoingResponse");
+		}
+
+		@Hook(Pointcut.SERVER_PROCESSING_COMPLETED_NORMALLY)
+		public void processingCompletedNormally(RequestDetails theRequestDetails, ServletRequestDetails theServletRequestDetails) {
+			updateMapUsing(theRequestDetails.getUserData(), "processingCompletedNormally");
+			updateMapUsing(theServletRequestDetails.getUserData(), "processingCompletedNormally");
+		}
+
+		@Hook(Pointcut.SERVER_PROCESSING_COMPLETED)
+		public void processingCompleted(RequestDetails theRequestDetails, ServletRequestDetails theServletRequestDetails) {
+			updateMapUsing(theRequestDetails.getUserData(), "processingCompleted");
+			updateMapUsing(theServletRequestDetails.getUserData(), "processingCompleted");
+		}
+
+		@Hook(Pointcut.SERVER_PRE_PROCESS_OUTGOING_EXCEPTION)
+		public void preProcessOutgoingException(RequestDetails theRequestDetails, ServletRequestDetails theServletRequestDetails) {
+			updateMapUsing(theRequestDetails.getUserData(), "preProcessOutgoingException");
+			updateMapUsing(theServletRequestDetails.getUserData(), "preProcessOutgoingException");
+		}
+
+		@Hook(Pointcut.SERVER_HANDLE_EXCEPTION)
+		public void handleException(RequestDetails theRequestDetails, ServletRequestDetails theServletRequestDetails) {
+			updateMapUsing(theRequestDetails.getUserData(), "handleException");
+			updateMapUsing(theServletRequestDetails.getUserData(), "handleException");
+		}
 
 	}
 
@@ -174,7 +174,7 @@ public class InterceptorUserDataMapDstu2Test {
 		}
 
 		public Map<String, Patient> getIdToPatient() {
-			Map<String, Patient> idToPatient = new HashMap<String, Patient>();
+			Map<String, Patient> idToPatient = new HashMap<>();
 			{
 				Patient patient = createPatient1();
 				idToPatient.put("1", patient);
@@ -197,9 +197,8 @@ public class InterceptorUserDataMapDstu2Test {
 
 		/**
 		 * Retrieve the resource by its identifier
-		 * 
-		 * @param theId
-		 *            The resource identity
+		 *
+		 * @param theId The resource identity
 		 * @return The resource
 		 */
 		@Read()
@@ -214,9 +213,8 @@ public class InterceptorUserDataMapDstu2Test {
 
 		/**
 		 * Retrieve the resource by its identifier
-		 * 
-		 * @param theId
-		 *            The resource identity
+		 *
+		 * @param theId The resource identity
 		 * @return The resource
 		 */
 		@Search()
@@ -247,26 +245,6 @@ public class InterceptorUserDataMapDstu2Test {
 
 	}
 
-	private final class MyInterceptorAnswer implements Answer<Object> {
-		@Override
-		public Object answer(InvocationOnMock theInvocation) throws Throwable {
-			int index = 0;
-			for (Class<?> next : theInvocation.getMethod().getParameterTypes()) {
-				if (RequestDetails.class.isAssignableFrom(next)) {
-					updateMapUsing(((RequestDetails)theInvocation.getArguments()[index]).getUserData(), theInvocation.getMethod());
-				}
-				if (ActionRequestDetails.class.isAssignableFrom(next)) {
-					updateMapUsing(((ActionRequestDetails)theInvocation.getArguments()[index]).getUserData(), theInvocation.getMethod());
-				}
-				index++;
-			}
-			if (theInvocation.getMethod().getReturnType().equals(boolean.class)) {
-				return true;
-			}
-			return null;
-		}
-	}
-
 	public static class PlainProvider {
 
 		@Operation(name = "$everything", idempotent = true)
@@ -278,5 +256,10 @@ public class InterceptorUserDataMapDstu2Test {
 		}
 
 	}
-	
+
+	@AfterAll
+	public static void afterClassClearContext() throws Exception {
+		TestUtil.randomizeLocaleAndTimezone();
+	}
+
 }

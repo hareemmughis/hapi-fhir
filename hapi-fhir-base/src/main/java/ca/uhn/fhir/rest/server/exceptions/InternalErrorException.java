@@ -1,22 +1,15 @@
-package ca.uhn.fhir.rest.server.exceptions;
-
-import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
-
-import ca.uhn.fhir.rest.server.Constants;
-import ca.uhn.fhir.util.CoverageIgnore;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -24,6 +17,11 @@ import ca.uhn.fhir.util.CoverageIgnore;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.server.exceptions;
+
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.util.CoverageIgnore;
+import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
 
 /**
  * Represents an <b>HTTP 500 Internal Error</b> response.
@@ -33,24 +31,24 @@ import ca.uhn.fhir.util.CoverageIgnore;
  * send this status code in the case of a bad request message (although it
  * should not do this; an HTTP 4xx response is more appropriate in that
  * situation).
- * 
+ *
  * <p>
  * Note that a complete list of RESTful exceptions is available in the
  * <a href="./package-summary.html">Package Summary</a>.
  * </p>
- * 
+ *
  * @see UnprocessableEntityException Which should be used for business level validation failures
  */
 @CoverageIgnore
 public class InternalErrorException extends BaseServerResponseException {
 
 	public static final int STATUS_CODE = Constants.STATUS_HTTP_500_INTERNAL_ERROR;
-	
+
 	private static final long serialVersionUID = 1L;
 
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @param theMessage
 	 *            The message
 	 *  @param theOperationOutcome The OperationOutcome resource to return to the client
@@ -70,5 +68,4 @@ public class InternalErrorException extends BaseServerResponseException {
 	public InternalErrorException(Throwable theCause) {
 		super(STATUS_CODE, theCause);
 	}
-
 }

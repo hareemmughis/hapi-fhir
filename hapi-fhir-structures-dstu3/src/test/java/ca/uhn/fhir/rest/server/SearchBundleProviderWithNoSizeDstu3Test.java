@@ -1,0 +1,74 @@
+package ca.uhn.fhir.rest.server;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.param.TokenAndListParam;
+import ca.uhn.fhir.test.utilities.JettyUtil;
+import ca.uhn.fhir.util.TestUtil;
+import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.ee11.servlet.ServletHandler;
+import org.eclipse.jetty.ee11.servlet.ServletHolder;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+
+public class SearchBundleProviderWithNoSizeDstu3Test {
+
+	private static FhirContext ourCtx = FhirContext.forDstu3();
+	private static TokenAndListParam ourIdentifiers;
+	private static IBundleProvider ourLastBundleProvider;
+	private static String ourLastMethod;
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(SearchBundleProviderWithNoSizeDstu3Test.class);
+	private static int ourPort;
+
+	private static Server ourServer;
+
+	@BeforeEach
+	public void before() {
+		ourLastMethod = null;
+		ourIdentifiers = null;
+	}
+
+	@AfterAll
+	public static void afterClassClearContext() throws Exception {
+		JettyUtil.closeServer(ourServer);
+		TestUtil.randomizeLocaleAndTimezone();
+	}
+
+	@BeforeAll
+	public static void beforeClass() throws Exception {
+		ourServer = new Server(0);
+
+		DummyPatientResourceProvider patientProvider = new DummyPatientResourceProvider();
+
+		ServletHandler proxyHandler = new ServletHandler();
+		RestfulServer servlet = new RestfulServer(ourCtx);
+		servlet.setPagingProvider(new FifoMemoryPagingProvider(10));
+
+		servlet.setResourceProviders(patientProvider);
+		ServletHolder servletHolder = new ServletHolder(servlet);
+		proxyHandler.addServletWithMapping(servletHolder, "/*");
+		ourServer.setHandler(proxyHandler);
+		JettyUtil.startServer(ourServer);
+        ourPort = JettyUtil.getPortForStartedServer(ourServer);
+	}
+
+	public static class DummyPatientResourceProvider implements IResourceProvider {
+
+		@Override
+		public Class<? extends IBaseResource> getResourceType() {
+			return Patient.class;
+		}
+
+		@Search()
+		public IBundleProvider searchAll() {
+			ourLastMethod = "searchAll";
+			return ourLastBundleProvider;
+		}
+
+	}
+
+}

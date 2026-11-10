@@ -1,14 +1,15 @@
 package ca.uhn.fhir.tinder.model;
 
-import static org.apache.commons.lang.StringUtils.*;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
-import org.apache.commons.lang3.StringUtils;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 public abstract class BaseElement {
 
@@ -60,11 +61,11 @@ public abstract class BaseElement {
 	}
 
 	public String getCardMax() {
-		return defaultString(myCardMax, "1");
+		return Objects.toString(myCardMax, "1");
 	}
 
 	public String getCardMin() {
-		return defaultString(myCardMin, "0");
+		return Objects.toString(myCardMin, "0");
 	}
 
 	public Map<String, Slicing> getChildElementNameToSlicing() {
@@ -73,7 +74,7 @@ public abstract class BaseElement {
 
 	public List<BaseElement> getChildren() {
 		if (myChildren == null) {
-			myChildren = new ArrayList<BaseElement>();
+			myChildren = new ArrayList<>();
 		}
 		return Collections.unmodifiableList(myChildren);
 	}
@@ -115,7 +116,7 @@ public abstract class BaseElement {
 	}
 
 	public List<ResourceBlock> getResourceBlockChildren() {
-		ArrayList<ResourceBlock> retVal = new ArrayList<ResourceBlock>();
+		ArrayList<ResourceBlock> retVal = new ArrayList<>();
 		for (BaseElement next : getChildren()) {
 			if (next instanceof ResourceBlock) {
 				retVal.add((ResourceBlock) next);
@@ -130,7 +131,7 @@ public abstract class BaseElement {
 
 	public List<String> getType() {
 		if (myType == null) {
-			myType = new ArrayList<String>();
+			myType = new ArrayList<>();
 		}
 		return myType;
 	}
@@ -288,7 +289,9 @@ public abstract class BaseElement {
 			int idx = typeString.indexOf("Reference(");
 			if (idx != -1) {
 				int endIdx = typeString.indexOf(")");
-				typeString = typeString.substring(0, idx) + typeString.substring(idx, endIdx).replace("|", ",") + typeString.substring(endIdx);
+				typeString = typeString.substring(0, idx)
+						+ typeString.substring(idx, endIdx).replace("|", ",")
+						+ typeString.substring(endIdx);
 			}
 
 			if (idx == 0 && typeString.endsWith(")")) {
@@ -325,7 +328,6 @@ public abstract class BaseElement {
 				}
 			}
 		}
-
 	}
 
 	public void setV2Mapping(String theV2Mapping) {
@@ -365,5 +367,4 @@ public abstract class BaseElement {
 	public String getBindingUrl() {
 		return myBindingUrl;
 	}
-
 }

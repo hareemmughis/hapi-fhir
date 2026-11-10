@@ -9,6 +9,7 @@ Servers/
 *.iml
 *.log
 *.log*
+*.amazonq/
 nohup.out
 .DS_Store
 *.orig
@@ -18,6 +19,9 @@ tmp.txt
 ca.uhn.fhir.jpa.entity.ResourceIndexedSearchParamString/
 ca.uhn.fhir.jpa.entity.ResourceTable/
 ca.uhn.fhir.jpa.entity.TermConcept/
+
+# Ignore Java Heap Dumps
+java_pid*.*
 
 # Vagrant stuff.
 .vagrant
@@ -137,9 +141,13 @@ local.properties
 .cproject
 
 # JDT-specific (Eclipse Java Development Tools)
-#.project
-#.settings/
-#.classpath
+**/.settings
+**/.target
+**/.project
+**/.classpath
+**/.factorypath
+**/.springBeans
+
 
 # PDT-specific
 .buildpath
@@ -149,3 +157,19 @@ local.properties
 
 # TeXlipse plugin
 .texlipse
+
+# JVM Dumps
+core.*
+javacore.*
+jitdump.*
+Snap.*
+
+# VS Code
+.vscode
+
+
+/database*/
+/activemq-data/
+/.run/
+
+**/.claude/settings.local.json

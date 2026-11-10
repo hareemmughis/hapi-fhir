@@ -1,7 +1,32 @@
 package org.hl7.fhir.dstu2016may.hapi.validation;
 
-import static org.apache.commons.lang3.StringUtils.isBlank;
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.support.ConceptValidationOptions;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.ValidationSupportContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.rest.api.Constants;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.dstu2016may.formats.IParser;
+import org.hl7.fhir.dstu2016may.formats.ParserType;
+import org.hl7.fhir.dstu2016may.model.CodeSystem;
+import org.hl7.fhir.dstu2016may.model.CodeSystem.ConceptDefinitionComponent;
+import org.hl7.fhir.dstu2016may.model.CodeType;
+import org.hl7.fhir.dstu2016may.model.CodeableConcept;
+import org.hl7.fhir.dstu2016may.model.Coding;
+import org.hl7.fhir.dstu2016may.model.ConceptMap;
+import org.hl7.fhir.dstu2016may.model.OperationOutcome;
+import org.hl7.fhir.dstu2016may.model.Resource;
+import org.hl7.fhir.dstu2016may.model.ResourceType;
+import org.hl7.fhir.dstu2016may.model.StructureDefinition;
+import org.hl7.fhir.dstu2016may.model.ValueSet;
+import org.hl7.fhir.dstu2016may.model.ValueSet.ConceptReferenceComponent;
+import org.hl7.fhir.dstu2016may.model.ValueSet.ConceptSetComponent;
+import org.hl7.fhir.dstu2016may.model.ValueSet.ValueSetExpansionComponent;
+import org.hl7.fhir.dstu2016may.model.ValueSet.ValueSetExpansionContainsComponent;
+import org.hl7.fhir.dstu2016may.utils.IWorkerContext;
+import org.hl7.fhir.dstu2016may.utils.ValueSetExpander.ValueSetExpansionOutcome;
+import org.hl7.fhir.utilities.i18n.I18nBase;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -12,34 +37,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.commons.lang3.Validate;
-import org.hl7.fhir.dstu2016may.formats.IParser;
-import org.hl7.fhir.dstu2016may.formats.ParserType;
-import org.hl7.fhir.dstu2016may.hapi.validation.IValidationSupport.CodeValidationResult;
-import org.hl7.fhir.dstu2016may.model.CodeSystem;
-import org.hl7.fhir.dstu2016may.model.CodeSystem.ConceptDefinitionComponent;
-import org.hl7.fhir.dstu2016may.model.CodeType;
-import org.hl7.fhir.dstu2016may.model.CodeableConcept;
-import org.hl7.fhir.dstu2016may.model.Coding;
-import org.hl7.fhir.dstu2016may.model.ConceptMap;
-import org.hl7.fhir.dstu2016may.model.OperationOutcome.IssueSeverity;
-import org.hl7.fhir.dstu2016may.model.Resource;
-import org.hl7.fhir.dstu2016may.model.ResourceType;
-import org.hl7.fhir.dstu2016may.model.StructureDefinition;
-import org.hl7.fhir.dstu2016may.model.ValueSet;
-import org.hl7.fhir.dstu2016may.model.ValueSet.ConceptReferenceComponent;
-import org.hl7.fhir.dstu2016may.model.ValueSet.ConceptSetComponent;
-import org.hl7.fhir.dstu2016may.model.ValueSet.ValueSetExpansionComponent;
-import org.hl7.fhir.dstu2016may.model.ValueSet.ValueSetExpansionContainsComponent;
-import org.hl7.fhir.dstu2016may.terminologies.ValueSetExpander.ValueSetExpansionOutcome;
-import org.hl7.fhir.dstu2016may.utils.IWorkerContext;
-import org.hl7.fhir.dstu2016may.validation.IResourceValidator;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
-import ca.uhn.fhir.context.FhirContext;
-
-public final class HapiWorkerContext implements IWorkerContext  {
+public final class HapiWorkerContext extends I18nBase implements IWorkerContext {
 	private final FhirContext myCtx;
-	private Map<String, Resource> myFetchedResourceCache = new HashMap<String, Resource>();
+	private Map<String, Resource> myFetchedResourceCache = new HashMap<>();
 	private IValidationSupport myValidationSupport;
 
 	public HapiWorkerContext(FhirContext theCtx, IValidationSupport theValidationSupport) {
@@ -47,11 +50,13 @@ public final class HapiWorkerContext implements IWorkerContext  {
 		Validate.notNull(theValidationSupport, "theValidationSupport must not be null");
 		myCtx = theCtx;
 		myValidationSupport = theValidationSupport;
+
+		setValidationMessageLanguage(getLocale());
 	}
 
 	@Override
 	public List<StructureDefinition> allStructures() {
-		return myValidationSupport.fetchAllStructureDefinitions(myCtx);
+		return myValidationSupport.fetchAllStructureDefinitions();
 	}
 
 	@Override
@@ -59,7 +64,7 @@ public final class HapiWorkerContext implements IWorkerContext  {
 		if (myValidationSupport == null) {
 			return null;
 		} else {
-			return myValidationSupport.fetchCodeSystem(myCtx, theSystem);
+			return (CodeSystem) myValidationSupport.fetchCodeSystem(theSystem);
 		}
 	}
 
@@ -71,7 +76,7 @@ public final class HapiWorkerContext implements IWorkerContext  {
 			@SuppressWarnings("unchecked")
 			T retVal = (T) myFetchedResourceCache.get(theUri);
 			if (retVal == null) {
-				retVal = myValidationSupport.fetchResource(myCtx, theClass, theUri);
+				retVal = myValidationSupport.fetchResource(theClass, theUri);
 				if (retVal != null) {
 					myFetchedResourceCache.put(theUri, retVal);
 				}
@@ -82,28 +87,27 @@ public final class HapiWorkerContext implements IWorkerContext  {
 
 	@Override
 	public List<ConceptMap> findMapsForSource(String theUrl) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(470));
 	}
 
 	@Override
 	public String getAbbreviation(String theName) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(471));
 	}
-
 
 	@Override
 	public IParser getParser(ParserType theType) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(472));
 	}
 
 	@Override
 	public IParser getParser(String theType) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(473));
 	}
 
 	@Override
 	public List<String> getResourceNames() {
-		List<String> result = new ArrayList<String>();
+		List<String> result = new ArrayList<>();
 		for (ResourceType next : ResourceType.values()) {
 			result.add(next.name());
 		}
@@ -113,27 +117,29 @@ public final class HapiWorkerContext implements IWorkerContext  {
 
 	@Override
 	public <T extends Resource> boolean hasResource(Class<T> theClass_, String theUri) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(474));
 	}
 
 	@Override
 	public IParser newJsonParser() {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
-	public IResourceValidator newValidator() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(475));
 	}
 
 	@Override
 	public IParser newXmlParser() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(476));
 	}
 
 	@Override
 	public String oid2Uri(String theCode) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(478));
+	}
+
+	@Override
+	public StructureDefinition fetchTypeDefinition(String typeName) {
+		return fetchResource(
+				org.hl7.fhir.dstu2016may.model.StructureDefinition.class,
+				"http://hl7.org/fhir/StructureDefinition/" + typeName);
 	}
 
 	@Override
@@ -141,22 +147,55 @@ public final class HapiWorkerContext implements IWorkerContext  {
 		if (myValidationSupport == null) {
 			return false;
 		} else {
-			return myValidationSupport.isCodeSystemSupported(myCtx, theSystem);
+			return myValidationSupport.isCodeSystemSupported(
+					new ValidationSupportContext(myValidationSupport), theSystem);
 		}
 	}
 
 	@Override
 	public Set<String> typeTails() {
-		return new HashSet<String>(Arrays.asList("Integer", "UnsignedInt", "PositiveInt", "Decimal", "DateTime", "Date", "Time", "Instant", "String", "Uri", "Oid", "Uuid", "Id", "Boolean", "Code",
-				"Markdown", "Base64Binary", "Coding", "CodeableConcept", "Attachment", "Identifier", "Quantity", "SampledData", "Range", "Period", "Ratio", "HumanName", "Address", "ContactPoint",
-				"Timing", "Reference", "Annotation", "Signature", "Meta"));
+		return new HashSet<>(Arrays.asList(
+				"Integer",
+				"UnsignedInt",
+				"PositiveInt",
+				"Decimal",
+				"DateTime",
+				"Date",
+				"Time",
+				"Instant",
+				"String",
+				"Uri",
+				"Oid",
+				"Uuid",
+				"Id",
+				"Boolean",
+				"Code",
+				"Markdown",
+				"Base64Binary",
+				"Coding",
+				"CodeableConcept",
+				"Attachment",
+				"Identifier",
+				"Quantity",
+				"SampledData",
+				"Range",
+				"Period",
+				"Ratio",
+				"HumanName",
+				"Address",
+				"ContactPoint",
+				"Timing",
+				"Reference",
+				"Annotation",
+				"Signature",
+				"Meta"));
 	}
 
 	@Override
 	public ValidationResult validateCode(CodeableConcept theCode, ValueSet theVs) {
 		for (Coding next : theCode.getCoding()) {
 			ValidationResult retVal = validateCode(next, theVs);
-			if (retVal != null && retVal.isOk()) {
+			if (retVal.isOk()) {
 				return retVal;
 			}
 		}
@@ -174,16 +213,29 @@ public final class HapiWorkerContext implements IWorkerContext  {
 
 	@Override
 	public ValidationResult validateCode(String theSystem, String theCode, String theDisplay) {
-		CodeValidationResult result = myValidationSupport.validateCode(myCtx, theSystem, theCode, theDisplay);
+		IValidationSupport.CodeValidationResult result = myValidationSupport.validateCode(
+				new ValidationSupportContext(myValidationSupport),
+				new ConceptValidationOptions(),
+				theSystem,
+				theCode,
+				theDisplay,
+				null);
 		if (result == null) {
 			return null;
 		}
-		return new ValidationResult(result.getSeverity(), result.getMessage(), result.asConceptDefinition());
+		OperationOutcome.IssueSeverity severity = null;
+		if (result.getSeverity() != null) {
+			severity = OperationOutcome.IssueSeverity.fromCode(result.getSeverityCode());
+		}
+		ConceptDefinitionComponent definition =
+				result.getCode() != null ? new ConceptDefinitionComponent().setCode(result.getCode()) : null;
+		return new ValidationResult(severity, result.getMessage(), definition);
 	}
 
 	@Override
-	public ValidationResult validateCode(String theSystem, String theCode, String theDisplay, ConceptSetComponent theVsi) {
-		throw new UnsupportedOperationException();
+	public ValidationResult validateCode(
+			String theSystem, String theCode, String theDisplay, ConceptSetComponent theVsi) {
+		throw new UnsupportedOperationException(Msg.code(479));
 	}
 
 	@Override
@@ -201,13 +253,15 @@ public final class HapiWorkerContext implements IWorkerContext  {
 				}
 			}
 		}
-		
-		
+
 		boolean caseSensitive = true;
 		if (isNotBlank(theSystem)) {
 			CodeSystem system = fetchCodeSystem(theSystem);
 			if (system == null) {
-				return new ValidationResult(IssueSeverity.INFORMATION, "Code " + theSystem + "/" + theCode + " was not validated because the code system is not present");
+				return new ValidationResult(
+						OperationOutcome.IssueSeverity.INFORMATION,
+						"Code " + Constants.codeSystemWithDefaultDescription(theSystem) + "/" + theCode
+								+ " was not validated because the code system is not present");
 			}
 
 			if (system.hasCaseSensitive()) {
@@ -225,11 +279,15 @@ public final class HapiWorkerContext implements IWorkerContext  {
 		/*
 		 * The following valueset is a special case, since the BCP codesystem is very difficult to expand
 		 */
-		if (theVs != null && "http://hl7.org/fhir/ValueSet/languages".equals(theVs.getId())) {
+		if (theVs != null && "http://hl7.org/fhir/ValueSet/languages".equals(theVs.getUrl())) {
 			ValueSet expansion = new ValueSet();
 			for (ConceptSetComponent nextInclude : theVs.getCompose().getInclude()) {
 				for (ConceptReferenceComponent nextConcept : nextInclude.getConcept()) {
-					expansion.getExpansion().addContains().setCode(nextConcept.getCode()).setDisplay(nextConcept.getDisplay());
+					expansion
+							.getExpansion()
+							.addContains()
+							.setCode(nextConcept.getCode())
+							.setDisplay(nextConcept.getDisplay());
 				}
 			}
 			expandedValueSet = new ValueSetExpansionOutcome(expansion);
@@ -239,7 +297,8 @@ public final class HapiWorkerContext implements IWorkerContext  {
 			expandedValueSet = expandVS(theVs, true);
 		}
 
-		for (ValueSetExpansionContainsComponent next : expandedValueSet.getValueset().getExpansion().getContains()) {
+		for (ValueSetExpansionContainsComponent next :
+				expandedValueSet.getValueset().getExpansion().getContains()) {
 			String nextCode = next.getCode();
 			if (!caseSensitive) {
 				nextCode = nextCode.toUpperCase();
@@ -250,25 +309,24 @@ public final class HapiWorkerContext implements IWorkerContext  {
 					ConceptDefinitionComponent definition = new ConceptDefinitionComponent();
 					definition.setCode(next.getCode());
 					definition.setDisplay(next.getDisplay());
-					ValidationResult retVal = new ValidationResult(definition);
-					return retVal;
+					return new ValidationResult(definition);
 				}
 			}
 		}
 
-		return new ValidationResult(IssueSeverity.ERROR, "Unknown code[" + theCode + "] in system[" + theSystem + "]");
+		return new ValidationResult(
+				OperationOutcome.IssueSeverity.ERROR,
+				"Unknown code[" + theCode + "] in system[" + Constants.codeSystemWithDefaultDescription(theSystem)
+						+ "]");
 	}
-
 
 	@Override
 	public ValueSetExpansionOutcome expandVS(ValueSet theSource, boolean theCacheOk) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(480));
 	}
 
 	@Override
 	public ValueSetExpansionComponent expandVS(ConceptSetComponent theInc) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(481));
 	}
-
-
 }

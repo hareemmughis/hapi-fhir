@@ -1,17 +1,15 @@
-package ca.uhn.fhir.validation.schematron;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
- *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,30 +17,13 @@ package ca.uhn.fhir.validation.schematron;
  * limitations under the License.
  * #L%
  */
-
-import java.io.InputStream;
-import java.io.StringReader;
-import java.util.HashMap;
-import java.util.Locale;
-import java.util.Map;
-
-import javax.xml.transform.stream.StreamSource;
-
-import org.apache.commons.io.IOUtils;
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.oclc.purl.dsdl.svrl.SchematronOutputType;
-
-import com.phloc.commons.error.IResourceError;
-import com.phloc.commons.error.IResourceErrorGroup;
-import com.phloc.schematron.ISchematronResource;
-import com.phloc.schematron.SchematronHelper;
-import com.phloc.schematron.xslt.SchematronResourceSCH;
+package ca.uhn.fhir.validation.schematron;
 
 import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.model.api.Bundle;
-import ca.uhn.fhir.model.api.BundleEntry;
-import ca.uhn.fhir.rest.server.EncodingEnum;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.rest.api.EncodingEnum;
 import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.util.BundleUtil;
 import ca.uhn.fhir.validation.FhirValidator;
 import ca.uhn.fhir.validation.IValidationContext;
 import ca.uhn.fhir.validation.IValidatorModule;
@@ -50,6 +31,27 @@ import ca.uhn.fhir.validation.ResultSeverityEnum;
 import ca.uhn.fhir.validation.SchemaBaseValidator;
 import ca.uhn.fhir.validation.SingleValidationMessage;
 import ca.uhn.fhir.validation.ValidationContext;
+import com.helger.commons.error.IError;
+import com.helger.commons.error.list.IErrorList;
+import com.helger.commons.io.resource.ClassPathResource;
+import com.helger.commons.io.resource.IReadableResource;
+import com.helger.schematron.ISchematronResource;
+import com.helger.schematron.SchematronHelper;
+import com.helger.schematron.sch.SchematronResourceSCH;
+import com.helger.schematron.svrl.jaxb.SchematronOutputType;
+import org.hl7.fhir.instance.model.api.IBaseBundle;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.StringReader;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import javax.xml.transform.stream.StreamSource;
 
 /**
  * This class is only used using reflection from {@link SchematronProvider} in order
@@ -57,15 +59,27 @@ import ca.uhn.fhir.validation.ValidationContext;
  */
 public class SchematronBaseValidator implements IValidatorModule {
 
-	private Map<Class<? extends IBaseResource>, ISchematronResource> myClassToSchematron = new HashMap<Class<? extends IBaseResource>, ISchematronResource>();
+	private static final Logger ourLog = LoggerFactory.getLogger(SchematronBaseValidator.class);
+	private final Map<Class<? extends IBaseResource>, ISchematronResource> myClassToSchematron = new HashMap<>();
 	private FhirContext myCtx;
 
+	/**
+	 * Constructor
+	 */
 	public SchematronBaseValidator(FhirContext theContext) {
 		myCtx = theContext;
 	}
 
 	@Override
 	public void validateResource(IValidationContext<IBaseResource> theCtx) {
+
+		if (theCtx.getResource() instanceof IBaseBundle) {
+			IBaseBundle bundle = (IBaseBundle) theCtx.getResource();
+			List<IBaseResource> subResources = BundleUtil.toListOfResources(myCtx, bundle);
+			for (IBaseResource nextSubResource : subResources) {
+				validateResource(ValidationContext.subContext(theCtx, nextSubResource, theCtx.getOptions()));
+			}
+		}
 
 		ISchematronResource sch = getSchematron(theCtx);
 		String resourceAsString;
@@ -76,32 +90,36 @@ public class SchematronBaseValidator implements IValidatorModule {
 		}
 		StreamSource source = new StreamSource(new StringReader(resourceAsString));
 
-		SchematronOutputType results = SchematronHelper.applySchematron(sch, source);
+		SchematronOutputType results;
+		try {
+			results = sch.applySchematronValidationToSVRL(source);
+		} catch (Exception e) {
+			throw new InternalErrorException(Msg.code(2433) + e.getMessage(), e);
+		}
 		if (results == null) {
 			return;
 		}
 
-		IResourceErrorGroup errors = SchematronHelper.convertToResourceErrorGroup(results, theCtx.getFhirContext().getResourceDefinition(theCtx.getResource()).getBaseDefinition().getName());
+		IErrorList errors = SchematronHelper.convertToErrorList(
+				results,
+				theCtx.getFhirContext()
+						.getResourceDefinition(theCtx.getResource())
+						.getBaseDefinition()
+						.getName());
 
 		if (errors.getAllErrors().containsOnlySuccess()) {
 			return;
 		}
 
-		for (IResourceError next : errors.getAllErrors().getAllResourceErrors()) {
+		for (IError next : errors) {
 			ResultSeverityEnum severity;
-			switch (next.getErrorLevel()) {
-			case ERROR:
+			if (next.isFailure()) {
 				severity = ResultSeverityEnum.ERROR;
-				break;
-			case FATAL_ERROR:
+			} else if (next.isError()) {
 				severity = ResultSeverityEnum.FATAL;
-				break;
-			case WARN:
+			} else if (next.isNoError()) {
 				severity = ResultSeverityEnum.WARNING;
-				break;
-			case INFO:
-			case SUCCESS:
-			default:
+			} else {
 				continue;
 			}
 
@@ -109,53 +127,60 @@ public class SchematronBaseValidator implements IValidatorModule {
 
 			SingleValidationMessage message = new SingleValidationMessage();
 			message.setMessage(details);
-			message.setLocationLine(next.getLocation().getLineNumber());
-			message.setLocationCol(next.getLocation().getColumnNumber());
-			message.setLocationString(next.getLocation().getAsString());
+			message.setLocationLine(next.getErrorLocation().getLineNumber());
+			message.setLocationCol(next.getErrorLocation().getColumnNumber());
+			message.setLocationString(next.getErrorLocation().getAsString());
 			message.setSeverity(severity);
 			theCtx.addValidationMessage(message);
 		}
-
 	}
 
 	private ISchematronResource getSchematron(IValidationContext<IBaseResource> theCtx) {
 		Class<? extends IBaseResource> resource = theCtx.getResource().getClass();
-		Class<? extends IBaseResource> baseResourceClass = theCtx.getFhirContext().getResourceDefinition(resource).getBaseDefinition().getImplementingClass();
+		Class<? extends IBaseResource> baseResourceClass = theCtx.getFhirContext()
+				.getResourceDefinition(resource)
+				.getBaseDefinition()
+				.getImplementingClass();
 
 		return getSchematronAndCache(theCtx, baseResourceClass);
 	}
 
-	private ISchematronResource getSchematronAndCache(IValidationContext<IBaseResource> theCtx, Class<? extends IBaseResource> theClass) {
+	private ISchematronResource getSchematronAndCache(
+			IValidationContext<IBaseResource> theCtx, Class<? extends IBaseResource> theClass) {
 		synchronized (myClassToSchematron) {
 			ISchematronResource retVal = myClassToSchematron.get(theClass);
 			if (retVal != null) {
 				return retVal;
 			}
 
-			String pathToBase = myCtx.getVersion().getPathToSchemaDefinitions() + '/' + theCtx.getFhirContext().getResourceDefinition(theCtx.getResource()).getBaseDefinition().getName().toLowerCase() + ".sch";
-			InputStream baseIs = FhirValidator.class.getResourceAsStream(pathToBase);
-			try {
+			String pathToBase = myCtx.getVersion().getPathToSchemaDefinitions() + '/'
+					+ theCtx.getFhirContext()
+							.getResourceDefinition(theCtx.getResource())
+							.getBaseDefinition()
+							.getName()
+							.toLowerCase()
+					+ ".sch";
+			try (InputStream baseIs = FhirValidator.class.getResourceAsStream(pathToBase)) {
 				if (baseIs == null) {
-					throw new InternalErrorException("Failed to load schematron for resource '" + theCtx.getFhirContext().getResourceDefinition(theCtx.getResource()).getBaseDefinition().getName() + "'. " + SchemaBaseValidator.RESOURCES_JAR_NOTE);
+					throw new InternalErrorException(Msg.code(1972) + "Failed to load schematron for resource '"
+							+ theCtx.getFhirContext()
+									.getResourceDefinition(theCtx.getResource())
+									.getBaseDefinition()
+									.getName()
+							+ "'. " + SchemaBaseValidator.RESOURCES_JAR_NOTE);
 				}
-			} finally {
-				IOUtils.closeQuietly(baseIs);
+			} catch (IOException e) {
+				ourLog.error("Failed to close stream", e);
 			}
 
-			retVal = SchematronResourceSCH.fromClassPath(pathToBase);
+			// Allow Schematron to load SCH files from the 'validation-resources'
+			// bundles when running in an OSGi container. This is because the
+			// Schematron bundle does not have DynamicImport-Package in its manifest.
+			IReadableResource schResource =
+					new ClassPathResource(pathToBase, this.getClass().getClassLoader());
+			retVal = new SchematronResourceSCH(schResource);
 			myClassToSchematron.put(theClass, retVal);
 			return retVal;
 		}
 	}
-
-	@Override
-	public void validateBundle(IValidationContext<Bundle> theContext) {
-		for (BundleEntry next : theContext.getResource().getEntries()) {
-			if (next.getResource() != null) {
-				IValidationContext<IBaseResource> ctx = ValidationContext.newChild(theContext, next.getResource());
-				validateResource(ctx);
-			}
-		}
-	}
-
 }

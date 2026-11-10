@@ -1,5 +1,24 @@
 package ca.uhn.fhir.tinder;
 
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.dstu2.resource.Bundle.Entry;
+import ca.uhn.fhir.model.dstu2.resource.ValueSet;
+import ca.uhn.fhir.model.dstu2.resource.ValueSet.CodeSystem;
+import ca.uhn.fhir.model.dstu2.resource.ValueSet.CodeSystemConcept;
+import ca.uhn.fhir.model.dstu2.resource.ValueSet.ComposeIncludeConcept;
+import ca.uhn.fhir.parser.IParser;
+import ca.uhn.fhir.parser.LenientErrorHandler;
+import ca.uhn.fhir.tinder.TinderStructuresMojo.ValueSetFileDefinition;
+import ca.uhn.fhir.tinder.model.ValueSetTm;
+import ca.uhn.fhir.tinder.parser.TargetType;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.text.WordUtils;
+import org.apache.maven.plugin.MojoFailureException;
+import org.apache.velocity.VelocityContext;
+import org.apache.velocity.app.VelocityEngine;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -9,6 +28,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -16,45 +37,16 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.text.WordUtils;
-import org.apache.maven.plugin.MojoFailureException;
-import org.apache.velocity.VelocityContext;
-import org.apache.velocity.app.VelocityEngine;
-import org.apache.velocity.tools.generic.EscapeTool;
-
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.model.api.Bundle;
-import ca.uhn.fhir.model.api.BundleEntry;
-import ca.uhn.fhir.model.dstu.resource.ValueSet;
-import ca.uhn.fhir.model.dstu.resource.ValueSet.ComposeInclude;
-import ca.uhn.fhir.model.dstu.resource.ValueSet.Define;
-import ca.uhn.fhir.model.dstu.resource.ValueSet.DefineConcept;
-import ca.uhn.fhir.model.dstu2.resource.Bundle.Entry;
-import ca.uhn.fhir.model.dstu2.resource.ValueSet.CodeSystem;
-import ca.uhn.fhir.model.dstu2.resource.ValueSet.CodeSystemConcept;
-import ca.uhn.fhir.model.dstu2.resource.ValueSet.ComposeIncludeConcept;
-import ca.uhn.fhir.model.primitive.CodeDt;
-import ca.uhn.fhir.parser.IParser;
-import ca.uhn.fhir.parser.LenientErrorHandler;
-import ca.uhn.fhir.tinder.TinderStructuresMojo.ValueSetFileDefinition;
-import ca.uhn.fhir.tinder.model.BaseRootType;
-import ca.uhn.fhir.tinder.model.ValueSetTm;
-import ca.uhn.fhir.tinder.parser.ResourceGeneratorUsingSpreadsheet;
-import ca.uhn.fhir.tinder.parser.TargetType;
 
 public class ValueSetGenerator {
 
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(ValueSetGenerator.class);
 	private int myConceptCount;
-	private Set<ValueSetTm> myMarkedValueSets = new HashSet<ValueSetTm>();
+	private final Set<ValueSetTm> myMarkedValueSets = new HashSet<>();
 	private List<ValueSetFileDefinition> myResourceValueSetFiles;
 	private int myValueSetCount;
-	private Map<String, ValueSetTm> myValueSets = new HashMap<String, ValueSetTm>();
-	private String myVersion;
+	private final Map<String, ValueSetTm> myValueSets = new HashMap<>();
+	private final String myVersion;
 	private String myFilenamePrefix = "";
 	private String myFilenameSuffix = "";
 	private String myTemplate = null;
@@ -76,16 +68,6 @@ public class ValueSetGenerator {
 		}
 	}
 
-	private void addDefinedConcept(ValueSetTm vs, String system, DefineConcept nextConcept) {
-		String nextCodeValue = nextConcept.getCode().getValue();
-		String nextCodeDisplay = StringUtils.defaultString(nextConcept.getDisplay().getValue());
-		String nextCodeDefinition = StringUtils.defaultString(nextConcept.getDefinition().getValue());
-		vs.addConcept(system, nextCodeValue, nextCodeDisplay, nextCodeDefinition);
-		for (DefineConcept nextChild : nextConcept.getConcept()) {
-			addDefinedConcept(vs, system, nextChild);
-		}
-	}
-
 	public String getClassForValueSetIdAndMarkAsNeeded(String theId) {
 		ValueSetTm vs = myValueSets.get(theId);
 		if (vs == null) {
@@ -100,8 +82,8 @@ public class ValueSetGenerator {
 		return myValueSets;
 	}
 
-	public void parse() throws FileNotFoundException, IOException {
-		FhirContext ctx = "dstu".equals(myVersion) ? FhirContext.forDstu1() : FhirContext.forDstu2();
+	public void parse() throws IOException {
+		FhirContext ctx = FhirContext.forDstu2();
 		IParser newXmlParser = ctx.newXmlParser();
 		newXmlParser.setParserErrorHandler(new LenientErrorHandler(false));
 
@@ -116,35 +98,38 @@ public class ValueSetGenerator {
 			name = "/org/hl7/fhir/instance/model/valueset/valuesets.xml";
 		}
 		if (version.equals("dstu3")) {
-			name = "/org/hl7/fhir/instance/model/dstu3/valueset/valuesets.xml";
+			name = "/org/hl7/fhir/dstu3/model/valueset/valuesets.xml";
 		}
 		ourLog.info("Loading valuesets from: {}", name);
-		String vs = IOUtils.toString(ValueSetGenerator.class.getResourceAsStream(name));
-		if ("dstu".equals(myVersion)) {
-			Bundle bundle = newXmlParser.parseBundle(vs);
-			for (BundleEntry next : bundle.getEntries()) {
-				ValueSet nextVs = (ValueSet) next.getResource();
+		InputStream is = ValueSetGenerator.class.getResourceAsStream(name);
+		if (null == is) {
+			ourLog.error("Failed loading valuesets from: " + name);
+			throw new FileNotFoundException(Msg.code(88) + name);
+		}
+		String vs = IOUtils.toString(is, Charset.defaultCharset());
+		if ("dstu2".equals(myVersion)) {
+			ca.uhn.fhir.model.dstu2.resource.Bundle bundle =
+					newXmlParser.parseResource(ca.uhn.fhir.model.dstu2.resource.Bundle.class, vs);
+			for (Entry nextEntry : bundle.getEntry()) {
+				ca.uhn.fhir.model.dstu2.resource.ValueSet nextVs =
+						(ca.uhn.fhir.model.dstu2.resource.ValueSet) nextEntry.getResource();
 				parseValueSet(nextVs);
 			}
 		} else {
-			ca.uhn.fhir.model.dstu2.resource.Bundle bundle = newXmlParser.parseResource(ca.uhn.fhir.model.dstu2.resource.Bundle.class, vs);
-			for (Entry nextEntry : bundle.getEntry()) {
-				ca.uhn.fhir.model.dstu2.resource.ValueSet nextVs = (ca.uhn.fhir.model.dstu2.resource.ValueSet) nextEntry.getResource();
-				parseValueSet(nextVs);
-			}
+			throw new IllegalStateException(Msg.code(89) + "Fhir version not supported");
 		}
 
 		if (myResourceValueSetFiles != null) {
 			for (ValueSetFileDefinition next : myResourceValueSetFiles) {
 				File file = new File(next.getValueSetFile());
-				ourLog.info("Parsing ValueSet file: {}" + file.getName());
+				ourLog.info("Parsing ValueSet file: {}", file.getName());
 				vs = IOUtils.toString(new FileReader(file));
 				ValueSetTm tm;
 				if ("dstu".equals(myVersion)) {
-					ValueSet nextVs = (ValueSet) newXmlParser.parseResource(ValueSet.class, vs);
+					ValueSet nextVs = newXmlParser.parseResource(ValueSet.class, vs);
 					tm = parseValueSet(nextVs);
 				} else {
-					ca.uhn.fhir.model.dstu2.resource.ValueSet nextVs = (ca.uhn.fhir.model.dstu2.resource.ValueSet) newXmlParser.parseResource(ca.uhn.fhir.model.dstu2.resource.ValueSet.class, vs);
+					ca.uhn.fhir.model.dstu2.resource.ValueSet nextVs = newXmlParser.parseResource(ValueSet.class, vs);
 					tm = parseValueSet(nextVs);
 				}
 				if (tm != null) {
@@ -152,18 +137,19 @@ public class ValueSetGenerator {
 				}
 			}
 		}
-		
+
 		/*
-		 *	Purge empty valuesets 
+		 *	Purge empty valuesets
 		 */
-		for (Iterator<java.util.Map.Entry<String, ValueSetTm>> iter = myValueSets.entrySet().iterator(); iter.hasNext(); ) {
+		for (Iterator<java.util.Map.Entry<String, ValueSetTm>> iter =
+						myValueSets.entrySet().iterator();
+				iter.hasNext(); ) {
 			java.util.Map.Entry<String, ValueSetTm> next = iter.next();
 			if (next.getValue().getCodes().isEmpty()) {
 				iter.remove();
 				continue;
 			}
 		}
-		
 
 		// File[] files = new
 		// File(myResourceValueSetFiles).listFiles((FilenameFilter) new
@@ -179,7 +165,8 @@ public class ValueSetGenerator {
 
 	private ValueSetTm parseValueSet(ca.uhn.fhir.model.dstu2.resource.ValueSet nextVs) {
 		myConceptCount += nextVs.getCodeSystem().getConcept().size();
-		ourLog.debug("Parsing ValueSetTm #{} - {} - {} concepts total", myValueSetCount++, nextVs.getName(), myConceptCount);
+		ourLog.debug(
+				"Parsing ValueSetTm #{} - {} - {} concepts total", myValueSetCount++, nextVs.getName(), myConceptCount);
 		// output.addConcept(next.getCode().getValue(),
 		// next.getDisplay().getValue(), next.getDefinition());
 
@@ -198,7 +185,8 @@ public class ValueSetGenerator {
 			}
 		}
 
-		for (ca.uhn.fhir.model.dstu2.resource.ValueSet.ComposeInclude nextInclude : nextVs.getCompose().getInclude()) {
+		for (ca.uhn.fhir.model.dstu2.resource.ValueSet.ComposeInclude nextInclude :
+				nextVs.getCompose().getInclude()) {
 			String system = nextInclude.getSystemElement().getValueAsString();
 			for (ComposeIncludeConcept nextConcept : nextInclude.getConcept()) {
 				String nextCodeValue = nextConcept.getCode();
@@ -206,11 +194,11 @@ public class ValueSetGenerator {
 			}
 		}
 
-//		if (vs.getCodes().isEmpty()) {
-//			ourLog.info("ValueSet " + nextVs.getName() + " has no codes, not going to generate any code for it");
-//			return null;
-//		}
-		
+		//		if (vs.getCodes().isEmpty()) {
+		//			ourLog.info("ValueSet " + nextVs.getName() + " has no codes, not going to generate any code for it");
+		//			return null;
+		//		}
+
 		if (myValueSets.containsKey(vs.getName())) {
 			ourLog.warn("Duplicate Name: " + vs.getName());
 		} else {
@@ -226,57 +214,32 @@ public class ValueSetGenerator {
 		return vs;
 	}
 
-	private ValueSetTm parseValueSet(ValueSet nextVs) {
-		myConceptCount += nextVs.getDefine().getConcept().size();
-		ourLog.debug("Parsing ValueSetTm #{} - {} - {} concepts total", myValueSetCount++, nextVs.getName().getValue(), myConceptCount);
-		// output.addConcept(next.getCode().getValue(),
-		// next.getDisplay().getValue(), next.getDefinition());
+	public void setFilenamePrefix(String theFilenamePrefix) {
+		myFilenamePrefix = theFilenamePrefix;
+	}
 
-		ValueSetTm vs = new ValueSetTm();
-
-		vs.setName(nextVs.getName().getValue());
-		vs.setDescription(nextVs.getDescription().getValue());
-		vs.setId(nextVs.getIdentifier().getValue());
-		vs.setClassName(toClassName(nextVs.getName().getValue()));
-
-		{
-			Define define = nextVs.getDefine();
-			String system = define.getSystem().getValueAsString();
-			for (DefineConcept nextConcept : define.getConcept()) {
-				addDefinedConcept(vs, system, nextConcept);
-			}
-		}
-
-		for (ComposeInclude nextInclude : nextVs.getCompose().getInclude()) {
-			String system = nextInclude.getSystem().getValueAsString();
-			for (CodeDt nextConcept : nextInclude.getCode()) {
-				String nextCodeValue = nextConcept.getValue();
-				vs.addConcept(system, nextCodeValue, null, null);
-			}
-		}
-
-//		if (vs.getCodes().isEmpty()) {
-//			ourLog.info("ValueSet " + nextVs.getName() + " has no codes, not going to generate any code for it");
-//			return null;
-//		}
-		
-		if (myValueSets.containsKey(vs.getName())) {
-			ourLog.warn("Duplicate Name: " + vs.getName());
-		} else {
-			myValueSets.put(vs.getName(), vs);
-		}
-
-		// This is hackish, but deals with "Administrative Gender Codes" vs "AdministrativeGender"
-		if (vs.getName().endsWith(" Codes")) {
-			myValueSets.put(vs.getName().substring(0, vs.getName().length() - 6).replace(" ", ""), vs);
-		}
-		myValueSets.put(vs.getName().replace(" ", ""), vs);
-
-		return vs;
+	public void setFilenameSuffix(String theFilenameSuffix) {
+		myFilenameSuffix = theFilenameSuffix;
 	}
 
 	public void setResourceValueSetFiles(List<ValueSetFileDefinition> theResourceValueSetFiles) {
 		myResourceValueSetFiles = theResourceValueSetFiles;
+	}
+
+	public void setTemplate(String theTemplate) {
+		myTemplate = theTemplate;
+	}
+
+	public void setTemplateFile(File theTemplateFile) {
+		myTemplateFile = theTemplateFile;
+	}
+
+	public void setVelocityPath(String theVelocityPath) {
+		myVelocityPath = theVelocityPath;
+	}
+
+	public void setVelocityProperties(String theVelocityProperties) {
+		myVelocityProperties = theVelocityProperties;
 	}
 
 	private String toClassName(String theValue) {
@@ -303,35 +266,14 @@ public class ValueSetGenerator {
 		return b.toString();
 	}
 
-	public void setFilenamePrefix(String theFilenamePrefix) {
-		myFilenamePrefix = theFilenamePrefix;
-	}
-
-	public void setFilenameSuffix(String theFilenameSuffix) {
-		myFilenameSuffix = theFilenameSuffix;
-	}
-
-	public void setTemplate(String theTemplate) {
-		myTemplate = theTemplate;
-	}
-
-	public void setTemplateFile (File theTemplateFile) {
-		myTemplateFile = theTemplateFile;
-	}
-
-	public void setVelocityPath(String theVelocityPath) {
-		myVelocityPath = theVelocityPath;
-	}
-
-	public void setVelocityProperties(String theVelocityProperties) {
-		myVelocityProperties = theVelocityProperties;
-	}
-
-	public void write(Collection<ValueSetTm> theValueSets, File theOutputDirectory, String thePackageBase) throws IOException {
+	public void write(Collection<ValueSetTm> theValueSets, File theOutputDirectory, String thePackageBase)
+			throws IOException {
 		write(TargetType.SOURCE, theValueSets, theOutputDirectory, thePackageBase);
 	}
 
-	public void write(TargetType theTarget, Collection<ValueSetTm> theValueSets, File theOutputDirectory, String thePackageBase) throws IOException {
+	public void write(
+			TargetType theTarget, Collection<ValueSetTm> theValueSets, File theOutputDirectory, String thePackageBase)
+			throws IOException {
 		for (ValueSetTm nextValueSetTm : theValueSets) {
 			write(theTarget, nextValueSetTm, theOutputDirectory, thePackageBase);
 		}
@@ -341,12 +283,13 @@ public class ValueSetGenerator {
 	// myValueSetName = theString;
 	// }
 
-	private void write(TargetType theTarget, ValueSetTm theValueSetTm, File theOutputDirectory, String thePackageBase) throws IOException {
+	private void write(TargetType theTarget, ValueSetTm theValueSetTm, File theOutputDirectory, String thePackageBase)
+			throws IOException {
 		if (!theOutputDirectory.exists()) {
 			theOutputDirectory.mkdirs();
 		}
 		if (!theOutputDirectory.isDirectory()) {
-			throw new IOException(theOutputDirectory + " is not a directory");
+			throw new IOException(Msg.code(90) + theOutputDirectory + " is not a directory");
 		}
 
 		String valueSetName = theValueSetTm.getClassName();
@@ -359,15 +302,15 @@ public class ValueSetGenerator {
 		}
 		String fileName = prefix + valueSetName + suffix;
 		File f = new File(theOutputDirectory, fileName);
-		OutputStreamWriter w = new OutputStreamWriter(new FileOutputStream(f, false), "UTF-8");
+		OutputStreamWriter w = new OutputStreamWriter(new FileOutputStream(f, false), StandardCharsets.UTF_8);
 
 		ourLog.debug("Writing file: {}", f.getAbsolutePath());
 
 		VelocityContext ctx = new VelocityContext();
-		InputStream templateIs = null;
+		InputStream templateIs;
 		ctx.put("valueSet", theValueSetTm);
 		ctx.put("packageBase", thePackageBase);
-		ctx.put("esc", new EscapeTool());
+		ctx.put("esc", new TinderResourceGeneratorMojo.EscapeTool());
 
 		VelocityEngine v = VelocityHelper.configureVelocityEngine(myTemplateFile, myVelocityPath, myVelocityProperties);
 		if (myTemplateFile != null) {
@@ -380,7 +323,7 @@ public class ValueSetGenerator {
 			templateIs = this.getClass().getResourceAsStream(templateName);
 		}
 
-		InputStreamReader templateReader = new InputStreamReader(templateIs, "UTF-8");
+		InputStreamReader templateReader = new InputStreamReader(templateIs, StandardCharsets.UTF_8);
 		v.evaluate(ctx, w, "", templateReader);
 
 		w.close();
@@ -390,19 +333,18 @@ public class ValueSetGenerator {
 		writeMarkedValueSets(TargetType.SOURCE, theOutputDirectory, thePackageBase);
 	}
 
-	public void writeMarkedValueSets(TargetType theTarget, File theOutputDirectory, String thePackageBase) throws MojoFailureException {
+	public void writeMarkedValueSets(TargetType theTarget, File theOutputDirectory, String thePackageBase)
+			throws MojoFailureException {
 		try {
 			write(theTarget, myMarkedValueSets, theOutputDirectory, thePackageBase);
 		} catch (IOException e) {
-			throw new MojoFailureException("Failed to write valueset", e);
+			throw new MojoFailureException(Msg.code(91) + "Failed to write valueset", e);
 		}
 	}
 
-	public static void main(String[] args) throws FileNotFoundException, IOException {
+	public static void main(String[] args) throws IOException {
 
 		ValueSetGenerator p = new ValueSetGenerator("dstu1");
 		p.parse();
-
 	}
-
 }

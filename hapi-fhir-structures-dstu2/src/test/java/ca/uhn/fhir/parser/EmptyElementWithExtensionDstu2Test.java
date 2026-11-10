@@ -1,15 +1,14 @@
 package ca.uhn.fhir.parser;
 
-import static org.junit.Assert.assertEquals;
-
-import org.junit.AfterClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.model.dstu2.composite.CodingDt;
 import ca.uhn.fhir.model.dstu2.resource.Observation;
 import ca.uhn.fhir.model.primitive.StringDt;
 import ca.uhn.fhir.util.TestUtil;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Created by Bill de Beaubien on 12/20/2015.
@@ -19,9 +18,9 @@ public class EmptyElementWithExtensionDstu2Test {
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(EmptyElementWithExtensionDstu2Test.class);
 	private static FhirContext ctx = FhirContext.forDstu2();
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 
@@ -35,7 +34,7 @@ public class EmptyElementWithExtensionDstu2Test {
 		ourLog.info(json);
 
 		observation = (Observation) parser.parseResource(json);
-		assertEquals(1, observation.getCode().getCoding().get(0).getUndeclaredExtensions().size());
+		assertThat(observation.getCode().getCoding().get(0).getUndeclaredExtensions()).hasSize(1);
 	}
 
 	@Test
@@ -48,7 +47,7 @@ public class EmptyElementWithExtensionDstu2Test {
 		ourLog.info(xml);
 
 		observation = (Observation) parser.parseResource(xml);
-		assertEquals(1, observation.getCode().getCoding().get(0).getUndeclaredExtensions().size());
+		assertThat(observation.getCode().getCoding().get(0).getUndeclaredExtensions()).hasSize(1);
 	}
 
 	@Test
@@ -62,7 +61,7 @@ public class EmptyElementWithExtensionDstu2Test {
 		ourLog.info(json);
 
 		observation = (Observation) parser.parseResource(json);
-		assertEquals(1, observation.getStatusElement().getUndeclaredExtensions().size());
+		assertThat(observation.getStatusElement().getUndeclaredExtensions()).hasSize(1);
 	}
 
 	@Test
@@ -76,7 +75,7 @@ public class EmptyElementWithExtensionDstu2Test {
 		ourLog.info(xml);
 
 		observation = (Observation) parser.parseResource(xml);
-		assertEquals(1, observation.getStatusElement().getUndeclaredExtensions().size());
+		assertThat(observation.getStatusElement().getUndeclaredExtensions()).hasSize(1);
 	}
 
 }

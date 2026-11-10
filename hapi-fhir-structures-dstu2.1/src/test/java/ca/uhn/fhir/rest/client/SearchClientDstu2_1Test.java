@@ -1,18 +1,20 @@
 package ca.uhn.fhir.rest.client;
 
-import static org.junit.Assert.assertEquals;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
-import java.io.InputStream;
-import java.io.StringReader;
-import java.nio.charset.Charset;
-import java.util.Calendar;
-import java.util.Date;
-import java.util.GregorianCalendar;
-import java.util.List;
-import java.util.TimeZone;
-
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.annotation.Count;
+import ca.uhn.fhir.rest.annotation.OptionalParam;
+import ca.uhn.fhir.rest.annotation.RequiredParam;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.annotation.Sort;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.SortOrderEnum;
+import ca.uhn.fhir.rest.api.SortSpec;
+import ca.uhn.fhir.rest.client.api.IRestfulClient;
+import ca.uhn.fhir.rest.client.api.ServerValidationModeEnum;
+import ca.uhn.fhir.rest.param.StringParam;
+import ca.uhn.fhir.util.TestUtil;
+import ca.uhn.fhir.util.UrlUtil;
 import org.apache.commons.io.input.ReaderInputStream;
 import org.apache.http.HttpResponse;
 import org.apache.http.ProtocolVersion;
@@ -26,27 +28,26 @@ import org.hl7.fhir.dstu2016may.model.Bundle.BundleEntryComponent;
 import org.hl7.fhir.dstu2016may.model.Extension;
 import org.hl7.fhir.dstu2016may.model.Location;
 import org.hl7.fhir.dstu2016may.model.StringType;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.internal.stubbing.defaultanswers.ReturnsDeepStubs;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.rest.annotation.Count;
-import ca.uhn.fhir.rest.annotation.OptionalParam;
-import ca.uhn.fhir.rest.annotation.RequiredParam;
-import ca.uhn.fhir.rest.annotation.Search;
-import ca.uhn.fhir.rest.annotation.Sort;
-import ca.uhn.fhir.rest.api.SortOrderEnum;
-import ca.uhn.fhir.rest.api.SortSpec;
-import ca.uhn.fhir.rest.client.api.IRestfulClient;
-import ca.uhn.fhir.rest.param.StringParam;
-import ca.uhn.fhir.rest.server.Constants;
-import ca.uhn.fhir.util.TestUtil;
-import ca.uhn.fhir.util.UrlUtil;
+import java.io.InputStream;
+import java.io.StringReader;
+import java.nio.charset.Charset;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.GregorianCalendar;
+import java.util.List;
+import java.util.TimeZone;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class SearchClientDstu2_1Test {
 
@@ -55,12 +56,12 @@ public class SearchClientDstu2_1Test {
 	private HttpClient ourHttpClient;
 	private HttpResponse ourHttpResponse;
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
-	@Before
+	@BeforeEach
 	public void before() {
 		ourCtx = FhirContext.forDstu2_1();
 
@@ -92,7 +93,7 @@ public class SearchClientDstu2_1Test {
 		ILocationClient client = ourCtx.newRestfulClient(ILocationClient.class, "http://localhost:8081/hapi-fhir/fhir");
 
 		List<Location> matches = client.getMatches(new StringParam("smith"), 100);
-		assertEquals(1, matches.size());
+		assertThat(matches).hasSize(1);
 		assertEquals("Sample Clinic", matches.get(0).getName());
 
 		HttpGet value = (HttpGet) capt.getValue();
@@ -156,12 +157,10 @@ public class SearchClientDstu2_1Test {
 			int idx = 0;
 
 			client.search("STRING1", new StringType("STRING2"), date, cal);
-			assertEquals("http://localhost/fhir/Bundle?stringParam=STRING1&stringTypeParam=STRING2&dateParam=1970-10-04T10:23:55.986-04:00&calParam=1970-10-04T10:23:55.986-04:00",
-					UrlUtil.unescape(((HttpGet) capt.getAllValues().get(idx++)).getURI().toString()));
+			assertEquals("http://localhost/fhir/Bundle?stringParam=STRING1&stringTypeParam=STRING2&dateParam=1970-10-04T10:23:55.986-04:00&calParam=1970-10-04T10:23:55.986-04:00", UrlUtil.unescape(((HttpGet) capt.getAllValues().get(idx++)).getURI().toString()));
 
 			client.search(null, null, null, null);
-			assertEquals("http://localhost/fhir/Bundle",
-					UrlUtil.unescape(((HttpGet) capt.getAllValues().get(idx++)).getURI().toString()));
+			assertEquals("http://localhost/fhir/Bundle", UrlUtil.unescape(((HttpGet) capt.getAllValues().get(idx++)).getURI().toString()));
 		} finally {
 			TimeZone.setDefault(tz);
 		}
@@ -189,12 +188,12 @@ public class SearchClientDstu2_1Test {
 
 		Bundle matches = client.getMatchesReturnBundle(new StringParam("smith"), 100);
 
-		assertEquals(1, matches.getEntry().size());
+		assertThat(matches.getEntry()).hasSize(1);
 		BundleEntryComponent entry = matches.getEntry().get(0);
 		assertEquals("Sample Clinic", ((Location) entry.getResource()).getName());
 
 		List<Extension> ext = entry.getSearch().getExtensionsByUrl("http://hl7.org/fhir/StructureDefinition/algorithmic-match");
-		assertEquals(1, ext.size());
+		assertThat(ext).hasSize(1);
 
 		HttpGet value = (HttpGet) capt.getValue();
 		assertEquals("http://localhost:8081/hapi-fhir/fhir/Location?_query=match&name=smith&_count=100", value.getURI().toString());

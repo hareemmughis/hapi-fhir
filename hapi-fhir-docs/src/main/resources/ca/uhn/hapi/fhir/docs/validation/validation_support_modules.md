@@ -1,0 +1,302 @@
+# Validation Support Modules
+
+The [Instance Validator](./instance_validator.html) relies on an implementation of an interface called [IValidationSupport](/hapi-fhir/apidocs/hapi-fhir-base/ca/uhn/fhir/context/support/IValidationSupport.html) to load StructureDefinitions, validate codes, etc.
+
+By default, an implementation of this interface called [DefaultProfileValidationSupport](/hapi-fhir/apidocs/hapi-fhir-base/undefined/ca/uhn/fhir/context/support/DefaultProfileValidationSupport.html) is used. This implementation simply uses the built-in official FHIR definitions to validate against (and in many cases, this is good enough).
+
+However, if you have needs beyond simply validating against the core FHIR specification, you may wish to use something more.
+
+# Built-In Validation Support Classes
+
+There are a several implementations of the [IValidationSupport](/hapi-fhir/apidocs/hapi-fhir-base/ca/uhn/fhir/context/support/IValidationSupport.html) interface built into HAPI FHIR that can be used, typically in a chain.
+
+# ValidationSupportChain
+
+[JavaDoc](/hapi-fhir/apidocs/hapi-fhir-validation/org/hl7/fhir/common/hapi/validation/support/ValidationSupportChain.html) / [Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/support/ValidationSupportChain.java)
+
+This module can be used to combine multiple implementations together so that for every request, each support class instance in the chain is tried in sequence. Note that nearly all methods in the [IValidationSupport](/hapi-fhir/apidocs/hapi-fhir-base/ca/uhn/fhir/context/support/IValidationSupport.html) interface are permitted to return `null` if they are not able to service a particular method call. So for example, if a call to the [`validateCode`](/hapi-fhir/apidocs/hapi-fhir-base/ca/uhn/fhir/context/support/IValidationSupport.html#validateCode(ca.uhn.fhir.context.support.ValidationSupportContext,ca.uhn.fhir.context.support.ConceptValidationOptions,ca.uhn.fhir.context.support.ValidateCodeRequest)) method is made, the validator will try each module in the chain until one of them returns a non-null response.
+
+The following chaining logic is used:
+
+* Calls to `fetchAll...` methods such as `fetchAllConformanceResources()` and `fetchAllStructureDefinitions()` will call every method in the chain in order, and aggregate the results into a single list to return.
+* Calls to fetch or validate codes, such as `validateCode(...)` and `lookupCode(...)`, will first test each module in the chain using the `isCodeSystemSupported(...)` or `isValueSetSupported(...)` methods (depending on whether a ValueSet URL is present in the method parameters), and will invoke any methods in the chain which return that they can handle the given CodeSystem/ValueSet. The first non-null value returned by a method in the chain that can support it will be returned to the caller.
+* When a call names a code system version, the chain passes it to `isCodeSystemSupported(...)` as its own argument, so only a module that can answer for that version is used. `PrePopulatedValidationSupport`, `InMemoryTerminologyServerValidationSupport`, `RemoteTerminologyServiceValidationSupport` and the JPA server's terminology service answer only for a version they hold. A CodeSystem stored without a version does not answer for a named version. For `RemoteTerminologyServiceValidationSupport`, a SNOMED CT version that names an edition alone (`http://snomed.info/sct/[module]`) is checked as if no version were named, since such a server stores each release under its full version (`http://snomed.info/sct/[module]/version/[date]`) and picks the release itself. `CommonCodeSystemsTerminologyService` ships a single definition of each code system it knows, so it answers for any version. If the code system is known but no module holds the named version, the result is an error, as it is in the HL7 validator.
+* A custom module which holds specific versions of a code system should override `isCodeSystemSupported(...)` and `validateCode(...)` in the forms that take the version. A module which overrides only the older forms keeps working: it is asked with `url|version` and then with the plain URL, and it answers from whichever version it treats as current.
+* All other methods will invoke the method in the chain in order, and will return immediately as soon as a non-null value is returned.
+
+The following caching logic is used if caching is enabled using `CacheConfiguration`. You can use `CacheConfiguration.disabled()` if you want to disable caching.
+
+* Calls to fetch StructureDefinitions including `fetchAllStructureDefinitions()` and `fetchStructureDefinition(...)` are cached in a non-expiring cache. This is because the `FhirInstanceValidator` module makes assumptions that these objects will not change for the lifetime of the validator for performance reasons.
+* Calls to all other `fetchAll...` methods including `fetchAllConformanceResources()` and `fetchAllSearchParameters()` cache their results in an expiring cache, but will refresh that cache asynchronously.
+* Results of `generateSnapshot(...)` are not cached, as this method is generally called in contexts where the results are cached.
+* Results of all other methods are stored in an expiring cache.
+
+Note that caching functionality used to be provided by a separate provider called {@literal CachingValidationSupport} but that functionality has been moved into this class as of HAPI FHIR 8.0.0, because it is possible to provide a more efficient chain when these functions are combined.
+
+# DefaultProfileValidationSupport
+
+[JavaDoc](/hapi-fhir/apidocs/hapi-fhir-base/undefined/ca/uhn/fhir/context/support/DefaultProfileValidationSupport.html) / [Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-base/src/main/java/ca/uhn/fhir/context/support/DefaultProfileValidationSupport.java)
+
+This module supplies the built-in FHIR core structure definitions, including both FHIR resource definitions (StructureDefinition resources) and FHIR built-in vocabulary (ValueSet and CodeSystem resources).
+
+# InMemoryTerminologyServerValidationSupport
+
+[JavaDoc](/hapi-fhir/apidocs/hapi-fhir-validation/org/hl7/fhir/common/hapi/validation/support/InMemoryTerminologyServerValidationSupport.html) / [Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/support/InMemoryTerminologyServerValidationSupport.java)
+
+This module acts as a simple terminology service that can validate codes against ValueSet and CodeSystem resources purely in-memory (i.e. with no database). This is sufficient in many basic cases, although it is not able to validate CodeSystems with external content (i.e CodeSystems where the `CodeSystem.content` field is `external`, such as the LOINC and SNOMED CT CodeSystems).
+
+## ValueSets That Use an Unknown CodeSystem
+
+A CodeSystem is *unknown* when the server does not have it, or not in the version the ValueSet names. The server cannot check codes from it, even codes the ValueSet lists:
+
+* `$expand` fails.
+* `$validate-code` rejects the code and names the CodeSystem (`url`, or `url|version`) in the `x-caused-by-unknown-system` output parameter.
+* `$validate` reports the unknown CodeSystem once, at a severity set by the binding strength. To change it, use the [ValidationMessageUnknownCodeSystemPostProcessingInterceptor](./instance_validator.html#validation-message-post-processing-interceptor).
+* On a JPA server, pre-expansion and `:in` / `:not-in` searches fail: see [Troubleshooting Expansion Failures](/hapi-fhir/docs/server_jpa/valueset_expansion.html#troubleshooting-expansion-failures).
+* `AuthorizationInterceptor` rules deny: `withCodeInValueSet`, `withCodeNotInValueSet`, and `withFilter` expressions with `:in` / `:not-in`.
+* Other in-memory `:in` / `:not-in` matches are reported as not supported: Subscriptions use a database search instead, and Bulk Export post-fetch filters leave the resource out.
+
+Exceptions:
+
+* If an include lists its codes, a code it does not list is rejected as not in the ValueSet, as for a known CodeSystem, unless the ValueSet also includes the whole CodeSystem, a filter on it, or another ValueSet. Authorization rules still deny it, and in-memory `:in` / `:not-in` matching reports it as not supported.
+* Listed codes are accepted when another module supports the CodeSystem without a CodeSystem resource, such as the BCP-47 language codes in [CommonCodeSystemsTerminologyService](#commoncodesystemsterminologyservice).
+* A CodeSystem whose `content` is `not-present` is known but has no concepts, so a ValueSet that includes the whole system (no listed codes and no filter) is treated as if it were unknown.
+* `ValueSetExpansionOptions#setFailOnMissingCodeSystem(false)` expands listed codes without checking them.
+
+<a id="use-current-codesystem-version"></a>
+
+### Using the Current Version
+
+If the server has another version of the CodeSystem, it can check codes against the current version instead. Call `setUseCurrentVersionForUnknownCodeSystemVersion(true)` on `JpaStorageSettings` (JPA server) or on `InMemoryTerminologyServerValidationSupport`. A code in the current version is then accepted, with a warning naming both versions. A code not in it is rejected, and authorization rules deny it.
+
+# PrePopulatedValidationSupport
+
+[JavaDoc](/hapi-fhir/apidocs/hapi-fhir-validation/org/hl7/fhir/common/hapi/validation/support/PrePopulatedValidationSupport.html) / [Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/support/PrePopulatedValidationSupport.java)
+
+This module contains a series of HashMaps that store loaded conformance resources in memory. Typically this is initialized at startup in order to add custom conformance resources into the chain.
+
+
+<a id="npmpackagevalidationsupport"></a>
+
+# NpmPackageValidationSupport
+
+[JavaDoc](/hapi-fhir/apidocs/hapi-fhir-validation/org/hl7/fhir/common/hapi/validation/support/NpmPackageValidationSupport.html) / [Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/support/NpmPackageValidationSupport.java)
+
+This module can be used to load FHIR NPM Packages and supply the conformance resources within them to the validator. See [Validating Using Packages](./instance_validator.html#packages) for am example of how to use this module. 
+
+
+# SnapshotGeneratingValidationSupport
+
+[JavaDoc](/hapi-fhir/apidocs/hapi-fhir-validation/org/hl7/fhir/common/hapi/validation/support/SnapshotGeneratingValidationSupport.html) / [Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/support/SnapshotGeneratingValidationSupport.java)
+
+This module generates StructureDefinition snapshots as needed. This should be added to your chain if you are working wiith differential StructureDefinitions that do not include the snapshot view.
+
+# CommonCodeSystemsTerminologyService
+
+[JavaDoc](/hapi-fhir/apidocs/hapi-fhir-validation/org/hl7/fhir/common/hapi/validation/support/CommonCodeSystemsTerminologyService.html) / [Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/support/CommonCodeSystemsTerminologyService.java)
+
+This module validates codes in CodeSystems that are not distributed with the FHIR specification because they are difficult to distribute but are commonly used in FHIR resources.
+
+The following table lists vocabulary that is validated by this module:
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Canonical URLs</th>
+            <th>Validation Details</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>USPS State Codes</td>
+            <td>
+                ValueSet: <a href="http://hl7.org/fhir/us/core/ValueSet/us-core-usps-state">(...)/ValueSet/us-core-usps-state</a>
+                <br/>
+                CodeSystem: <a href="https://www.usps.com/">https://www.usps.com/</a>
+            </td>
+            <td>
+                Codes are validated against a built-in list of valid state codes.
+            </td>
+        </tr>
+        <tr>
+            <td>MimeTypes (BCP-13)</td>
+            <td>
+                ValueSet: <a href="http://hl7.org/fhir/ValueSet/mimetypes">(...)/ValueSet/mimetypes</a>
+                <br/>
+                CodeSystem: <code>urn:ietf:bcp:13</code>
+            </td>
+            <td>
+                Codes are not validated, but are instead assumed to be correct. Improved validation should be
+                added in the future, please get in touch if you would like to help.
+            </td>
+        </tr>
+        <tr>
+            <td>Languages (BCP-47)</td>
+            <td>
+                ValueSet: <a href="http://hl7.org/fhir/ValueSet/languages">(...)/ValueSet/languages</a>
+                <br/>
+                ValueSet: <a href="http://hl7.org/fhir/ValueSet/all-languages">(...)/ValueSet/all-languages</a>
+                <br/>
+                CodeSystem: <code>urn:ietf:bcp:47</code>
+            </td>
+            <td>
+                Codes are validated against the respective ValueSet. Support for two different ValueSets
+                is provided: The <a href="http://hl7.org/fhir/ValueSet/languages">languages</a> 
+                ValueSet provides a collection of commonly used language codes. Only codes explicitly 
+                referenced in this ValueSet are considered valid. 
+                The <a href="http://hl7.org/fhir/ValueSet/languages">all-languages</a> ValueSet
+                accepts any valid BCP-47 code. Codes are validated using data supplied by
+                the 
+                <a href="https://github.com/mattcg/language-subtag-registry">Language Subtype Registry</a> 
+                project.
+            </td>
+        </tr>
+        <tr>
+            <td>Countries (ISO 3166)</td>
+            <td>
+                CodeSystem: <a href="urn:iso:std:iso:3166">urn:iso:std:iso:3166</a>
+            </td>
+            <td>
+                Codes are validated against a built-in list of valid ISO 3166 codes. Both Alpha-2 (two character) and Alpha-3 (three character) variants are supported.
+            </td>
+        </tr>
+        <tr>
+            <td>Unified Codes for Units of Measure (UCUM)</td>
+            <td>
+                ValueSet: <code><a href="http://hl7.org/fhir/ValueSet/ucum-units">(...)/ValueSet/ucum-units</a></code>
+                <br/>
+                CodeSystem: <code>http://unitsofmeasure.org</code>
+            </td>
+            <td>
+                Codes are validated using the UcumEssenceService provided by the <a href="https://github.com/FHIR/Ucum-java">UCUM Java</a> library.
+            </td>
+        </tr>
+    </tbody>
+</table>
+
+# RemoteTerminologyServiceValidationSupport
+
+[JavaDoc](/hapi-fhir/apidocs/hapi-fhir-validation/org/hl7/fhir/common/hapi/validation/support/RemoteTerminologyServiceValidationSupport.html) / [Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/support/RemoteTerminologyServiceValidationSupport.java)
+
+This module validates codes using a remote FHIR-based terminology server.
+
+This module will invoke the following operations on the remote terminology server:
+
+* **GET [base]/CodeSystem?url=[url]&version=[version]** &ndash; Tests whether a given CodeSystem is supported on the server 
+* **GET [base]/ValueSet?url=[url]&version=[version]** &ndash; Tests whether a given ValueSet is supported on the server 
+* **POST [base]/CodeSystem/$validate-code** &ndash; Validate codes in fields where no specific ValueSet is bound 
+* **POST [base]/ValueSet/$validate-code** &ndash; Validate codes in fields where a specific ValueSet is bound 
+* **POST [base]/CodeSystem/$lookup** &ndash; Look up the display and properties of a code
+
+The `version` search parameter is sent only when the caller names a version.
+
+## Code System and Value Set Versions
+
+When a request names a code system or value set version, the version is sent to the remote server in its own parameter, as the FHIR specification defines [CodeSystem/$lookup](https://hl7.org/fhir/R4/codesystem-operation-lookup.html), [CodeSystem/$validate-code](https://hl7.org/fhir/R4/codesystem-operation-validate-code.html) and [ValueSet/$validate-code](https://hl7.org/fhir/R4/valueset-operation-validate-code.html):
+
+* `CodeSystem/$lookup` sends the code system URL in `system` and its version in `version`.
+* `CodeSystem/$validate-code` sends the code system URL in `url` and its version in `version`.
+* `ValueSet/$validate-code` sends the value set URL in `url` and its version in `valueSetVersion`, and the code system URL in `system` and its version in `systemVersion`.
+
+A code system version is sent only together with the code system it qualifies.
+
+## Inferring the Code System
+
+When a code is validated but its system cannot be determined locally, this module can send the `inferSystem=true` parameter on `$validate-code` to ask the remote server to infer the system. Because `inferSystem` is an R5+ `$validate-code` parameter that strict R4/DSTU3 servers (e.g. VSAC, CMS) reject, it is only sent for R5 and newer FHIR contexts by default.
+
+Use `setInferSystemEnabled(Boolean)` to override this behavior: `null` (default) sends it only for R5+, `TRUE` always sends it (e.g. for an R4 server that does support it), and `FALSE` never sends it.
+
+## Remote Server Failures
+
+When the remote server answers a request with an HTTP 5xx error, or cannot be reached, this module throws a `ValidationSupportUnavailableException` naming the remote server and its error. The validation support chain treats it as "this module could not answer":
+
+* `CodeSystem/$validate-code` and `ValueSet/$validate-code`: the chain asks its other modules, so a local module that holds the CodeSystem or ValueSet can answer during an outage. If none of them can check the code, the result is a warning naming the remote server and its error. The code could not be checked, so it is not reported as invalid.
+* The CodeSystem and ValueSet searches: the chain asks its other modules, as it does when this module does not hold the CodeSystem or ValueSet.
+* `CodeSystem/$lookup`: the lookup fails with HAPI-3067, naming the remote server and its error. A JPA server's `CodeSystem/$lookup` operation then answers HTTP 500 with that message; if the search for the CodeSystem already failed, it answers as for an unknown CodeSystem. Within the chain, a module that looks a code up this way, such as the in-memory module checking a ValueSet that includes a `not-present` CodeSystem, cannot check the code either, so the result is the same warning.
+
+The chain does not cache a failure, so validation uses the remote server again as soon as it recovers. These failures are logged at `ERROR` level to the `ca.uhn.fhir.log.terminology_troubleshooting` logger.
+
+An HTTP 400 or 404 answer to `$validate-code` or `$lookup` reports the code as unknown. Any other error is thrown to the caller.
+
+# UnknownCodeSystemWarningValidationSupport
+
+[JavaDoc](/hapi-fhir/apidocs/hapi-fhir-validation/org/hl7/fhir/common/hapi/validation/support/UnknownCodeSystemWarningValidationSupport.html) / [Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/support/UnknownCodeSystemWarningValidationSupport.java)
+
+This module is deprecated. If a resource being validated contains unknown code systems, validation issues will be 
+generated without requiring the use of a separate ValidationSupport module. To adjust the severity of 
+these generated issues, you can use the [ValidationMessageUnknownCodeSystemPostProcessingInterceptor](./instance_validator.html#validation-message-post-processing-interceptor).
+
+# CachingValidationSupport
+
+[JavaDoc](/hapi-fhir/apidocs/hapi-fhir-validation/org/hl7/fhir/common/hapi/validation/support/CachingValidationSupport.html) / [Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/support/CachingValidationSupport.java)
+
+This module is deprecated and no longer provides any functionality. Caching is provided by [ValidationSupportChain](#validationsupportchain).
+
+
+# JPA Server Validation Chain Configuration
+
+When using the JPA Server, the validation support chain is configured automatically. By default, the built-in FHIR definitions (from `DefaultProfileValidationSupport`) take precedence over user-defined terminology resources stored in the database (from `JpaPersistedResourceValidationSupport`).
+
+## Allowing Database Validation Override
+
+In some cases, you may want your database-stored CodeSystem and ValueSet resources to take precedence over the built-in HL7 definitions. This is useful when you need to override a built-in terminology resource with a different version of that resource.
+
+To enable this behavior, use the `allowDatabaseValidationOverride` setting:
+
+```java
+@Bean
+public JpaStorageSettings storageSettings() {
+   JpaStorageSettings retVal = new JpaStorageSettings();
+   // Allow database-stored validation resources to take precedence
+   retVal.setAllowDatabaseValidationOverride(true);
+   return retVal;
+}
+```
+
+When this setting is enabled (`true`), the JPA validation support (database-stored resources) is placed before the default profile validation support in the chain. When disabled (`false`, the default), the built-in definitions take precedence.
+
+<p class="doc_info_bubble">
+<b>Note:</b> Enabling this setting means that any CodeSystem or ValueSet you store in the database with the same URL as a built-in HL7 resource will override the built-in version during validation. Use this setting carefully as it can affect validation behavior for standard FHIR resources.
+</p>
+
+## CodeSystems With `CodeSystem.content` value `not-present`
+
+When the JPA terminology validator (`TermReadSvcImpl`) is asked to validate or look up a code against a CodeSystem whose `CodeSystem.content` value is `not-present`, it does not attempt to resolve the code against the (absent) enumerated concepts. Instead, it returns `null` so the `ValidationSupportChain` can fall through to the next validator in the chain that claims support for the CodeSystem URL. This allows algorithmic validators such as the UCUM validator exposed by [CommonCodeSystemsTerminologyService](#commoncodesystemsterminologyservice), or a configured [RemoteTerminologyServiceValidationSupport](#remoteterminologyservicevalidationsupport), to validate the code.
+
+This applies when a code is validated directly against a CodeSystem (`CodeSystem/$validate-code`), when it is validated through a ValueSet that expands to that CodeSystem (`ValueSet/$validate-code`, including JPA pre-expanded ValueSets), and when looked up via `CodeSystem/$lookup`. If no subsequent module in the chain can validate or look up the code, the normal "code not found" result is returned. When `ValueSet/$validate-code` rejects a code because the CodeSystem has no concepts loaded in the terminology tables, the result also names the CodeSystem in the `x-caused-by-unknown-system` parameter.
+
+When the CodeSystem is later stored with its concepts, the expansions of ValueSets pre-expanded while it was `not-present` are invalidated, so these ValueSets are answered from the stored concepts. A ValueSet that uses the CodeSystem only through an included ValueSet keeps its expansion; see [ValueSet Pre-Expansion](/hapi-fhir/docs/server_jpa/valueset_expansion.html#background-pre-expansion-job).
+
+# Recipes
+
+The IValidationSupport instance passed to the FhirInstanceValidator will often resemble the chain shown in the diagram below. In this diagram:
+
+* DefaultProfileValidationSupport is used to supply basic built-in FHIR definitions
+* PrePopulatedValidationSupport is used to supply other custom definitions
+* InMemoryTerminologyServerValidationSupport is used to validate terminology
+* The modules above are all added to a chain via ValidationSupportChain
+* Finally, a cache is placed in front of the entire chain in order to improve performance
+
+<a href="/hapi-fhir/docs/images/validation-support-chain.svg" target="_blank"><img src="/hapi-fhir/docs/images/validation-support-chain.svg" alt="Validation Support Chain"/><br/>(expand)</a>
+
+# Recipe: Supplying Custom Definitions
+
+The following snippet shows how to supply custom definitions to the validator.
+
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/ValidatorExamples.java|validateSupplyProfiles}}
+```
+
+# Recipe: Using a Remote Terminology Server
+
+The following snippet shows how to leverage a remote (FHIR-based) terminology server, by making REST calls to the external service when codes need to be validated.
+
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/ValidatorExamples.java|validateUsingRemoteTermSvr}}
+```
+
+
+
+
+

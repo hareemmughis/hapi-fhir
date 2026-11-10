@@ -1,0 +1,182 @@
+/*-
+ * #%L
+ * HAPI FHIR Storage api
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.dao;
+
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.model.search.SearchBuilderLoadIncludesParameters;
+import ca.uhn.fhir.jpa.model.search.SearchRuntimeDetails;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.api.server.storage.IResourcePersistentId;
+import com.google.common.collect.Streams;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.io.IOUtils;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Stream;
+
+import static org.apache.commons.lang3.ObjectUtils.getIfNull;
+
+public interface ISearchBuilder<T extends IResourcePersistentId<?>> {
+	Logger ourLog = LoggerFactory.getLogger(ISearchBuilder.class);
+
+	String SEARCH_BUILDER_BEAN_NAME = "SearchBuilder";
+
+	/**
+	 * Perform a FHIR search for the given parameters, returning the PIDs of the matching resources.
+	 *
+	 * @param theConsumer              The consumer to receive search results.
+	 * @param theParams                A map containing the requested search parameters.
+	 * @return                         Returns a class containing statistics about the performed search.
+	 * @since 8.12.0
+	 */
+	SearchProgressTracker performSearchForPids(
+			ISearchResultConsumer<T> theConsumer,
+			SearchParameterMap theParams,
+			SearchRuntimeDetails theSearchRuntimeDetails,
+			RequestDetails theRequest,
+			@Nonnull RequestPartitionId theRequestPartitionId);
+
+	IResultIterator<T> createQuery(
+			SearchParameterMap theParams,
+			SearchRuntimeDetails theSearchRuntime,
+			RequestDetails theRequest,
+			@Nonnull RequestPartitionId theRequestPartitionId);
+
+	/**
+	 * Stream equivalent of createQuery.
+	 * Note: the Stream must be closed.
+	 */
+	default Stream<T> createQueryStream(
+			SearchParameterMap theParams,
+			SearchRuntimeDetails theSearchRuntime,
+			RequestDetails theRequest,
+			@Nonnull RequestPartitionId theRequestPartitionId) {
+		IResultIterator<T> iter = createQuery(theParams, theSearchRuntime, theRequest, theRequestPartitionId);
+		// Adapt IResultIterator to stream
+		Stream<T> stream = Streams.stream(iter);
+		// The iterator might have an open ResultSet. Connect the close handler.
+		return stream.onClose(() -> IOUtils.closeQuietly(iter));
+	}
+
+	Long createCountQuery(
+			SearchParameterMap theParams,
+			String theSearchUuid,
+			RequestDetails theRequest,
+			RequestPartitionId theRequestPartitionId);
+
+	void setMaxResultsToFetch(Integer theMaxResultsToFetch);
+
+	void setDeduplicateInDatabase(boolean theShouldDeduplicateInDB);
+
+	void setRequireTotal(boolean theRequireTotal);
+
+	/**
+	 * True if the results should have a 'total' value
+	 */
+	boolean requiresTotal();
+
+	void loadResourcesByPid(
+			Collection<T> thePids,
+			Collection<T> theIncludedPids,
+			List<IBaseResource> theResourceListToPopulate,
+			boolean theForHistoryOperation,
+			RequestDetails theDetails);
+
+	default List<IBaseResource> loadResourcesByPid(Collection<T> thePids, RequestDetails theDetails) {
+		ArrayList<IBaseResource> result = new ArrayList<>();
+		loadResourcesByPid(thePids, List.of(), result, false, theDetails);
+		if (result.size() != thePids.size()) {
+			ourLog.warn("Only found {} resources for {} pids", result.size(), thePids.size());
+		}
+		return result;
+	}
+
+	/**
+	 * Resolves the <code>_include</code> and <code>_revinclude</code> resources associated with
+	 * a set of PID search results.
+	 * <p>
+	 * If present, any {@link ca.uhn.fhir.interceptor.api.Pointcut#STORAGE_PREACCESS_RESOURCES} pointcuts
+	 * will be invoked (i.e. for consent services), and only results which are <b>included</b> in the
+	 * search results will be returned. Because this pointcut can require actually resolving the resources
+	 * the fetched resources <b>MAY</b> also be returned in {@link FetchedIncludes#resourcesIfFetched()}.
+	 * If they are present, you can use them rather than re-fetching them for better efficiency.
+	 * </p>
+	 */
+	FetchedIncludes<T> loadIncludes(SearchBuilderLoadIncludesParameters<T> theParameters);
+
+	/**
+	 * How many results may be fetched at once
+	 */
+	void setFetchSize(int theFetchSize);
+
+	void setPreviouslyAddedResourcePids(Collection<T> thePreviouslyAddedResourcePids);
+
+	/**
+	 * This class is the return type for {@link #loadIncludes(SearchBuilderLoadIncludesParameters)}
+	 *
+	 * @param pids A set of PIDs (guaranteed to be a writeable set which can safely be modified)
+	 * @param resourcesIfFetched If the PIDs had to be hydrated (i.e. to verify consent), the fetched PIDs are returned.
+	 *                           This means that consumers of this API can avoid a second lookup. There is no guarantee
+	 *                           that any of the PIDs returned by {@link #pids()} will be found in the map, but only PIDs
+	 *                           returned by {@link #pids()} will be present as keys in the map. In other words, check for
+	 *                           the existence of PIDs in the map before fetching them, but don't assume they will be there.
+	 */
+	record FetchedIncludes<T>(@Nonnull Set<T> pids, @Nonnull Map<T, IBaseResource> resourcesIfFetched) {
+
+		/**
+		 * Constructor
+		 */
+		public FetchedIncludes() {
+			this(new HashSet<>());
+		}
+
+		/**
+		 * Constructor
+		 */
+		public FetchedIncludes(Set<T> thePids) {
+			this(thePids, Map.of());
+		}
+
+		/**
+		 * Constructor
+		 */
+		public FetchedIncludes(@Nonnull Set<T> pids, @Nullable Map<T, IBaseResource> resourcesIfFetched) {
+			this.pids = pids;
+			this.resourcesIfFetched = getIfNull(resourcesIfFetched, Map.of());
+		}
+
+		/**
+		 * @return Returns the size of the {@link #pids()} set
+		 */
+		public int size() {
+			return pids.size();
+		}
+	}
+}

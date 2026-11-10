@@ -1,36 +1,43 @@
 package ca.uhn.fhir.model.primitive;
 
-import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.either;
-import static org.hamcrest.Matchers.endsWith;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-
-import java.text.SimpleDateFormat;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
-import java.util.*;
-
-import org.apache.commons.lang3.time.FastDateFormat;
-import org.hamcrest.Matchers;
-import org.junit.*;
-
 import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
 import ca.uhn.fhir.model.api.TemporalPrecisionEnum;
 import ca.uhn.fhir.model.dstu2.resource.Condition;
 import ca.uhn.fhir.model.dstu2.resource.Patient;
 import ca.uhn.fhir.parser.DataFormatException;
 import ca.uhn.fhir.util.TestUtil;
 import ca.uhn.fhir.validation.ValidationResult;
+import org.apache.commons.lang3.time.FastDateFormat;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.text.SimpleDateFormat;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.GregorianCalendar;
+import java.util.Locale;
+import java.util.TimeZone;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.AssertionsForClassTypes.assertThatExceptionOfType;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
 
 public class BaseDateTimeDtDstu2Test {
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BaseDateTimeDtDstu2Test.class);
 	private static FhirContext ourCtx = FhirContext.forDstu2();
 	private static Locale ourDefaultLocale;
-	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BaseDateTimeDtDstu2Test.class);
 	private SimpleDateFormat myDateInstantParser;
 	private FastDateFormat myDateInstantZoneParser;
 
@@ -43,13 +50,13 @@ public class BaseDateTimeDtDstu2Test {
 		Date from = Date.from(ldt.toInstant(ZoneOffset.UTC));
 		InstantDt type = (InstantDt) new InstantDt(from).setTimeZoneZulu(true);
 		String encoded = type.getValueAsString();
-		
-		ourLog.info("LDT:      "+ ldt.toString());
-		ourLog.info("Expected: "+"1960-09-07T00:44:25.012");
-		ourLog.info("Actual:   "+encoded);
-		
+
+		ourLog.info("LDT:      " + ldt.toString());
+		ourLog.info("Expected: " + "1960-09-07T00:44:25.012");
+		ourLog.info("Actual:   " + encoded);
+
 		assertEquals("1960-09-07T00:44:25.012Z", encoded);
-		
+
 		type = new InstantDt(encoded);
 		assertEquals(1960, type.getYear().intValue());
 		assertEquals(8, type.getMonth().intValue()); // 0-indexed unlike LocalDateTime.of
@@ -65,11 +72,11 @@ public class BaseDateTimeDtDstu2Test {
 	public void testFromTime() {
 		long millis;
 		InstantDt dt;
-		
+
 		millis = 1466022208001L;
 		String expected = "2016-06-15T20:23:28.001Z";
 		validate(millis, expected);
-		
+
 		millis = 1466022208123L;
 		expected = "2016-06-15T20:23:28.123Z";
 		validate(millis, expected);
@@ -77,11 +84,11 @@ public class BaseDateTimeDtDstu2Test {
 		millis = 1466022208100L;
 		expected = "2016-06-15T20:23:28.100Z";
 		validate(millis, expected);
-		
+
 		millis = 1466022208000L;
 		expected = "2016-06-15T20:23:28.000Z";
 		validate(millis, expected);
-		
+
 	}
 
 
@@ -93,13 +100,13 @@ public class BaseDateTimeDtDstu2Test {
 
 		assertEquals(millis % 1000, dt.getMillis().longValue());
 		assertEquals((millis % 1000) * BaseDateTimeDt.NANOS_PER_MILLIS, dt.getNanos().longValue());
-		
+
 		dt = new InstantDt();
 		dt.setTimeZone(TimeZone.getTimeZone("GMT+0:00"));
 		dt.setValue(new Date(millis));
 		assertEquals(expected.replace("Z", "+00:00"), dt.getValueAsString());
 	}
-	
+
 
 	@Test
 	public void testSetPartialsYearFromExisting() {
@@ -191,7 +198,7 @@ public class BaseDateTimeDtDstu2Test {
 		try {
 			dt.setNanos(BaseDateTimeDt.NANOS_PER_SECOND);
 		} catch (IllegalArgumentException e) {
-			assertEquals("Value 1000000000 is not between allowable range: 0 - 999999999", e.getMessage());
+			assertEquals(Msg.code(1884) + "Value 1000000000 is not between allowable range: 0 - 999999999", e.getMessage());
 		}
 	}
 
@@ -208,17 +215,17 @@ public class BaseDateTimeDtDstu2Test {
 		assertEquals(275647578L, dt.getNanos().longValue());
 
 		dt = new InstantDt();
-		assertEquals(null, dt.getYear());
-		assertEquals(null, dt.getMonth());
-		assertEquals(null, dt.getDay());
-		assertEquals(null, dt.getHour());
-		assertEquals(null, dt.getMinute());
-		assertEquals(null, dt.getSecond());
-		assertEquals(null, dt.getMillis());
-		assertEquals(null, dt.getNanos());
+		assertNull(dt.getYear());
+		assertNull(dt.getMonth());
+		assertNull(dt.getDay());
+		assertNull(dt.getHour());
+		assertNull(dt.getMinute());
+		assertNull(dt.getSecond());
+		assertNull(dt.getMillis());
+		assertNull(dt.getNanos());
 	}
 
-	@Before
+	@BeforeEach
 	public void before() {
 		myDateInstantParser = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
 		myDateInstantZoneParser = FastDateFormat.getInstance("yyyy-MM-dd HH:mm:ss.SSSZ", TimeZone.getTimeZone("GMT-02:00"));
@@ -239,15 +246,13 @@ public class BaseDateTimeDtDstu2Test {
 	public void testConstructorRejectsInvalidPrecision() {
 		try {
 			new DateDt("2001-01-02T11:13:33");
-			fail();
-		} catch (DataFormatException e) {
-			assertThat(e.getMessage(), containsString("precision"));
+			fail();		} catch (DataFormatException e) {
+			assertThat(e.getMessage()).contains("precision");
 		}
 		try {
 			new InstantDt("2001-01-02");
-			fail();
-		} catch (DataFormatException e) {
-			assertThat(e.getMessage(), containsString("precision"));
+			fail();		} catch (DataFormatException e) {
+			assertThat(e.getMessage()).contains("precision");
 		}
 	}
 
@@ -262,11 +267,13 @@ public class BaseDateTimeDtDstu2Test {
 		verifyFails("1974-A2-25");
 		verifyFails("1974-12-A5");
 
+
 		// Date shouldn't have a time zone
 		verifyFails("1974-12-25Z");
 		verifyFails("1974-12-25+10:00");
 
 		// Out of range
+		verifyFails("2015-02-30");
 		verifyFails("1974-13-25");
 		verifyFails("1974-12-32");
 		verifyFails("2015-02-29");
@@ -293,7 +300,7 @@ public class BaseDateTimeDtDstu2Test {
 		assertEquals(TemporalPrecisionEnum.SECOND, c.getDateRecordedElement().getPrecision());
 
 		String encoded = ourCtx.newXmlParser().encodeResourceToString(c);
-		Assert.assertThat(encoded, Matchers.containsString("value=\"2001-01-02T11:13:33\""));
+		assertThat(encoded).contains("value=\"2001-01-02T11:13:33\"");
 
 		c = ourCtx.newXmlParser().parseResource(Condition.class, encoded);
 
@@ -304,7 +311,7 @@ public class BaseDateTimeDtDstu2Test {
 		String outcomeStr = ourCtx.newJsonParser().setPrettyPrint(true).encodeResourceToString(outcome.toOperationOutcome());
 		ourLog.info(outcomeStr);
 
-		assertThat(outcomeStr, containsString("date-primitive"));
+		assertThat(outcomeStr).contains("date-primitive");
 	}
 
 	@Test
@@ -358,9 +365,11 @@ public class BaseDateTimeDtDstu2Test {
 	}
 
 	@Test
-	public void testEncodeOffset() throws Exception {
+	public void testEncodeOffset() {
 		String offset = InstantDt.withCurrentTime().setTimeZone(TimeZone.getTimeZone("America/Toronto")).getValueAsString();
-		assertThat(offset, either(endsWith("-05:00")).or(endsWith("-04:00")));
+		assertThat(offset).satisfiesAnyOf(
+			s-> s.endsWith("-05:00"),
+			s -> s.endsWith("-04:00"));
 	}
 
 	@Test
@@ -400,12 +409,12 @@ public class BaseDateTimeDtDstu2Test {
 	public void testLargePrecision() {
 		DateTimeDt dt = new DateTimeDt("2014-03-06T22:09:58.9121174+04:30");
 
-		myDateInstantParser.setTimeZone(TimeZone.getTimeZone("Z"));
+		myDateInstantParser.setTimeZone(TimeZone.getTimeZone("GMT"));
 		assertEquals("2014-03-06 17:39:58.912", myDateInstantParser.format(dt.getValue()));
 	}
 
 	@Test
-	public void testMinutePrecisionEncode() throws Exception {
+	public void testMinutePrecisionEncode() {
 		Calendar cal = Calendar.getInstance();
 		cal.setTimeZone(TimeZone.getTimeZone("Europe/Berlin"));
 		cal.set(1990, Calendar.JANUARY, 3, 3, 22, 11);
@@ -500,15 +509,16 @@ public class BaseDateTimeDtDstu2Test {
 	public void testParseInvalidZoneOffset() {
 		try {
 			new DateTimeDt("2010-01-01T00:00:00.1234-09:00Z");
-			fail();
-		} catch (DataFormatException e) {
-			assertEquals("Invalid date/time format: \"2010-01-01T00:00:00.1234-09:00Z\"", e.getMessage());
+			fail();		} catch (DataFormatException e) {
+			assertEquals(Msg.code(1882) + "Invalid date/time format: \"2010-01-01T00:00:00.1234-09:00Z\"", e.getMessage());
 		}
 	}
 
-	@Test(expected = DataFormatException.class)
+	@Test
 	public void testParseMalformatted() throws DataFormatException {
-		new DateTimeDt("20120102");
+		assertThatExceptionOfType(DataFormatException.class).isThrownBy(() -> {
+			new DateTimeDt("20120102");
+		});
 	}
 
 	@Test
@@ -561,10 +571,32 @@ public class BaseDateTimeDtDstu2Test {
 		assertEquals("2013-02", myDateInstantParser.format(dt.getValue()).substring(0, 7));
 	}
 
-	@Test(expected = DataFormatException.class)
+	@Test
 	public void testParseMonthNoDashes() throws DataFormatException {
+		assertThatExceptionOfType(DataFormatException.class).isThrownBy(() -> {
+			DateTimeDt dt = new DateTimeDt();
+			dt.setValueAsString("201302");
+		});
+	}
+
+	@Test
+	public void testParseMinuteShouldFail() throws DataFormatException {
 		DateTimeDt dt = new DateTimeDt();
-		dt.setValueAsString("201302");
+		try {
+			dt.setValueAsString("2013-02-03T11:22");
+			fail();		} catch (DataFormatException e) {
+			assertEquals(e.getMessage(), Msg.code(1885) + "Invalid date/time string (datatype DateTimeDt does not support MINUTE precision): 2013-02-03T11:22");
+		}
+	}
+
+	@Test
+	public void testParseMinuteZuluShouldFail() throws DataFormatException {
+		DateTimeDt dt = new DateTimeDt();
+		try {
+			dt.setValueAsString("2013-02-03T11:22Z");
+			fail();		} catch (DataFormatException e) {
+			assertEquals(e.getMessage(), Msg.code(1885) + "Invalid date/time string (datatype DateTimeDt does not support MINUTE precision): 2013-02-03T11:22Z");
+		}
 	}
 
 	@Test
@@ -580,7 +612,7 @@ public class BaseDateTimeDtDstu2Test {
 	}
 
 	@Test
-	public void testParseSecondulu() throws DataFormatException {
+	public void testParseSecondZulu() throws DataFormatException {
 		DateTimeDt dt = new DateTimeDt();
 		dt.setValueAsString("2013-02-03T11:22:33Z");
 
@@ -691,6 +723,22 @@ public class BaseDateTimeDtDstu2Test {
 		assertEquals("2010-01-01T09:00:00.12345Z", dt.getValueAsString());
 	}
 
+	@ParameterizedTest
+	@ValueSource(strings = {"2024-07-08T20:47:12.123+03:30", "2024-07-08T20:47:12.123 03:30"})
+	public void testParseTimeZonePositiveOffset(String theTimestampLiteral) {
+		myDateInstantParser.setTimeZone(TimeZone.getTimeZone("Asia/Tehran"));
+
+		final DateTimeDt dt = new DateTimeDt(theTimestampLiteral);
+
+		assertEquals(theTimestampLiteral, dt.getValueAsString());
+		assertEquals("2024-07-08 20:47:12.123", myDateInstantParser.format(dt.getValue()));
+		assertEquals("GMT+03:30", dt.getTimeZone().getID());
+		assertEquals(12600000, dt.getTimeZone().getRawOffset());
+
+		dt.setTimeZoneZulu(true);
+		assertEquals("2024-07-08T17:17:12.123Z", dt.getValueAsString());
+	}
+
 	@Test
 	public void testParseYear() throws DataFormatException {
 		DateTimeDt dt = new DateTimeDt();
@@ -715,11 +763,11 @@ public class BaseDateTimeDtDstu2Test {
 		Patient patient = new Patient();
 		patient.setBirthDate(cal.getTime(), TemporalPrecisionEnum.DAY);
 		String out = ourCtx.newXmlParser().encodeResourceToString(patient);
-		assertThat(out, containsString("<birthDate value=\"2012-01-02\"/>"));
+		assertThat(out).contains("<birthDate value=\"2012-01-02\"/>");
 	}
 
 	/**
-	 * See HAPI #101 - https://github.com/jamesagnew/hapi-fhir/issues/101
+	 * See HAPI #101 - https://github.com/hapifhir/hapi-fhir/issues/101
 	 */
 	@Test
 	public void testPrecisionRespectedForSetValue() throws Exception {
@@ -735,7 +783,7 @@ public class BaseDateTimeDtDstu2Test {
 	}
 
 	/**
-	 * See HAPI #101 - https://github.com/jamesagnew/hapi-fhir/issues/101
+	 * See HAPI #101 - https://github.com/hapifhir/hapi-fhir/issues/101
 	 */
 	@Test
 	public void testPrecisionRespectedForSetValueWithPrecision() throws Exception {
@@ -767,8 +815,8 @@ public class BaseDateTimeDtDstu2Test {
 		DateTimeDt dt = new DateTimeDt("2012-01-05T12:00:00-08:00");
 		String human = dt.toHumanDisplay();
 		ourLog.info(human);
-		assertThat(human, containsString("2012"));
-		assertThat(human, containsString("12"));
+		assertThat(human).contains("2012");
+		assertThat(human).contains("12");
 	}
 
 	private void validateMillisPartial(String input, int expected) {
@@ -783,29 +831,25 @@ public class BaseDateTimeDtDstu2Test {
 		try {
 			DateTimeDt dt = new DateTimeDt();
 			dt.setValueAsString(input);
-			fail();
-		} catch (ca.uhn.fhir.parser.DataFormatException e) {
-			assertThat(e.getMessage(), containsString("Invalid date/time format: \"" + input + "\""));
+			fail();		} catch (ca.uhn.fhir.parser.DataFormatException e) {
+			assertThat(e.getMessage()).contains("Invalid date/time format: \"" + input + "\"");
 		}
 	}
 
-	public static void afterClass() {
-		Locale.setDefault(ourDefaultLocale);
-	}
-
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		Locale.setDefault(ourDefaultLocale);
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
-	@BeforeClass
+	@BeforeAll
 	public static void beforeClass() {
 		/*
 		 * We cache the default locale, but temporarily set it to a random value during this test. This helps ensure that there are no language specific dependencies in the test.
 		 */
 		ourDefaultLocale = Locale.getDefault();
 
-		Locale[] available = { Locale.CANADA, Locale.GERMANY, Locale.TAIWAN };
+		Locale[] available = {Locale.CANADA, Locale.GERMANY, Locale.TAIWAN};
 		Locale newLocale = available[(int) (Math.random() * available.length)];
 		Locale.setDefault(newLocale);
 

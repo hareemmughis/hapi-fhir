@@ -1,19 +1,15 @@
-package ca.uhn.fhir.rest.gclient;
-
-import java.util.Collection;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,14 +17,43 @@ import java.util.Collection;
  * limitations under the License.
  * #L%
  */
-
-import org.hl7.fhir.instance.model.api.IBaseBundle;
+package ca.uhn.fhir.rest.gclient;
 
 import ca.uhn.fhir.model.api.Include;
-import ca.uhn.fhir.rest.method.SearchStyleEnum;
+import ca.uhn.fhir.rest.api.SearchStyleEnum;
+import ca.uhn.fhir.rest.api.SearchTotalModeEnum;
+import ca.uhn.fhir.rest.api.SortSpec;
 import ca.uhn.fhir.rest.param.DateRangeParam;
+import org.hl7.fhir.instance.model.api.IBaseBundle;
 
-public interface IQuery<T> extends IClientExecutable<IQuery<T>, T>, IBaseQuery<IQuery<T>> {
+import java.util.Collection;
+
+public interface IQuery<Y> extends IBaseQuery<IQuery<Y>>, IClientExecutable<IQuery<Y>, Y> {
+
+	/**
+	 * {@inheritDoc}
+	 */
+	// This is here as an overridden method to allow mocking clients with Mockito to work
+	@Override
+	IQuery<Y> and(ICriterion<?> theCriterion);
+
+	/**
+	 * Specifies the <code>_count</code> parameter, which indicates to the server how many resources should be returned
+	 * on a single page.
+	 *
+	 * @since 1.4
+	 */
+	IQuery<Y> count(int theCount);
+
+	/**
+	 * Specifies the <code>_offset</code> parameter, which indicates to the server the offset of the query. Use
+	 * with {@link #count(int)}.
+	 *
+	 * This parameter is not part of the FHIR standard, all servers might not implement it.
+	 *
+	 * @since 5.2
+	 */
+	IQuery<Y> offset(int theOffset);
 
 	/**
 	 * Add an "_include" specification or an "_include:recurse" specification. If you are using
@@ -39,112 +64,115 @@ public interface IQuery<T> extends IClientExecutable<IQuery<T>, T>, IBaseQuery<I
 	 * <li><b>No Recurse:</b> <code>.include(Patient.INCLUDE_ORGANIZATION.asNonRecursive())</code>
 	 * </ul>
 	 */
-	IQuery<T> include(Include theInclude);
+	IQuery<Y> include(Include theInclude);
 
-	ISort<T> sort();
+	/**
+	 * Add a "_lastUpdated" specification
+	 *
+	 * @since HAPI FHIR 1.1 - Note that option was added to FHIR itself in DSTU2
+	 */
+	IQuery<Y> lastUpdated(DateRangeParam theLastUpdated);
 
 	/**
 	 * Specifies the <code>_count</code> parameter, which indicates to the server how many resources should be returned
 	 * on a single page.
-	 * 
+	 *
 	 * @deprecated This parameter is badly named, since FHIR calls this parameter "_count" and not "_limit". Use {@link #count(int)} instead (it also sets the _count parameter)
+	 * @see #count(int)
 	 */
 	@Deprecated
-	IQuery<T> limitTo(int theLimitTo);
+	IQuery<Y> limitTo(int theLimitTo);
 
 	/**
-	 * Specifies the <code>_count</code> parameter, which indicates to the server how many resources should be returned
-	 * on a single page.
-	 * 
-	 * @since 1.4
+	 * Request that the client return the specified bundle type, e.g. <code>org.hl7.fhir.dstu2.model.Bundle.class</code>
+	 * or <code>ca.uhn.fhir.model.dstu2.resource.Bundle.class</code>
 	 */
-	IQuery<T> count(int theCount);
+	<B extends IBaseBundle> IQuery<B> returnBundle(Class<B> theClass);
 
 	/**
-	 * Match only resources where the resource has the given tag. This parameter corresponds to
-	 * the <code>_tag</code> URL parameter.
-	 * @param theSystem The tag code system, or <code>null</code> to match any code system (this may not be supported on all servers)
-	 * @param theCode The tag code. Must not be <code>null</code> or empty.
+	 * Request that the server modify the response using the <code>_total</code> param
+	 *
+	 * THIS IS AN EXPERIMENTAL FEATURE - Use with caution, as it may be
+	 * removed or modified in a future version.
 	 */
-	IQuery<T> withTag(String theSystem, String theCode);
+	IQuery<Y> totalMode(SearchTotalModeEnum theTotalMode);
 
 	/**
-	 * Match only resources where the resource has the given security tag. This parameter corresponds to
-	 * the <code>_security</code> URL parameter.
-	 * @param theSystem The tag code system, or <code>null</code> to match any code system (this may not be supported on all servers)
-	 * @param theCode The tag code. Must not be <code>null</code> or empty.
+	 * Add a "_revinclude" specification
+	 *
+	 * @since HAPI FHIR 1.0 - Note that option was added to FHIR itself in DSTU2
 	 */
-	IQuery<T> withSecurity(String theSystem, String theCode);
+	IQuery<Y> revInclude(Include theIncludeTarget);
 
 	/**
-	 * Match only resources where the resource has the given profile declaration. This parameter corresponds to
-	 * the <code>_profile</code> URL parameter.
-	 * @param theProfileUri The URI of a given profile to search for resources which match  
+	 * Adds a sort criteria
+	 *
+	 * @see #sort(SortSpec) for an alternate way of speciyfing sorts
 	 */
-	IQuery<T> withProfile(String theProfileUri);
+	ISort<Y> sort();
 
 	/**
-	 * Matches any of the profiles given as argument. This would result in an OR search for resources matching one or more profiles.
-	 * To do an AND search, make multiple calls to {@link #withProfile(String)}.
-	 * @param theProfileUris The URIs of a given profile to search for resources which match.
+	 * Adds a sort using a {@link SortSpec} object
+	 *
+	 * @see #sort() for an alternate way of speciyfing sorts
 	 */
-	IQuery<T> withAnyProfile(Collection<String> theProfileUris);
-	
+	IQuery<Y> sort(SortSpec theSortSpec);
+
 	/**
-	 * Forces the query to perform the search using the given method (allowable methods are described in the 
+	 * Forces the query to perform the search using the given method (allowable methods are described in the
 	 * <a href="http://www.hl7.org/fhir/search.html">FHIR Search Specification</a>)
 	 * <p>
 	 * This can be used to force the use of an HTTP POST instead of an HTTP GET
 	 * </p>
-	 * 
+	 *
 	 * @see SearchStyleEnum
 	 * @since 0.6
 	 */
-	IQuery<T> usingStyle(SearchStyleEnum theStyle);
-
-	IQuery<T> withIdAndCompartment(String theResourceId, String theCompartmentName);
-
-	/**
-	 * Add a "_revinclude" specification
-	 * 
-	 * @since HAPI FHIR 1.0 - Note that option was added to FHIR itself in DSTU2
-	 */
-	IQuery<T> revInclude(Include theIncludeTarget);
-
-	/**
-	 * Add a "_lastUpdated" specification
-	 * 
-	 * @since HAPI FHIR 1.1 - Note that option was added to FHIR itself in DSTU2
-	 */
-	IQuery<T> lastUpdated(DateRangeParam theLastUpdated);
-
-	/**
-	 * Request that the client return the specified bundle type, e.g. <code>org.hl7.fhir.instance.model.Bundle.class</code>
-	 * or <code>ca.uhn.fhir.model.dstu2.resource.Bundle.class</code>
-	 */
-	<B extends IBaseBundle> IClientExecutable<IQuery<B>, B> returnBundle(Class<B> theClass);
+	IQuery<Y> usingStyle(SearchStyleEnum theStyle);
 
 	/**
 	 * {@inheritDoc}
 	 */
 	// This is here as an overridden method to allow mocking clients with Mockito to work
 	@Override
-	IQuery<T> where(ICriterion<?> theCriterion);
+	IQuery<Y> where(ICriterion<?> theCriterion);
 
 	/**
-	 * {@inheritDoc}
+	 * Matches any of the profiles given as argument. This would result in an OR search for resources matching one or more profiles.
+	 * To do an AND search, make multiple calls to {@link #withProfile(String)}.
+	 *
+	 * @param theProfileUris The URIs of a given profile to search for resources which match.
 	 */
-	// This is here as an overridden method to allow mocking clients with Mockito to work
-	@Override
-	IQuery<T> and(ICriterion<?> theCriterion);
+	IQuery<Y> withAnyProfile(Collection<String> theProfileUris);
+
+	IQuery<Y> withIdAndCompartment(String theResourceId, String theCompartmentName);
 
 	/**
-	 * @deprecated You should call {@link #returnBundle(Class)} on the method chain before calling
-	 * {@link #execute()} in order to specify why return type to use
+	 * Match only resources where the resource has the given profile declaration. This parameter corresponds to
+	 * the <code>_profile</code> URL parameter.
+	 *
+	 * @param theProfileUri The URI of a given profile to search for resources which match
 	 */
-	// This is overriding in order to deprecate
-	@Deprecated
-	@Override
-	T execute();
-	
+	IQuery<Y> withProfile(String theProfileUri);
+
+	/**
+	 * Match only resources where the resource has the given security tag. This parameter corresponds to
+	 * the <code>_security</code> URL parameter.
+	 *
+	 * @param theSystem The tag code system, or <code>null</code> to match any code system (this may not be supported on all servers)
+	 * @param theCode   The tag code. Must not be <code>null</code> or empty.
+	 */
+	IQuery<Y> withSecurity(String theSystem, String theCode);
+
+	/**
+	 * Match only resources where the resource has the given tag. This parameter corresponds to
+	 * the <code>_tag</code> URL parameter.
+	 *
+	 * @param theSystem The tag code system, or <code>null</code> to match any code system (this may not be supported on all servers)
+	 * @param theCode   The tag code. Must not be <code>null</code> or empty.
+	 */
+	IQuery<Y> withTag(String theSystem, String theCode);
+
+	//	Y execute();
+
 }

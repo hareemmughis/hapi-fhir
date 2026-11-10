@@ -1,0 +1,70 @@
+/*-
+ * #%L
+ * HAPI FHIR Storage api
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.dao.tx;
+
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.model.config.PartitionSettings;
+import jakarta.annotation.Nullable;
+import org.apache.commons.lang3.tuple.Pair;
+import org.springframework.transaction.support.SimpleTransactionStatus;
+import org.springframework.transaction.support.TransactionCallback;
+
+import java.util.HashSet;
+import java.util.Set;
+
+/**
+ * A transaction service implementation that does not actually
+ * wrap any transactions. This is mostly intended for tests but
+ * could be used in non-transactional systems too.
+ */
+public class NonTransactionalHapiTransactionService extends HapiTransactionService {
+
+	private Set<Pair<RequestPartitionId, RequestPartitionId>> myNonCompatiblePartitions = new HashSet<>();
+
+	public NonTransactionalHapiTransactionService() {
+		// This class is only ever instantiated directly (without Spring) in tests, so the @Autowired
+		// PartitionSettings on the superclass would otherwise stay null and default-partition resolution
+		// (e.g. withSystemRequestOnDefaultPartition()) would NPE. Default it here; if this service is ever
+		// wired as a Spring bean, field injection still overrides this value.
+		myPartitionSettings = new PartitionSettings();
+	}
+
+	@Nullable
+	@Override
+	protected <T> T doExecute(ExecutionBuilder theExecutionBuilder, TransactionCallback<T> theCallback) {
+		return theCallback.doInTransaction(new SimpleTransactionStatus());
+	}
+
+	@Override
+	public boolean isCompatiblePartition(
+			RequestPartitionId theTransactionPartitionId, RequestPartitionId theCandidatePartitionId) {
+		if (myNonCompatiblePartitions.contains(Pair.of(theTransactionPartitionId, theCandidatePartitionId))) {
+			return false;
+		} else return !myNonCompatiblePartitions.contains(Pair.of(theCandidatePartitionId, theTransactionPartitionId));
+	}
+
+	public void clearNonCompatiblePartitions() {
+		myNonCompatiblePartitions.clear();
+	}
+
+	public void addNonCompatiblePartition(RequestPartitionId thePartitionA, RequestPartitionId thePartitionB) {
+		myNonCompatiblePartitions.add(Pair.of(thePartitionA, thePartitionB));
+	}
+}

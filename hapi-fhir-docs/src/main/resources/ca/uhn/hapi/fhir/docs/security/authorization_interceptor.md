@@ -1,0 +1,171 @@
+# Authorization Interceptor
+
+HAPI FHIR 1.5 introduced a new interceptor: [AuthorizationInterceptor](/apidocs/hapi-fhir-server/ca/uhn/fhir/rest/server/interceptor/auth/AuthorizationInterceptor.html).
+
+This interceptor can help with the complicated task of determining whether a user has the appropriate permission to perform a given task on a FHIR server. This is done by declaring a set of rules that can selectively allow (whitelist) and/or selectively block (blacklist) requests.
+
+* [AuthorizationInterceptor JavaDoc](/apidocs/hapi-fhir-server/ca/uhn/fhir/rest/server/interceptor/auth/AuthorizationInterceptor.html)
+* [AuthorizationInterceptor Source](https://github.com/hapifhir/hapi-fhir/blob/master/hapi-fhir-server/src/main/java/ca/uhn/fhir/rest/server/interceptor/auth/AuthorizationInterceptor.java)
+
+<p class="helpInfoCalloutBox">
+    AuthorizationInterceptor has been well tested, but it is impossible to predict every scenario and environment in which HAPI FHIR will be used. Use with caution, and do lots of testing! We welcome feedback and suggestions on this feature. Please get in touch if you'd like to help test, have suggestions, etc.
+</p>
+
+The AuthorizationInterceptor works by allowing you to declare permissions based on an individual request coming in. In other words, you could have code that examines an incoming request and determines that it is being made by a Patient with ID 123. You could then declare that the requesting user has access to read and write any resource in compartment "Patient/123", which corresponds to any Observation, MedicationOrder etc with a subject of "`Patient/123`". On the other hand, another request might be determined to belong to an administrator user, and could be declared to be allowed to do anything.
+
+The AuthorizationInterceptor is used by subclassing it and then registering your subclass with the `RestfulServer`. The following example shows a subclassed interceptor implementing some basic rules:
+
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/AuthorizationInterceptors.java|patientAndAdmin}}
+``` 
+
+The core rules support restricting access by resource type, resource instance, and compartment.
+The rules also support query filters expressed by FHIR queries - e.g. `code:above=http://loinc.org|55399-0` to restrict Observations to just the diabetes panel.
+To use query filters, you must activate the [RuleFilteringConsentService.](/apidocs/hapi-fhir-server/ca/uhn/fhir/rest/server/interceptor/consent/RuleFilteringConsentService.html)
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/AuthorizationInterceptors.java|ruleFiltering}}
+```
+
+## Using AuthorizationInterceptor in a REST Server
+
+The AuthorizationInterceptor works by examining the client request in order to determine whether "write" operations are legal, and looks at the response from the server in order to determine whether "read" operations are legal.
+
+# Authorizing Read Operations
+
+When authorizing a read operation, the AuthorizationInterceptor always allows client code to execute and generate a response. It then examines the response that would be returned before actually returning it to the client, and if rules do not permit that data to be shown to the client the interceptor aborts the request.
+
+Note that there are performance implications to this mechanism, since an unauthorized user can still cause the server to fetch data even if they won't get to see it. This mechanism should be comprehensive however, since it will prevent clients from using various features in FHIR (e.g. <code>_include</code> or <code>_revinclude</code>) to "trick" the server into showing them data they shouldn't be allowed to see.
+
+Reverse chaining (<code>_has</code>) is an exception, since it filters the results by resources that are never returned. It is covered in [Authorizing Reverse Chained Searches](#authorizing-reverse-chained-searches).
+
+See the following diagram for an example of how this works.
+
+<img src="/hapi-fhir/docs/images/hapi_authorizationinterceptor_read_normal.svg" alt="Write Authorization"/>
+
+<a id="authorizing-reverse-chained-searches"></a>
+
+# Authorizing Reverse Chained Searches
+
+A [reverse chained](https://hl7.org/fhir/search.html#has) search parameter (<code>_has</code>) filters the results by resources of another type. For example, <code>Patient?_has:Observation:subject:code=X</code> returns the Patients that are the subject of an Observation with code X. A client allowed to read Patient but not Observation can use such a search to find out which patients have an Observation with code X, even though no Observation is returned.
+
+By default, AuthorizationInterceptor does not check the client's permissions on the resource types traversed by a <code>_has</code> parameter. This check can be enabled by setting the <code>ENFORCE_REVERSE_CHAINED_AUTHORIZATION</code> flag on the interceptor:
+
+```java
+AuthorizationInterceptor interceptor = new MyAuthorizationInterceptor();
+interceptor.setFlags(AuthorizationFlagsEnum.ENFORCE_REVERSE_CHAINED_AUTHORIZATION);
+```
+
+<code>setFlags(...)</code> replaces any flags already set. Pass every flag the interceptor needs in the same call, e.g. <code>setFlags(DO_NOT_PROACTIVELY_BLOCK_COMPARTMENT_READ_ACCESS, ENFORCE_REVERSE_CHAINED_AUTHORIZATION)</code>. The rest of this section describes the check when the flag is set.
+
+With the flag set, AuthorizationInterceptor checks every <code>_has</code> parameter in the request URL before the request is handled. The request is allowed only if the client has permission to read every resource the parameter can reach. Otherwise it is denied, and HTTP 403 is returned by default.
+
+This applies to searches and to conditional URLs. For example, whether <code>PUT Patient?_has:Observation:subject:code=X</code> updates a Patient or creates one also reveals whether a Patient has an Observation with code X.
+
+For each resource type named in a <code>_has</code> parameter, the client's rules must include one of the following:
+
+* A read rule on all resources of that type, such as <code>allow().read().resourcesOfType("Observation").withAnyId()</code>, <code>allow().read().allResources().withAnyId()</code> or <code>allowAll()</code>. A rule limited to tenants with <code>forTenantIds(...)</code> or <code>notForTenantIds(...)</code> counts when it applies to the request's tenant.
+* A compartment read rule, such as <code>allow().read().allResources().inCompartment("Patient", new IdType("Patient/123"))</code>, when all of the following hold:
+   * the search is on the compartment type (e.g. Patient),
+   * the search has an <code>_id</code> parameter, and every <code>_id</code> value is an owner of the compartment,
+   * the <code>_has</code> parameter links through one of the type's compartment search parameters (e.g. <code>subject</code> for Observation in the Patient compartment), and
+   * the <code>_has</code> parameter applies directly to the searched resource. The inner levels of a nested <code>_has</code> link to the resources of the level above, not to the searched resource, and need a read rule on all resources of their type.
+
+Read rules limited to specific instances, to a FHIR query filter (<code>withFilterTester(...)</code>) or to a value set (<code>withCodeInValueSet(...)</code>) don't count, because they don't cover every resource the parameter can reach. A deny rule covering the type, of any scope, denies the search if it comes before a rule that counts.
+
+For example, with a client limited to the compartment of <code>Patient/123</code>:
+
+| Search | Result |
+|---|---|
+| <code>Patient?_id=123&_has:Observation:subject:code=X</code> | Allowed: every Observation it can reach is in the compartment. |
+| <code>Patient?_has:Observation:subject:code=X</code> | Denied: the search isn't limited to <code>Patient/123</code>. |
+| <code>Patient?_id=123&_has:Observation:focus:code=X</code> | Denied: <code>focus</code> doesn't place an Observation in the Patient compartment. |
+| <code>Patient?_id=123&_has:Observation:subject:_has:Encounter:reason-reference:_id=E</code> | Denied: the inner level reaches Encounters that may not belong solely to <code>Patient/123</code>. |
+
+When a <code>_has</code> parameter is allowed or denied, the reason is written at DEBUG level to the interceptor's troubleshooting log, including why a compartment rule doesn't qualify.
+
+# Authorizing Write Operations
+
+Write operations (create, update, etc.) are typically authorized by the interceptor by examining the parsed URL and making a decision about whether to authorize the operation before allowing Resource Provider code to proceed. This means that client code will not have a chance to execute and create resources that the client does not have permissions to create.
+
+See the following diagram for an example of how this works.
+
+<img src="/hapi-fhir/docs/images/hapi_authorizationinterceptor_write_normal.svg" alt="Write Authorization"/>
+
+
+<a id="authorizing-sub-operations"></a>
+
+# Authorizing Sub-Operations
+
+There are a number of situations where the REST framework doesn't actually know exactly what operation is going to be performed by the implementing server code. For example, if your server implements a <code>conditional update</code> operation, the server might not know which resource is actually being updated until the server code is executed.
+
+Because client code is actually determining which resources are being modified, the server can not automatically apply security rules against these modifications without being provided hints from client code.
+
+In this type of situation, it is important to manually notify the interceptor chain about the "sub-operation" being performed. The following snippet shows how to notify interceptors about a conditional create.
+
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/AuthorizationInterceptors.java|conditionalUpdate}}
+``` 
+
+# Authorizing Patch Operations
+
+The FHIR [patch](http://hl7.org/fhir/http.html#patch) operation presents a challenge for authorization, as the incoming request often contains very little detail about what is being modified.
+
+In order to properly enforce authorization on a server that allows the patch operation, a rule may be added that allows all patch requests, as shown below.
+
+This should be combined with server support for [Authorizing Sub-Operations](#authorizing-sub-operations) as shown above.
+
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/AuthorizationInterceptors.java|patchAll}}
+``` 
+
+# Authorizing Multitenant Servers
+
+The AuthorizationInterceptor has the ability to direct individual rules as only applying to a single tenant in a multitenant server. The following example shows such a rule.
+
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/AuthorizationInterceptors.java|authorizeTenantAction}}
+```
+
+# Authorizing Bulk Export Operations
+
+AuthorizationInterceptor can be used to provide nuanced control over the kinds of Bulk Export operations that a user can initiate when using the JPA Server.
+
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/AuthorizationInterceptors.java|bulkExport}}
+```
+
+# Advanced Compartment authorization
+
+AuthorizationInterceptor can be used to provide fine-grained control over compartment reads and writes as well.
+
+There is a strict FHIR definition of which resources and related search parameters fall into a given compartment.
+
+However, sometimes the defaults do not suffice. The following is an example 
+of an R4 ruleset which allows `device.patient` to be considered in the Patient compartment, on top of all the standard search parameters. 
+
+
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/AuthorizationInterceptors.java|advancedCompartment}}
+```
+
+Additionally, sometimes the defaults are too inclusive. The following example is of an R4 ruleset
+which omits `group.member` from the Patient compartment, even if it's in the standard set of search parameters.
+
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/AuthorizationInterceptors.java|advancedCompartmentOmission}}
+```
+
+# Authorizing Instance Operations Using FHIR Query Filters
+
+Instance-level operations (i.e. `$meta`, `$meta-add`, etc.) can be authorized based on the content of the target resource. 
+The `onInstancesOfTypeMatchingOptionalFilter()` and `onAnyInstanceMatchingOptionalFilter()` methods allow specifying a 
+FHIR query filter that the target resource must match for the operation to be authorized.
+
+* `onInstancesOfTypeMatchingOptionalFilter(Class, String)` - Restricts to instances of a specific resource type that match the filter
+* `onAnyInstanceMatchingOptionalFilter(String)` - Restricts to any resource instance (regardless of type) that matches the filter
+
+The filter parameter uses standard FHIR query syntax (e.g., `category=vital-signs` or `_tag=http://example.org|some-tag`).
+
+```java
+{{snippet:classpath:/ca/uhn/hapi/fhir/docs/AuthorizationInterceptors.java|instanceOperationWithFilter}}
+```

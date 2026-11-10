@@ -1,0 +1,501 @@
+/*-
+ * #%L
+ * HAPI FHIR JPA Server
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.dao;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.context.RuntimeResourceDefinition;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.interceptor.api.IInterceptorBroadcaster;
+import ca.uhn.fhir.jpa.api.dao.IDao;
+import ca.uhn.fhir.jpa.dao.IResourceMetadataExtractorSvc.ProvenanceDetails;
+import ca.uhn.fhir.jpa.dao.data.IResourceHistoryTableDao;
+import ca.uhn.fhir.jpa.entity.PartitionEntity;
+import ca.uhn.fhir.jpa.esr.ExternallyStoredResourceServiceRegistry;
+import ca.uhn.fhir.jpa.esr.IExternallyStoredResourceService;
+import ca.uhn.fhir.jpa.model.config.PartitionSettings;
+import ca.uhn.fhir.jpa.model.cross.IBasePersistedResource;
+import ca.uhn.fhir.jpa.model.dao.JpaPid;
+import ca.uhn.fhir.jpa.model.entity.BaseTag;
+import ca.uhn.fhir.jpa.model.entity.IBaseResourceEntity;
+import ca.uhn.fhir.jpa.model.entity.PartitionablePartitionId;
+import ca.uhn.fhir.jpa.model.entity.ResourceEncodingEnum;
+import ca.uhn.fhir.jpa.model.entity.ResourceHistoryTable;
+import ca.uhn.fhir.jpa.model.entity.ResourceTable;
+import ca.uhn.fhir.jpa.model.entity.TagDefinition;
+import ca.uhn.fhir.jpa.partition.IPartitionLookupSvc;
+import ca.uhn.fhir.jpa.search.builder.SearchBuilder;
+import ca.uhn.fhir.jpa.util.ResourceParserUtil;
+import ca.uhn.fhir.model.api.IResource;
+import ca.uhn.fhir.model.api.ResourceMetadataKeyEnum;
+import ca.uhn.fhir.model.api.Tag;
+import ca.uhn.fhir.model.api.TagList;
+import ca.uhn.fhir.model.base.composite.BaseCodingDt;
+import ca.uhn.fhir.model.primitive.IdDt;
+import ca.uhn.fhir.model.primitive.InstantDt;
+import ca.uhn.fhir.model.valueset.BundleEntryTransactionMethodEnum;
+import ca.uhn.fhir.parser.DataFormatException;
+import ca.uhn.fhir.parser.IParser;
+import ca.uhn.fhir.parser.LenientErrorHandler;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.util.IMetaTagSorter;
+import ca.uhn.fhir.util.MetaUtil;
+import jakarta.annotation.Nullable;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.instance.model.api.IAnyResource;
+import org.hl7.fhir.instance.model.api.IBaseCoding;
+import org.hl7.fhir.instance.model.api.IBaseMetaType;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.List;
+import java.util.Optional;
+
+import static ca.uhn.fhir.jpa.util.ResourceParserUtil.EsrResourceDetails;
+import static ca.uhn.fhir.jpa.util.ResourceParserUtil.getResourceText;
+import static java.util.Objects.nonNull;
+
+public class JpaStorageResourceParser implements IJpaStorageResourceParser {
+	public static final LenientErrorHandler LENIENT_ERROR_HANDLER = new LenientErrorHandler(false).disableAllErrors();
+	private static final Logger ourLog = LoggerFactory.getLogger(JpaStorageResourceParser.class);
+
+	@Autowired
+	private FhirContext myFhirContext;
+
+	@Autowired
+	private IResourceHistoryTableDao myResourceHistoryTableDao;
+
+	@Autowired
+	private PartitionSettings myPartitionSettings;
+
+	@Autowired
+	private IPartitionLookupSvc myPartitionLookupSvc;
+
+	@Autowired
+	private ExternallyStoredResourceServiceRegistry myExternallyStoredResourceServiceRegistry;
+
+	@Autowired
+	private IMetaTagSorter myMetaTagSorter;
+
+	@Autowired
+	private IInterceptorBroadcaster myInterceptorBroadcaster;
+
+	@Autowired
+	private IResourceMetadataExtractorSvc myResourceMetadataExtractorSvc;
+
+	@Override
+	public IBaseResource toResource(IBasePersistedResource theEntity, boolean theForHistoryOperation) {
+		RuntimeResourceDefinition type = myFhirContext.getResourceDefinition(theEntity.getResourceType());
+		Class<? extends IBaseResource> resourceType = type.getImplementingClass();
+		return toResource(null, resourceType, (IBaseResourceEntity<JpaPid>) theEntity, null, theForHistoryOperation);
+	}
+
+	@Override
+	public <R extends IBaseResource> R toResource(
+			RequestDetails theRequestDetails,
+			Class<R> theResourceType,
+			IBaseResourceEntity<?> theEntity,
+			Collection<BaseTag> theTagList,
+			boolean theForHistoryOperation) {
+
+		// 1. get resource, it's encoding and the tags if any
+		byte[] resourceBytes;
+		String resourceText;
+		ResourceEncodingEnum resourceEncoding;
+		@Nullable Collection<? extends BaseTag> tagList;
+		long version;
+		String provenanceSourceUri = null;
+		String provenanceRequestId = null;
+
+		if (theEntity instanceof ResourceHistoryTable) {
+			ResourceHistoryTable history = (ResourceHistoryTable) theEntity;
+			resourceBytes = history.getResource();
+			resourceText = history.getResourceTextVc();
+			resourceEncoding = history.getEncoding();
+
+			// For search results we get the list of tags passed in because we load it
+			// in bulk for all resources we're going to return, but for read results
+			// we don't get the list passed in so we need to load it here.
+			tagList = theTagList;
+			if (tagList == null) {
+				tagList = myResourceMetadataExtractorSvc.getTags(history);
+			}
+
+			version = history.getVersion();
+			ProvenanceDetails provenanceDetails = myResourceMetadataExtractorSvc.getProvenanceDetails(history);
+			provenanceSourceUri = provenanceDetails.provenanceSourceUri();
+			provenanceRequestId = provenanceDetails.provenanceRequestId();
+		} else if (theEntity instanceof ResourceTable entity) {
+			ResourceHistoryTable history;
+			if (entity.getCurrentVersionEntity() != null) {
+				history = entity.getCurrentVersionEntity();
+			} else {
+				version = entity.getVersion();
+				history = myResourceHistoryTableDao.findForIdAndVersion(
+						entity.getResourceId().toFk(), version);
+				entity.setCurrentVersionEntity(history);
+
+				// If we failed to find the version specified as the latest version on the ResourceTable
+				// entity, we need to figure out what the most recent version actually is and return that.
+				if (history == null) {
+					Optional<ResourceHistoryTable> latestVersion = SearchBuilder.findLatestVersion(
+							theRequestDetails, entity.getId(), myResourceHistoryTableDao, myInterceptorBroadcaster);
+					if (latestVersion.isPresent()) {
+						history = latestVersion.get();
+					} else {
+						return null;
+					}
+				}
+			}
+
+			resourceBytes = history.getResource();
+			resourceEncoding = history.getEncoding();
+			resourceText = history.getResourceTextVc();
+			tagList = myResourceMetadataExtractorSvc.getTags(entity);
+			version = history.getVersion();
+			ProvenanceDetails provenanceDetails = myResourceMetadataExtractorSvc.getProvenanceDetails(history);
+			provenanceSourceUri = provenanceDetails.provenanceSourceUri();
+			provenanceRequestId = provenanceDetails.provenanceRequestId();
+		} else {
+			// something wrong
+			return null;
+		}
+
+		// 2. get The text
+		String decodedResourceText = getResourceText(resourceBytes, resourceText, resourceEncoding);
+
+		// 3. Use the appropriate custom type if one is specified in the context
+		Class<R> resourceType = ResourceParserUtil.determineTypeToParse(myFhirContext, theResourceType, tagList);
+
+		// 4. parse the text to FHIR
+		R retVal = parseResource(theRequestDetails, theEntity, resourceEncoding, decodedResourceText, resourceType);
+
+		// 5. fill MetaData
+		retVal = populateResourceMetadata(theEntity, theForHistoryOperation, tagList, version, retVal);
+
+		// 6. Handle source (provenance)
+		MetaUtil.populateResourceSource(myFhirContext, provenanceSourceUri, provenanceRequestId, retVal);
+
+		// 7. Add partition information
+		populateResourcePartitionInformation(theEntity, retVal);
+
+		// 8. sort tags, security labels and profiles
+		myMetaTagSorter.sort(retVal.getMeta());
+
+		return retVal;
+	}
+
+	private <R extends IBaseResource> void populateResourcePartitionInformation(
+			IBaseResourceEntity theEntity, R retVal) {
+		if (myPartitionSettings.isPartitioningEnabled()) {
+			PartitionablePartitionId partitionId = theEntity.getPartitionId();
+			if (partitionId != null && partitionId.getPartitionId() != null) {
+				PartitionEntity persistedPartition =
+						myPartitionLookupSvc.getPartitionById(partitionId.getPartitionId());
+				retVal.setUserData(Constants.RESOURCE_PARTITION_ID, persistedPartition.toRequestPartitionId());
+			} else {
+				retVal.setUserData(Constants.RESOURCE_PARTITION_ID, myPartitionSettings.getDefaultRequestPartitionId());
+			}
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private <R extends IBaseResource> R parseResource(
+			RequestDetails theRequestDetails,
+			IBaseResourceEntity<?> theEntity,
+			ResourceEncodingEnum theResourceEncoding,
+			String theDecodedResourceText,
+			Class<R> theResourceType) {
+		R retVal;
+		if (theResourceEncoding == ResourceEncodingEnum.ESR) {
+
+			EsrResourceDetails resourceDetails = ResourceParserUtil.getEsrResourceDetails(theDecodedResourceText);
+			IExternallyStoredResourceService provider =
+					myExternallyStoredResourceServiceRegistry.getProvider(resourceDetails.providerId());
+			retVal = (R) provider.fetchResource(theRequestDetails, resourceDetails.address());
+
+		} else if (theResourceEncoding != ResourceEncodingEnum.DEL) {
+
+			IParser parser = new TolerantJsonParser(
+					getContext(theEntity.getFhirVersion()), LENIENT_ERROR_HANDLER, theEntity.getResourceId());
+
+			try {
+				retVal = parser.parseResource(theResourceType, theDecodedResourceText);
+			} catch (Exception e) {
+				StringBuilder b = new StringBuilder();
+				b.append("Failed to parse database resource[");
+				b.append(myFhirContext.getResourceType(theResourceType));
+				b.append("/");
+				b.append(theEntity.getIdDt().getIdPart());
+				b.append(" (pid ");
+				b.append(theEntity.getId());
+				b.append(", version ");
+				b.append(theEntity.getFhirVersion().name());
+				b.append("): ");
+				b.append(e.getMessage());
+				String msg = b.toString();
+				ourLog.error(msg, e);
+				throw new DataFormatException(Msg.code(928) + msg, e);
+			}
+
+		} else {
+
+			retVal = (R) myFhirContext
+					.getResourceDefinition(theEntity.getResourceType())
+					.newInstance();
+		}
+		return retVal;
+	}
+
+	@SuppressWarnings("unchecked")
+	@Override
+	public <R extends IBaseResource> R populateResourceMetadata(
+			IBaseResourceEntity<?> theEntitySource,
+			boolean theForHistoryOperation,
+			@Nullable Collection<? extends BaseTag> tagList,
+			long theVersion,
+			R theResourceTarget) {
+		if (theResourceTarget instanceof IResource) {
+			IResource res = (IResource) theResourceTarget;
+			theResourceTarget =
+					(R) populateResourceMetadataHapi(theEntitySource, tagList, theForHistoryOperation, res, theVersion);
+		} else {
+			IAnyResource res = (IAnyResource) theResourceTarget;
+			theResourceTarget =
+					populateResourceMetadataRi(theEntitySource, tagList, theForHistoryOperation, res, theVersion);
+		}
+		return theResourceTarget;
+	}
+
+	@SuppressWarnings("unchecked")
+	private <R extends IResource> R populateResourceMetadataHapi(
+			IBaseResourceEntity<?> theEntity,
+			@Nullable Collection<? extends BaseTag> theTagList,
+			boolean theForHistoryOperation,
+			R res,
+			Long theVersion) {
+		R retVal = res;
+		if (theEntity.getDeleted() != null) {
+			res = (R) myFhirContext.getResourceDefinition(res).newInstance();
+			retVal = res;
+			ResourceMetadataKeyEnum.DELETED_AT.put(res, new InstantDt(theEntity.getDeleted()));
+			if (theForHistoryOperation) {
+				ResourceMetadataKeyEnum.ENTRY_TRANSACTION_METHOD.put(res, BundleEntryTransactionMethodEnum.DELETE);
+			}
+		} else if (theForHistoryOperation) {
+			/*
+			 * If the create and update times match, this was when the resource was created so we should mark it as a POST. Otherwise, it's a PUT.
+			 */
+			Date published = theEntity.getPublished().getValue();
+			Date updated = theEntity.getUpdated().getValue();
+			if (published.equals(updated)) {
+				ResourceMetadataKeyEnum.ENTRY_TRANSACTION_METHOD.put(res, BundleEntryTransactionMethodEnum.POST);
+			} else {
+				ResourceMetadataKeyEnum.ENTRY_TRANSACTION_METHOD.put(res, BundleEntryTransactionMethodEnum.PUT);
+			}
+		}
+
+		res.setId(theEntity.getIdDt().withVersion(theVersion.toString()));
+
+		ResourceMetadataKeyEnum.VERSION.put(res, Long.toString(theEntity.getVersion()));
+		ResourceMetadataKeyEnum.PUBLISHED.put(res, theEntity.getPublished());
+		ResourceMetadataKeyEnum.UPDATED.put(res, theEntity.getUpdated());
+		IDao.RESOURCE_PID.put(res, theEntity.getResourceId());
+
+		if (theTagList != null) {
+			if (theEntity.isHasTags()) {
+				TagList tagList = new TagList();
+				List<IBaseCoding> securityLabels = new ArrayList<>();
+				List<IdDt> profiles = new ArrayList<>();
+				for (BaseTag next : theTagList) {
+					TagDefinition nextTag = next.getTag();
+					switch (nextTag.getTagType()) {
+						case PROFILE:
+							profiles.add(new IdDt(nextTag.getCode()));
+							break;
+						case SECURITY_LABEL:
+							IBaseCoding secLabel =
+									(IBaseCoding) myFhirContext.getVersion().newCodingDt();
+							secLabel.setSystem(nextTag.getSystem());
+							secLabel.setCode(nextTag.getCode());
+							secLabel.setDisplay(nextTag.getDisplay());
+							secLabel.setVersion(nextTag.getVersion());
+							Boolean userSelected = nextTag.getUserSelected();
+							if (userSelected != null) {
+								secLabel.setUserSelected(userSelected);
+							}
+							securityLabels.add(secLabel);
+							break;
+						case TAG:
+							Tag e = new Tag(nextTag.getSystem(), nextTag.getCode(), nextTag.getDisplay());
+							e.setVersion(nextTag.getVersion());
+							// careful! These are Boolean, not boolean.
+							e.setUserSelectedBoolean(nextTag.getUserSelected());
+							tagList.add(e);
+							break;
+					}
+				}
+				if (tagList.size() > 0) {
+					ResourceMetadataKeyEnum.TAG_LIST.put(res, tagList);
+				}
+				if (securityLabels.size() > 0) {
+					ResourceMetadataKeyEnum.SECURITY_LABELS.put(res, toBaseCodingList(securityLabels));
+				}
+				if (profiles.size() > 0) {
+					ResourceMetadataKeyEnum.PROFILES.put(res, profiles);
+				}
+			}
+		}
+
+		return retVal;
+	}
+
+	@SuppressWarnings("unchecked")
+	private <R extends IBaseResource> R populateResourceMetadataRi(
+			IBaseResourceEntity theEntity,
+			@Nullable Collection<? extends BaseTag> theTagList,
+			boolean theForHistoryOperation,
+			IAnyResource res,
+			Long theVersion) {
+		R retVal = (R) res;
+		if (theEntity.getDeleted() != null) {
+			res = (IAnyResource) myFhirContext.getResourceDefinition(res).newInstance();
+			retVal = (R) res;
+			ResourceMetadataKeyEnum.DELETED_AT.put(res, new InstantDt(theEntity.getDeleted()));
+			if (theForHistoryOperation) {
+				ResourceMetadataKeyEnum.ENTRY_TRANSACTION_METHOD.put(res, BundleEntryTransactionMethodEnum.DELETE);
+			}
+		} else if (theForHistoryOperation) {
+			/*
+			 * If the create and update times match, this was when the resource was created so we should mark it as a POST. Otherwise, it's a PUT.
+			 */
+			Date published = theEntity.getPublished().getValue();
+			Date updated = theEntity.getUpdated().getValue();
+			if (published.equals(updated)) {
+				ResourceMetadataKeyEnum.ENTRY_TRANSACTION_METHOD.put(res, BundleEntryTransactionMethodEnum.POST);
+			} else {
+				ResourceMetadataKeyEnum.ENTRY_TRANSACTION_METHOD.put(res, BundleEntryTransactionMethodEnum.PUT);
+			}
+		}
+
+		res.getMeta().setLastUpdated(null);
+		res.getMeta().setVersionId(null);
+
+		updateResourceMetadata(theEntity, res);
+		res.setId(res.getIdElement().withVersion(theVersion.toString()));
+
+		res.getMeta().setLastUpdated(theEntity.getUpdatedDate());
+		IDao.RESOURCE_PID.put(res, theEntity.getResourceId());
+
+		if (CollectionUtils.isNotEmpty(theTagList)) {
+			res.getMeta().getTag().clear();
+			res.getMeta().getProfile().clear();
+			res.getMeta().getSecurity().clear();
+
+			boolean haveWarnedForMissingTag = false;
+			for (BaseTag next : theTagList) {
+				if (next.getTag() == null) {
+					if (!haveWarnedForMissingTag) {
+						ourLog.warn(
+								"Tag definition HFJ_TAG_DEF#{} is missing, returned Resource.meta may not be complete",
+								next.getTagId());
+						haveWarnedForMissingTag = true;
+					}
+					continue;
+				}
+
+				switch (next.getTag().getTagType()) {
+					case PROFILE:
+						res.getMeta().addProfile(next.getTag().getCode());
+						break;
+					case SECURITY_LABEL:
+						IBaseCoding sec = res.getMeta().addSecurity();
+						sec.setSystem(next.getTag().getSystem());
+						sec.setCode(next.getTag().getCode());
+						sec.setDisplay(next.getTag().getDisplay());
+						break;
+					case TAG:
+						IBaseCoding tag = res.getMeta().addTag();
+						tag.setSystem(next.getTag().getSystem());
+						tag.setCode(next.getTag().getCode());
+						tag.setDisplay(next.getTag().getDisplay());
+						tag.setVersion(next.getTag().getVersion());
+						Boolean userSelected = next.getTag().getUserSelected();
+						// the tag is created with a null userSelected, but the api is primitive boolean.
+						// Only update if we are non-null.
+						if (nonNull(userSelected)) {
+							tag.setUserSelected(userSelected);
+						}
+						break;
+				}
+			}
+		}
+
+		return retVal;
+	}
+
+	@Override
+	public void updateResourceMetadata(IBaseResourceEntity<?> theEntitySource, IBaseResource theResourceTarget) {
+		IIdType id = theEntitySource.getIdDt();
+		if (myFhirContext.getVersion().getVersion().isRi()) {
+			id = myFhirContext.getVersion().newIdType().setValue(id.getValue());
+		}
+
+		if (id.hasResourceType() == false) {
+			id = id.withResourceType(theEntitySource.getResourceType());
+		}
+
+		theResourceTarget.setId(id);
+		if (theResourceTarget instanceof IResource) {
+			ResourceMetadataKeyEnum.VERSION.put(theResourceTarget, id.getVersionIdPart());
+			ResourceMetadataKeyEnum.UPDATED.put(theResourceTarget, theEntitySource.getUpdated());
+		} else {
+			IBaseMetaType meta = theResourceTarget.getMeta();
+			meta.setVersionId(id.getVersionIdPart());
+			meta.setLastUpdated(theEntitySource.getUpdatedDate());
+		}
+
+		populateResourcePartitionInformation(theEntitySource, theResourceTarget);
+	}
+
+	private FhirContext getContext(FhirVersionEnum theVersion) {
+		Validate.notNull(theVersion, "theVersion must not be null");
+		if (theVersion == myFhirContext.getVersion().getVersion()) {
+			return myFhirContext;
+		}
+		return FhirContext.forCached(theVersion);
+	}
+
+	private static List<BaseCodingDt> toBaseCodingList(List<IBaseCoding> theSecurityLabels) {
+		ArrayList<BaseCodingDt> retVal = new ArrayList<>(theSecurityLabels.size());
+		for (IBaseCoding next : theSecurityLabels) {
+			retVal.add((BaseCodingDt) next);
+		}
+		return retVal;
+	}
+}

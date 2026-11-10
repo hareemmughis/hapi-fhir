@@ -1,0 +1,191 @@
+package ca.uhn.fhir.rest.server;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.annotation.OptionalParam;
+import ca.uhn.fhir.rest.annotation.RawParam;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.param.StringAndListParam;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.dstu3.model.HumanName;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class SearchDefaultMethodDstu3Test {
+
+	private static final FhirContext ourCtx = FhirContext.forDstu3Cached();
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(SearchDefaultMethodDstu3Test.class);
+	private static int ourPort;
+	private static String ourLastMethod;
+	private static StringAndListParam ourLastParam1;
+	private static StringAndListParam ourLastParam2;
+
+
+	@RegisterExtension
+	public RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		 .setDefaultResponseEncoding(EncodingEnum.XML)
+		 .registerProvider(new DummyPatientResourceProvider())
+		 .withPagingProvider(new FifoMemoryPagingProvider(100))
+		 .setDefaultPrettyPrint(false);
+
+	@BeforeEach
+	public void before() {
+		ourLastMethod = null;
+		ourLastParam1 = null;
+		ourLastParam2 = null;
+		ourLastAdditionalParams = null;
+	}
+
+	@Test
+	public void testSearchNoParams() throws Exception {
+		String responseContent = ourServer.fhirRequest("/Patient").get().assertStatus(200).getBody();
+
+		assertThat(ourLastMethod).isIn("search01", "search02", "search03");
+		assertThat(ourLastParam1).isNull();
+		assertThat(ourLastParam2).isNull();
+		assertThat(ourLastAdditionalParams).isNull();
+
+	}
+
+	@Test
+	public void testSearchOneOptionalParam() throws Exception {
+		String responseContent = ourServer.fhirRequest("/Patient?param1=val1").get().assertStatus(200).getBody();
+
+		assertThat(ourLastParam1.getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam1.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam1.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens().get(0).getValue()).isEqualTo("val1");
+		assertThat(ourLastParam2).isNull();
+		assertThat(ourLastAdditionalParams).isNull();
+
+	}
+
+	@Test
+	public void testSearchTwoOptionalParams() throws Exception {
+		String responseContent = ourServer.fhirRequest("/Patient?param1=val1&param2=val2")
+			.get()
+			.assertStatus(200)
+			.getBody();
+
+		assertThat(ourLastParam1.getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam1.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam1.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens().get(0).getValue()).isEqualTo("val1");
+
+		assertThat(ourLastParam2.getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam2.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam2.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens().get(0).getValue()).isEqualTo("val2");
+
+		assertThat(ourLastAdditionalParams).isNull();
+
+	}
+
+	@Test
+	public void testSearchTwoOptionalParamsAndExtraParam() throws Exception {
+		String responseContent = ourServer.fhirRequest("/Patient?param1=val1&param2=val2&param3=val3&_pretty=true")
+			.get()
+			.assertStatus(200)
+			.getBody();
+
+		assertThat(ourLastMethod).isEqualTo("search03");
+
+		assertThat(ourLastParam1.getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam1.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam1.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens().get(0).getValue()).isEqualTo("val1");
+
+		assertThat(ourLastParam2.getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam2.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam2.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens().get(0).getValue()).isEqualTo("val2");
+
+		ourLog.info(ourLastAdditionalParams.toString());
+		assertThat(ourLastAdditionalParams).hasSize(1);
+		assertThat(ourLastAdditionalParams.get("param3").get(0)).isEqualTo("val3");
+
+	}
+
+	@Test
+	public void testSearchTwoOptionalParamsWithQualifierAndExtraParam() throws Exception {
+		String responseContent = ourServer.fhirRequest("/Patient?param1=val1&param2=val2&param2:exact=val2e&param3=val3&_pretty=true")
+			.get()
+			.assertStatus(200)
+			.getBody();
+
+		assertThat(ourLastMethod).isEqualTo("search03");
+
+		assertThat(ourLastParam1.getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam1.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam1.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens().get(0).getValue()).isEqualTo("val1");
+
+		assertThat(ourLastParam2.getValuesAsQueryTokens()).as(ourLastParam2.toString()).hasSize(2);
+		assertThat(ourLastParam2.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens()).hasSize(1);
+		assertThat(ourLastParam2.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens().get(0).getValue()).isEqualTo("val2");
+		assertThat(ourLastParam2.getValuesAsQueryTokens().get(1).getValuesAsQueryTokens().get(0).getValue()).isEqualTo("val2e");
+
+		ourLog.info(ourLastAdditionalParams.toString());
+		assertThat(ourLastAdditionalParams).hasSize(1);
+		assertThat(ourLastAdditionalParams.get("param3").get(0)).isEqualTo("val3");
+
+	}
+
+	@AfterAll
+	public static void afterClassClearContext() throws Exception {
+		TestUtil.randomizeLocaleAndTimezone();
+	}
+
+	private static Map<String, List<String>> ourLastAdditionalParams;
+
+	public static class DummyPatientResourceProvider implements IResourceProvider {
+
+		@Override
+		public Class<? extends IBaseResource> getResourceType() {
+			return Patient.class;
+		}
+
+		@Search()
+		public List<Patient> search01(
+				@OptionalParam(name = "param1") StringAndListParam theParam1) {
+			ourLastMethod = "search01";
+			ourLastParam1 = theParam1;
+			ArrayList<Patient> retVal = new ArrayList<Patient>();
+			retVal.add((Patient) new Patient().addName(new HumanName().setFamily("FAMILY")).setId("1"));
+			return retVal;
+		}
+
+		@Search()
+		public List<Patient> search02(
+				@OptionalParam(name = "param1") StringAndListParam theParam1,
+				@OptionalParam(name = "param2") StringAndListParam theParam2) {
+			ourLastMethod = "search02";
+			ourLastParam1 = theParam1;
+			ourLastParam2 = theParam2;
+			ArrayList<Patient> retVal = new ArrayList<Patient>();
+			retVal.add((Patient) new Patient().addName(new HumanName().setFamily("FAMILY")).setId("1"));
+			return retVal;
+		}
+
+		@Search(allowUnknownParams = true)
+		public List<Patient> search03(
+				@OptionalParam(name = "param1") StringAndListParam theParam1,
+				@OptionalParam(name = "param2") StringAndListParam theParam2,
+				@RawParam() Map<String, List<String>> theAdditionalParams) {
+			ourLastMethod = "search03";
+			ourLastParam1 = theParam1;
+			ourLastParam2 = theParam2;
+			ourLastAdditionalParams = theAdditionalParams;
+			ArrayList<Patient> retVal = new ArrayList<Patient>();
+			retVal.add((Patient) new Patient().addName(new HumanName().setFamily("FAMILY")).setId("1"));
+			return retVal;
+		}
+
+	}
+
+}

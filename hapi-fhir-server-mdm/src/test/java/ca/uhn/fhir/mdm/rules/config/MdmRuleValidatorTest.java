@@ -1,0 +1,360 @@
+package ca.uhn.fhir.mdm.rules.config;
+
+import ca.uhn.fhir.context.ConfigurationException;
+import ca.uhn.fhir.context.RuntimeSearchParam;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.mdm.BaseR4Test;
+import ca.uhn.fhir.mdm.rules.json.MdmRulesJson;
+import ca.uhn.fhir.util.JsonUtil;
+import com.google.common.base.Charsets;
+import org.apache.commons.io.IOUtils;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.core.io.DefaultResourceLoader;
+import org.springframework.core.io.Resource;
+
+import java.io.IOException;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+public class MdmRuleValidatorTest extends BaseR4Test {
+
+	@Override
+	@BeforeEach
+	public void before() {
+		super.before();
+		when(mySearchParamRetriever.getActiveSearchParam(eq("Patient"), eq("identifier"), any())).thenReturn(mock(RuntimeSearchParam.class));
+		when(mySearchParamRetriever.getActiveSearchParam(eq("Practitioner"), eq("identifier"), any())).thenReturn(mock(RuntimeSearchParam.class));
+		when(mySearchParamRetriever.getActiveSearchParam(eq("Medication"), eq("identifier"), any())).thenReturn(mock(RuntimeSearchParam.class));
+		when(mySearchParamRetriever.getActiveSearchParam(eq("AllergyIntolerance"), eq("identifier"), any())).thenReturn(null);
+		when(mySearchParamRetriever.getActiveSearchParam(eq("Organization"), eq("identifier"), any())).thenReturn(mock(RuntimeSearchParam.class));
+		when(mySearchParamRetriever.getActiveSearchParam(eq("Organization"), eq("active"), any())).thenReturn(mock(RuntimeSearchParam.class));
+	}
+
+   @Test
+   public void testValidate() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-bad-url.json");
+			fail();		} catch (ConfigurationException e){
+			assertEquals(Msg.code(1519) + "Enterprise Identifier System (eidSystem) must be a valid URI", e.getMessage());
+		}
+   }
+
+	@Test
+	public void testNonExistentMatchField() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-missing-name.json");
+			fail();		} catch (ConfigurationException e) {
+			assertEquals(Msg.code(1523) + "There is no matchField with name foo", e.getMessage());
+		}
+	}
+
+	@Test
+	public void testSimilarityHasThreshold() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-missing-threshold.json");
+			fail();		} catch (ConfigurationException e) {
+			assertEquals(Msg.code(1514) + "MatchField given-name similarity COSINE requires a matchThreshold", e.getMessage());
+		}
+	}
+
+	@Test
+	public void testMatcherBadPath() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-bad-path.json");
+			fail();		} catch (ConfigurationException e) {
+			assertThat(e.getMessage()).startsWith(Msg.code(1517) + "MatchField given-name resourceType Patient has invalid path 'name.first'.  " + Msg.code(1700) + "Unknown child name 'first' in element HumanName");
+		}
+	}
+
+	@Test
+	public void testMatcherBadFhirPath() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-bad-fhirpath.json");
+			fail();		} catch (ConfigurationException e) {
+			assertThat(e.getMessage()).startsWith(Msg.code(1518) + "MatchField [given-name] resourceType [Patient] has failed FHIRPath evaluation.  Error @1, 27: The name blurst is not a valid function name");
+		}
+	}
+
+	@Test
+	public void testBadRulesMissingBothPaths() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-no-path.json");
+			fail();		} catch (ConfigurationException e) {
+			assertThat(e.getMessage()).startsWith(Msg.code(1516) + "MatchField [given-name] resourceType [Patient] has defined neither a resourcePath or a fhirPath. You must define one of the two.");
+		}
+	}
+
+	@Test
+	public void testBadRulesBothPathsFilled() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-both-paths.json");
+			fail();		} catch (ConfigurationException e) {
+			assertThat(e.getMessage()).startsWith(Msg.code(1515) + "MatchField [given-name] resourceType [Patient] has defined both a resourcePath and a fhirPath. You must define one of the two.");
+		}
+	}
+
+	@Test
+	public void testMatcherBadSearchParam() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-bad-searchparam.json");
+			fail();		} catch (ConfigurationException e) {
+			assertThat(e.getMessage()).startsWith(Msg.code(1511) + "Error in candidateSearchParams: Patient does not have a search parameter called 'foo'");
+		}
+	}
+
+	@Test
+	public void testMatcherBadFilter() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-bad-filter.json");
+			fail();		} catch (ConfigurationException e) {
+			assertThat(e.getMessage()).startsWith(Msg.code(1511) + "Error in candidateFilterSearchParams: Patient does not have a search parameter called 'foo'");
+		}
+	}
+
+	@Test
+	public void testInvalidMdmType() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-missing-mdm-types.json");
+			fail();		} catch (ConfigurationException e) {
+			assertThat(e.getMessage()).startsWith(Msg.code(1509) + "mdmTypes must be set to a list of resource types.");
+		}
+	}
+
+	@Test
+	public void testMatcherduplicateName() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-duplicate-name.json");
+			fail();		} catch (ConfigurationException e) {
+			assertThat(e.getMessage()).startsWith(Msg.code(1512) + "Two MatchFields have the same name 'foo'");
+		}
+	}
+
+	@Test
+	public void testInvalidPath() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-invalid-path.json");
+			fail();		} catch (ConfigurationException e) {
+			assertThat(e.getMessage()).startsWith(Msg.code(1517) + "MatchField name-prefix resourceType Organization has invalid path");
+		}
+	}
+
+	@Test
+	public void testMatcherExtensionJson() throws IOException {
+		try {
+			setMdmRuleJson("rules-extension-search.json");
+		}
+		catch (ConfigurationException e){
+			fail("Unable to validate extension matcher");
+		}
+	}
+
+	@Test
+	public void testBadEidResourceType() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-illegal-resource-type-eid.json");
+		}
+		catch (ConfigurationException e){
+			assertEquals(Msg.code(1508) + "not-a-resource is not a valid resource type, but is set in the eidSystems field.", e.getMessage());
+		}
+	}
+	@Test
+	public void testBadEidDoesntMatchKnownMdmTypes() throws IOException {
+		try {
+			setMdmRuleJson("bad-rules-illegal-missing-resource-type.json");
+		}
+		catch (ConfigurationException e){
+			assertEquals(Msg.code(1507) + "There is an eidSystem set for [Patient] but that is not one of the mdmTypes. Valid options are [Organization, *].", e.getMessage());
+		}
+	}
+
+	@Test
+	void testCustomRegisteredMatcherAlgorithm_passesValidation() throws IOException {
+		myIMatcherFactory.register("CUSTOM_PHONETIC", (theLeftBase, theRightBase, theParams) -> true);
+		setMdmRuleJsonWithFactories("good-rules-custom-matcher-algorithm.json");
+		// No exception = pass
+	}
+
+	@Test
+	void testCustomRegisteredSimilarityAlgorithm_passesValidation() throws IOException {
+		mySimilarityFactory.register("CUSTOM_DISTANCE", (theFhirContext, theLeftBase, theRightBase, theExact) -> 1.0);
+		setMdmRuleJsonWithFactories("good-rules-custom-similarity-algorithm.json");
+		// No exception = pass
+	}
+
+	@Test
+	void testBuiltInMatcherAlgorithm_withFactories_passesValidation() throws IOException {
+		setMdmRuleJsonWithFactories("rules-extension-search.json");
+		// No exception = pass
+	}
+
+	@Test
+	void testUnknownMatcherAlgorithm_withNullFactories_passesValidation() throws IOException {
+		setMdmRuleJson("bad-rules-unknown-matcher-algorithm.json");
+		// No exception = null factories skip validation
+	}
+
+	@Test
+	void testUnknownSimilarityAlgorithm_withNullFactories_passesValidation() throws IOException {
+		setMdmRuleJson("bad-rules-unknown-similarity-algorithm.json");
+		// No exception = null factories skip validation
+	}
+
+	@Test
+	void testUnknownMatcherAlgorithm_validate_doesNotThrow() throws IOException {
+		// validate() no longer checks algorithm names — that is deferred to validateAlgorithmRegistrations()
+		setMdmRuleJsonWithFactories("bad-rules-unknown-matcher-algorithm.json");
+	}
+
+	@Test
+	void testUnknownSimilarityAlgorithm_validate_doesNotThrow() throws IOException {
+		// validate() no longer checks algorithm names — that is deferred to validateAlgorithmRegistrations()
+		setMdmRuleJsonWithFactories("bad-rules-unknown-similarity-algorithm.json");
+	}
+
+	@Test
+	void testUnknownMatcherAlgorithm_validateAlgorithmRegistrations_throws() throws IOException {
+		MdmRuleValidator mdmRuleValidator = new MdmRuleValidator(ourFhirContext, mySearchParamRetriever, myIMatcherFactory, mySimilarityFactory);
+		MdmRulesJson rules = loadRulesJson("bad-rules-unknown-matcher-algorithm.json");
+		mdmRuleValidator.validate(rules);
+
+		assertThatThrownBy(() -> mdmRuleValidator.validateAlgorithmRegistrations(rules))
+			.isInstanceOf(ConfigurationException.class)
+			.hasMessageContaining(Msg.code(2846))
+			.hasMessageContaining("DOES_NOT_EXIST");
+	}
+
+	@Test
+	void testUnknownSimilarityAlgorithm_validateAlgorithmRegistrations_throws() throws IOException {
+		MdmRuleValidator mdmRuleValidator = new MdmRuleValidator(ourFhirContext, mySearchParamRetriever, myIMatcherFactory, mySimilarityFactory);
+		MdmRulesJson rules = loadRulesJson("bad-rules-unknown-similarity-algorithm.json");
+		mdmRuleValidator.validate(rules);
+
+		assertThatThrownBy(() -> mdmRuleValidator.validateAlgorithmRegistrations(rules))
+			.isInstanceOf(ConfigurationException.class)
+			.hasMessageContaining(Msg.code(2847))
+			.hasMessageContaining("DOES_NOT_EXIST");
+	}
+
+	@Test
+	void testBlankMatcherAlgorithm_validateAlgorithmRegistrations_throws() throws IOException {
+		MdmRuleValidator mdmRuleValidator = new MdmRuleValidator(ourFhirContext, mySearchParamRetriever, myIMatcherFactory, mySimilarityFactory);
+		MdmRulesJson rules = loadRulesJson("bad-rules-blank-matcher-algorithm.json");
+		mdmRuleValidator.validate(rules);
+
+		assertThatThrownBy(() -> mdmRuleValidator.validateAlgorithmRegistrations(rules))
+			.isInstanceOf(ConfigurationException.class)
+			.hasMessageContaining(Msg.code(2873))
+			.hasMessageContaining("blank matcher algorithm");
+	}
+
+	@Test
+	void testBlankSimilarityAlgorithm_validateAlgorithmRegistrations_throws() throws IOException {
+		MdmRuleValidator mdmRuleValidator = new MdmRuleValidator(ourFhirContext, mySearchParamRetriever, myIMatcherFactory, mySimilarityFactory);
+		MdmRulesJson rules = loadRulesJson("bad-rules-blank-similarity-algorithm.json");
+		mdmRuleValidator.validate(rules);
+
+		assertThatThrownBy(() -> mdmRuleValidator.validateAlgorithmRegistrations(rules))
+			.isInstanceOf(ConfigurationException.class)
+			.hasMessageContaining(Msg.code(2874))
+			.hasMessageContaining("blank similarity algorithm");
+	}
+
+	@Test
+	void testCustomRegisteredAlgorithm_passesValidateAlgorithmRegistrations() throws IOException {
+		myIMatcherFactory.register("CUSTOM_PHONETIC", (theLeftBase, theRightBase, theParams) -> true);
+		MdmRuleValidator mdmRuleValidator = new MdmRuleValidator(ourFhirContext, mySearchParamRetriever, myIMatcherFactory, mySimilarityFactory);
+		MdmRulesJson rules = loadRulesJson("good-rules-custom-matcher-algorithm.json");
+		mdmRuleValidator.validate(rules);
+
+		// Should not throw — custom algorithm is registered
+		mdmRuleValidator.validateAlgorithmRegistrations(rules);
+	}
+
+	@Test
+	void eidSystems_withArrayOfValidUris_passesValidation() throws IOException {
+		setMdmRuleJson("good-rules-multiple-eid-systems.json");
+		// No exception = pass
+	}
+
+	@Test
+	void eidSystems_withArrayContainingInvalidUri_throws() {
+		assertThatThrownBy(() -> setMdmRuleJson("bad-rules-bad-url-in-eid-array.json"))
+			.isInstanceOf(ConfigurationException.class)
+			.hasMessageContaining(Msg.code(1519));
+	}
+
+	@Test
+	void eidSystems_withEmptyArray_throws() {
+		assertThatThrownBy(() -> setMdmRuleJson("bad-rules-empty-eid-system-array.json"))
+			.isInstanceOf(ConfigurationException.class)
+			.hasMessageContaining(Msg.code(3044))
+			.hasMessageContaining("Organization");
+	}
+
+	@Test
+	void eidSystems_withSameSystemListedTwiceForOneResourceType_throws() {
+		assertThatThrownBy(() -> setMdmRuleJson("bad-rules-duplicate-eid-system.json"))
+			.isInstanceOf(ConfigurationException.class)
+			.hasMessageContaining(Msg.code(3045))
+			.hasMessageContaining("http://example.com/mrn");
+	}
+
+	/**
+	 * A rules document is written by an implementer, so a malformed eidSystems entry must be reported as a
+	 * configuration error rather than as the internal error every other Jackson failure produces.
+	 */
+	@Test
+	void eidSystems_withNonStringInTheArray_throwsConfigurationException() {
+		assertThatThrownBy(() -> setMdmRuleJson("bad-rules-non-string-eid-system.json"))
+			.isInstanceOf(ConfigurationException.class)
+			.hasMessageContaining(Msg.code(3046)
+				+ "eidSystems entry for 'Organization' must be an EID system URI or an array of EID system URIs");
+	}
+
+	@Test
+	void setMatchOnlyMdmRules_invalidRules_throws() throws IOException {
+		MdmRulesJson matchOnlyRules = loadRulesJson("good-rules-multiple-eid-systems.json");
+		// AllergyIntolerance has no identifier search parameter, so it cannot be an mdmType
+		matchOnlyRules.setMdmTypes(List.of("Organization", "AllergyIntolerance"));
+		MdmSettings mdmSettings = new MdmSettings(new MdmRuleValidator(ourFhirContext, mySearchParamRetriever, null, null));
+
+		assertThatThrownBy(() -> mdmSettings.setMatchOnlyMdmRules(matchOnlyRules))
+			.isInstanceOf(ConfigurationException.class)
+			.hasMessageStartingWith(Msg.code(1510));
+	}
+
+	private void setMdmRuleJson(String theS) throws IOException {
+		MdmRuleValidator mdmRuleValidator = new MdmRuleValidator(ourFhirContext, mySearchParamRetriever, null, null);
+		MdmSettings mdmSettings = new MdmSettings(mdmRuleValidator);
+		DefaultResourceLoader resourceLoader = new DefaultResourceLoader();
+		Resource resource = resourceLoader.getResource(theS);
+		String json = IOUtils.toString(resource.getInputStream(), Charsets.UTF_8);
+		mdmSettings.setScriptText(json);
+	}
+
+	private void setMdmRuleJsonWithFactories(String theS) throws IOException {
+		MdmRuleValidator mdmRuleValidator = new MdmRuleValidator(ourFhirContext, mySearchParamRetriever, myIMatcherFactory, mySimilarityFactory);
+		MdmSettings mdmSettings = new MdmSettings(mdmRuleValidator);
+		DefaultResourceLoader resourceLoader = new DefaultResourceLoader();
+		Resource resource = resourceLoader.getResource(theS);
+		String json = IOUtils.toString(resource.getInputStream(), Charsets.UTF_8);
+		mdmSettings.setScriptText(json);
+	}
+
+	private MdmRulesJson loadRulesJson(String theS) throws IOException {
+		DefaultResourceLoader resourceLoader = new DefaultResourceLoader();
+		Resource resource = resourceLoader.getResource(theS);
+		String json = IOUtils.toString(resource.getInputStream(), Charsets.UTF_8);
+		return JsonUtil.deserialize(json, MdmRulesJson.class);
+	}
+
+}

@@ -1,11 +1,8 @@
 package ca.uhn.fhir.tinder;
 
-import java.io.File;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.tinder.parser.DatatypeGeneratorUsingSpreadsheet;
+import ca.uhn.fhir.tinder.parser.ResourceGeneratorUsingSpreadsheet;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -16,9 +13,11 @@ import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.project.MavenProject;
 
-import ca.uhn.fhir.tinder.parser.DatatypeGeneratorUsingSpreadsheet;
-import ca.uhn.fhir.tinder.parser.ProfileParser;
-import ca.uhn.fhir.tinder.parser.ResourceGeneratorUsingSpreadsheet;
+import java.io.File;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 @Mojo(name = "generate-structures", defaultPhase = LifecyclePhase.GENERATE_SOURCES)
 public class TinderStructuresMojo extends AbstractMojo {
@@ -37,11 +36,8 @@ public class TinderStructuresMojo extends AbstractMojo {
 	@Parameter(alias = "package", required = true)
 	private String packageName;
 
-	@Parameter(alias = "version", required = true, defaultValue="dstu")
+	@Parameter(alias = "version", required = true, defaultValue = "dstu")
 	private String version = "dstu";
-
-	@Parameter(required = false)
-	private List<ProfileFileDefinition> resourceProfileFiles;
 
 	@Parameter(required = false)
 	private List<ValueSetFileDefinition> resourceValueSetFiles;
@@ -54,21 +50,22 @@ public class TinderStructuresMojo extends AbstractMojo {
 
 	@Parameter(required = true, defaultValue = "${project.build.directory}/..")
 	private String baseDir;
-	
+
 	@Override
-	public void execute() throws MojoExecutionException, MojoFailureException {		
+	public void execute() throws MojoExecutionException, MojoFailureException {
 		if (StringUtils.isBlank(packageName)) {
-			throw new MojoFailureException("Package not specified");
+			throw new MojoFailureException(Msg.code(101) + "Package not specified");
 		}
 		if (packageName.contains("..") || packageName.endsWith(".")) {
-			throw new MojoFailureException("Invalid package specified");
+			throw new MojoFailureException(Msg.code(102) + "Invalid package specified");
 		}
 
 		ourLog.info("Beginning HAPI-FHIR Tinder Code Generation...");
 
 		ourLog.info(" * Output Package: " + packageName);
 
-		File resDirectoryBase = new File(new File(targetResourceDirectory), packageName.replace('.', File.separatorChar));
+		File resDirectoryBase =
+				new File(new File(targetResourceDirectory), packageName.replace('.', File.separatorChar));
 		resDirectoryBase.mkdirs();
 		ourLog.info(" * Output Resource Directory: " + resDirectoryBase.getAbsolutePath());
 
@@ -81,7 +78,7 @@ public class TinderStructuresMojo extends AbstractMojo {
 		try {
 			vsp.parse();
 		} catch (Exception e) {
-			throw new MojoFailureException("Failed to load valuesets", e);
+			throw new MojoFailureException(Msg.code(103) + "Failed to load valuesets", e);
 		}
 
 		/*
@@ -99,7 +96,7 @@ public class TinderStructuresMojo extends AbstractMojo {
 				dtp.parse();
 				dtp.markResourcesForImports();
 			} catch (Exception e) {
-				throw new MojoFailureException("Failed to load datatypes", e);
+				throw new MojoFailureException(Msg.code(104) + "Failed to load datatypes", e);
 			}
 			dtp.bindValueSets(vsp);
 
@@ -114,7 +111,7 @@ public class TinderStructuresMojo extends AbstractMojo {
 				rp.parse();
 				rp.markResourcesForImports();
 			} catch (Exception e) {
-				throw new MojoFailureException("Failed to load resources", e);
+				throw new MojoFailureException(Msg.code(105) + "Failed to load resources", e);
 			}
 
 			rp.bindValueSets(vsp);
@@ -123,34 +120,14 @@ public class TinderStructuresMojo extends AbstractMojo {
 
 			File resSubDirectoryBase = new File(directoryBase, "resource");
 			ourLog.info("Writing Resources to directory: {}", resSubDirectoryBase.getAbsolutePath());
-			
+
 			rp.combineContentMaps(dtp);
 			rp.writeAll(resSubDirectoryBase, resDirectoryBase, packageName);
 		}
 
-		ProfileParser pp = new ProfileParser(version, baseDir);
-		if (resourceProfileFiles != null) {
-			ourLog.info("Loading profiles...");
-			for (ProfileFileDefinition next : resourceProfileFiles) {
-				ourLog.info("Parsing file: {}", next.profileFile);
-				pp.parseSingleProfile(new File(next.profileFile), next.profileSourceUrl);
-			}
-
-			pp.bindValueSets(vsp);
-			pp.markResourcesForImports();
-			pp.getLocalImports().putAll(datatypeLocalImports);
-			datatypeLocalImports.putAll(pp.getLocalImports());
-
-			pp.combineContentMaps(rp);
-			pp.combineContentMaps(dtp);
-			pp.writeAll(new File(directoryBase, "resource"), resDirectoryBase, packageName);
-		}
-
-		
 		if (dtp != null) {
 			ourLog.info("Writing Composite Datatypes...");
-			
-			dtp.combineContentMaps(pp);
+
 			dtp.combineContentMaps(rp);
 			dtp.writeAll(new File(directoryBase, "composite"), resDirectoryBase, packageName);
 		}
@@ -165,58 +142,49 @@ public class TinderStructuresMojo extends AbstractMojo {
 		return baseResourceNames;
 	}
 
-	public String getPackageName() {
-		return packageName;
-	}
-
-	public List<ProfileFileDefinition> getResourceProfileFiles() {
-		return resourceProfileFiles;
-	}
-
-	public List<ValueSetFileDefinition> getResourceValueSetFiles() {
-		return resourceValueSetFiles;
-	}
-
-	public String getTargetDirectory() {
-		return targetDirectory;
-	}
-
-	public boolean isBuildDatatypes() {
-		return buildDatatypes;
-	}
-
 	public void setBaseResourceNames(List<String> theBaseResourceNames) {
 		baseResourceNames = theBaseResourceNames;
 	}
 
-	public void setBuildDatatypes(boolean theBuildDatatypes) {
-		buildDatatypes = theBuildDatatypes;
+	public String getPackageName() {
+		return packageName;
 	}
 
 	public void setPackageName(String thePackageName) {
 		packageName = thePackageName;
 	}
 
-	public void setResourceProfileFiles(List<ProfileFileDefinition> theResourceProfileFiles) {
-		resourceProfileFiles = theResourceProfileFiles;
+	public List<ValueSetFileDefinition> getResourceValueSetFiles() {
+		return resourceValueSetFiles;
 	}
 
 	public void setResourceValueSetFiles(List<ValueSetFileDefinition> theResourceValueSetFiles) {
 		resourceValueSetFiles = theResourceValueSetFiles;
 	}
 
+	public String getTargetDirectory() {
+		return targetDirectory;
+	}
+
 	public void setTargetDirectory(String theTargetDirectory) {
 		targetDirectory = theTargetDirectory;
 	}
 
+	public boolean isBuildDatatypes() {
+		return buildDatatypes;
+	}
+
+	public void setBuildDatatypes(boolean theBuildDatatypes) {
+		buildDatatypes = theBuildDatatypes;
+	}
+
 	public static void main(String[] args) throws Exception {
 
-		
-//		ProfileParser pp = new ProfileParser();
-//		pp.parseSingleProfile(new File("../hapi-tinder-test/src/test/resources/profile/patient.xml"), "http://foo");
+		//		ProfileParser pp = new ProfileParser();
+		//		pp.parseSingleProfile(new File("../hapi-tinder-test/src/test/resources/profile/patient.xml"), "http://foo");
 
 		ValueSetGenerator vsp = new ValueSetGenerator("dstu2");
-//		 vsp.setResourceValueSetFiles(theResourceValueSetFiles);Directory("src/main/resources/vs/");
+		//		 vsp.setResourceValueSetFiles(theResourceValueSetFiles);Directory("src/main/resources/vs/");
 		vsp.parse();
 
 		DatatypeGeneratorUsingSpreadsheet dtp = new DatatypeGeneratorUsingSpreadsheet("dstu2", ".");
@@ -228,20 +196,21 @@ public class TinderStructuresMojo extends AbstractMojo {
 		String dtOutputDir = "target/generated-sources/tinder/ca/uhn/fhir/model/dev/composite";
 
 		ResourceGeneratorUsingSpreadsheet rp = new ResourceGeneratorUsingSpreadsheet("dstu2", ".");
-		rp.setBaseResourceNames(Arrays.asList( "appointment"//, "auditevent" , "observation"  
-//				//, "contract" 
-//				"valueset", "organization", "location" 
-//				, "observation", "conformance"
-//				//, "referralrequest"
-//				, "patient","practitioner","encounter",
-//				"organization","location","relatedperson","appointment","slot","order"
-//				//,"availability"
-//				,"device", "valueset"
+		rp.setBaseResourceNames(Arrays.asList(
+				"appointment" // , "auditevent" , "observation"
+				//				//, "contract"
+				//				"valueset", "organization", "location"
+				//				, "observation", "conformance"
+				//				//, "referralrequest"
+				//				, "patient","practitioner","encounter",
+				//				"organization","location","relatedperson","appointment","slot","order"
+				//				//,"availability"
+				//				,"device", "valueset"
 				));
 		rp.parse();
 		rp.bindValueSets(vsp);
 		rp.markResourcesForImports();
-		
+
 		rp.bindValueSets(vsp);
 
 		String rpOutputDir = "target/generated-sources/tinder/ca/uhn/fhir/model/dev/resource";
@@ -251,13 +220,12 @@ public class TinderStructuresMojo extends AbstractMojo {
 		rp.combineContentMaps(dtp);
 		rp.getLocalImports().putAll(datatypeLocalImports);
 		datatypeLocalImports.putAll(rp.getLocalImports());
-		
+
 		String vsOutputDir = "target/generated-sources/tinder/ca/uhn/fhir/model/dev/valueset";
 		vsp.writeMarkedValueSets(new File(vsOutputDir), "ca.uhn.fhir.model.dev");
-		
+
 		dtp.writeAll(new File(dtOutputDir), null, "ca.uhn.fhir.model.dev");
 		rp.writeAll(new File(rpOutputDir), new File(rpSOutputDir), "ca.uhn.fhir.model.dev");
-		
 	}
 
 	public static class ProfileFileDefinition {
@@ -280,5 +248,4 @@ public class TinderStructuresMojo extends AbstractMojo {
 			valueSetFile = theValueSetFile;
 		}
 	}
-
 }

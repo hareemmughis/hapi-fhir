@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.gclient;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,13 +17,12 @@ package ca.uhn.fhir.rest.gclient;
  * limitations under the License.
  * #L%
  */
-
-import java.util.List;
+package ca.uhn.fhir.rest.gclient;
 
 import org.hl7.fhir.instance.model.api.IBaseBundle;
 import org.hl7.fhir.instance.model.api.IBaseResource;
 
-import ca.uhn.fhir.model.api.Bundle;
+import java.util.List;
 
 public interface ITransaction {
 
@@ -33,14 +30,9 @@ public interface ITransaction {
 	 * Use a list of resources as the transaction input
 	 */
 	ITransactionTyped<List<IBaseResource>> withResources(List<? extends IBaseResource> theResources);
-	
-	/**
-	 * Use a DSTU1 Bundle (Atom) as the transaction input
-	 */
-	ITransactionTyped<Bundle> withBundle(Bundle theBundle);
 
 	/**
-	 * Use a DSTU2+ Bundle resource as the transaction input
+	 * Use the given Bundle resource as the transaction input
 	 */
 	<T extends IBaseBundle> ITransactionTyped<T> withBundle(T theBundleResource);
 
@@ -48,5 +40,4 @@ public interface ITransaction {
 	 * Use the given raw text (should be a Bundle resource) as the transaction input
 	 */
 	ITransactionTyped<String> withBundle(String theBundle);
-
 }

@@ -4,7 +4,8 @@
 	<parent>
 		<groupId>ca.uhn.hapi.fhir</groupId>
 		<artifactId>hapi-fhir</artifactId>
-		<version>2.3-SNAPSHOT</version>
+		<version>9.1.3-SNAPSHOT</version>
+
 		<relativePath>../pom.xml</relativePath>
 	</parent>
 
@@ -17,70 +18,150 @@
 		<dependency>
 			<groupId>ca.uhn.hapi.fhir</groupId>
 			<artifactId>hapi-fhir-base</artifactId>
-			<version>2.3-SNAPSHOT</version>
-		</dependency>
-		<dependency>
-			<groupId>ca.uhn.hapi.fhir</groupId>
-			<artifactId>hapi-fhir-structures-dstu</artifactId>
-			<version>2.3-SNAPSHOT</version>
+			<version>${project.version}</version>
 		</dependency>
 		<dependency>
 			<groupId>ca.uhn.hapi.fhir</groupId>
 			<artifactId>hapi-fhir-structures-dstu2</artifactId>
-			<version>2.3-SNAPSHOT</version>
+			<version>${project.version}</version>
+		</dependency>
+		<!-- Because Tinder is a part of the HAPI FHIR build process (it generates a bunch of the actual HAPI structure code), but also uses HAPI FHIR in order to run (e.g. to load ValueSet resources), we keep 
+			the dependencies for the structures a version behind the main library. This is weird, but it works. -->
+		<dependency>
+			<groupId>ca.uhn.hapi.fhir</groupId>
+			<artifactId>hapi-fhir-structures-dstu2.1</artifactId>
+			<version>${project.version}</version>
+			<exclusions>
+				<exclusion>
+					<groupId>ca.uhn.hapi.fhir</groupId>
+					<artifactId>hapi-fhir-base</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>ca.uhn.hapi.fhir</groupId>
+			<artifactId>hapi-fhir-structures-dstu3</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>ca.uhn.hapi.fhir</groupId>
+			<artifactId>hapi-fhir-structures-hl7org-dstu2</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>ca.uhn.hapi.fhir</groupId>
+			<artifactId>hapi-fhir-validation-resources-dstu2</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>ca.uhn.hapi.fhir</groupId>
+			<artifactId>hapi-fhir-validation-resources-dstu3</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>ca.uhn.hapi.fhir</groupId>
+			<artifactId>hapi-fhir-jpaserver-base</artifactId>
+			<version>${project.version}</version>
 		</dependency>
 
 		<dependency>
-			<groupId>junit</groupId>
-			<artifactId>junit</artifactId>
-			<version>4.11</version>
+			<groupId>org.apache.maven</groupId>
+			<artifactId>maven-plugin-api</artifactId>
 			<scope>test</scope>
 		</dependency>
-
+		<dependency>
+			<groupId>org.apache.maven.plugin-tools</groupId>
+			<artifactId>maven-plugin-annotations</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>ca.uhn.hapi.fhir</groupId>
+			<artifactId>hapi-tinder-plugin</artifactId>
+			<version>${project.version}</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>ca.uhn.hapi.fhir</groupId>
+			<artifactId>hapi-fhir-storage-batch2</artifactId>
+			<version>${project.version}</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>ch.qos.logback</groupId>
+			<artifactId>logback-classic</artifactId>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
 	<build>
 		<plugins>
-			<!-- <plugin> <groupId>ca.uhn.hapi.fhir</groupId> <artifactId>hapi-tinder-plugin</artifactId> <version>1.0-SNAPSHOT</version> <executions> <execution> <id>structs</id> <goals> <goal>generate-structures</goal> 
-				</goals> <configuration> <package>ca.uhn.tindertest</package> <baseResourceNames> <baseResourceName>patient</baseResourceName> <baseResourceName>valueset</baseResourceName> <baseResourceName>organization</baseResourceName> 
-				<baseResourceName>device</baseResourceName> <baseResourceName>location</baseResourceName> <baseResourceName>practitioner</baseResourceName> </baseResourceNames> </configuration> </execution> 
-				<execution> <id>client</id> <goals> <goal>generate-client</goal> </goals> <configuration> <clientClassName>ca.uhn.hitest.HiTest</clientClassName> <serverBaseHref>http://fhir.healthintersections.com.au/open</serverBaseHref> 
-				<generateSearchForAllParams>true</generateSearchForAllParams> </configuration> </execution> </executions> </plugin> -->
-
 			<plugin>
 				<groupId>ca.uhn.hapi.fhir</groupId>
 				<artifactId>hapi-tinder-plugin</artifactId>
-				<version>2.3-SNAPSHOT</version>
+				<dependencies>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-base</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-structures-dstu2</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-structures-dstu2.1</artifactId>
+						<version>${project.version}</version>
+						<exclusions>
+							<exclusion>
+								<groupId>ca.uhn.hapi.fhir</groupId>
+								<artifactId>hapi-fhir-base</artifactId>
+							</exclusion>
+						</exclusions>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-structures-dstu3</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-structures-r4</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-structures-r5</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-structures-hl7org-dstu2</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-validation-resources-dstu2</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-validation-resources-dstu3</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-validation-resources-r4</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-validation-resources-r5</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+				</dependencies>
 				<executions>
-					<execution>
-						<id>custom-structs</id>
-						<goals>
-							<goal>generate-structures</goal>
-						</goals>
-						<configuration>
-							<package>ca.uhn.test.customstructs</package>
-							<profileHttpBase>http://foo</profileHttpBase>
-							<version>dstu</version>
-							<resourceProfileFiles>
-								<resourceProfileFile>
-									<profileFile>${project.basedir}/src/test/resources/profile/patient.xml</profileFile>
-									<profileSourceUrl>http://foo1</profileSourceUrl>
-								</resourceProfileFile>
-								<resourceProfileFile>
-									<profileFile>${project.basedir}/src/test/resources/profile/organization.xml</profileFile>
-									<profileSourceUrl>http://foo1</profileSourceUrl>
-								</resourceProfileFile>
-							</resourceProfileFiles>
-							<resourceValueSetFiles>
-								<resourceValueSetFile>
-									<valueSetFile>${project.basedir}/src/test/resources/valueset/valueset-cgta-patientidpool.xml</valueSetFile>
-								</resourceValueSetFile>
-								<resourceValueSetFile>
-									<valueSetFile>${project.basedir}/src/test/resources/valueset/valueset-cgta-provideridpool.xml</valueSetFile>
-								</resourceValueSetFile>
-							</resourceValueSetFiles>
-						</configuration>
-					</execution>
 					<execution>
 						<id>generalstructs</id>
 						<goals>
@@ -88,7 +169,7 @@
 						</goals>
 						<configuration>
 							<package>ca.uhn.test.realstructs</package>
-							<version>dstu</version>
+							<version>dstu2</version>
 							<baseResourceNames>
 								<baseResourceName>patient</baseResourceName>
 								<baseResourceName>valueset</baseResourceName>
@@ -97,22 +178,79 @@
 								<baseResourceName>location</baseResourceName>
 								<baseResourceName>practitioner</baseResourceName>
 								<baseResourceName>list</baseResourceName>
-								<baseResourceName>securityevent</baseResourceName>
+								<baseResourceName>auditevent</baseResourceName>
 							</baseResourceNames>
 							<buildDatatypes>true</buildDatatypes>
 						</configuration>
 					</execution>
 					<execution>
-						<id>generic_multi</id>
+						<id>generic_multi_dstu2</id>
 						<goals>
 							<goal>generate-multi-files</goal>
 						</goals>
 						<configuration>
-							<version>dstu</version>
+							<version>dstu2</version>
 							<generateResources>true</generateResources>
 							<templateFile>${project.basedir}/src/test/resources/templates/resource_test.vm</templateFile>
 							<targetSourceDirectory>${project.build.directory}/generated-sources/tinder</targetSourceDirectory>
 							<targetPackage>ca.uhn.test.generic.multi</targetPackage>
+							<filenameSuffix>ResourceTest.java</filenameSuffix>
+							<includeResources>
+								<includeResource>patient</includeResource>
+								<includeResource>organization</includeResource>
+							</includeResources>
+						</configuration>
+					</execution>
+					<execution>
+						<id>generic_multi_dstu3</id>
+						<goals>
+							<goal>generate-multi-files</goal>
+						</goals>
+						<configuration>
+							<version>dstu3</version>
+							<generateResources>true</generateResources>
+							<resourceSource>model</resourceSource>
+							<templateFile>${project.basedir}/src/test/resources/templates/resource_test.vm</templateFile>
+							<targetSourceDirectory>${project.build.directory}/generated-sources/tinder</targetSourceDirectory>
+							<targetPackage>ca.uhn.test.generic.multi.dstu3</targetPackage>
+							<filenameSuffix>ResourceTest.java</filenameSuffix>
+							<includeResources>
+								<includeResource>patient</includeResource>
+								<includeResource>organization</includeResource>
+							</includeResources>
+						</configuration>
+					</execution>
+					<execution>
+						<id>generic_multi_r4</id>
+						<goals>
+							<goal>generate-multi-files</goal>
+						</goals>
+						<configuration>
+							<version>r4</version>
+							<generateResources>true</generateResources>
+							<resourceSource>model</resourceSource>
+							<templateFile>${project.basedir}/src/test/resources/templates/resource_test.vm</templateFile>
+							<targetSourceDirectory>${project.build.directory}/generated-sources/tinder</targetSourceDirectory>
+							<targetPackage>ca.uhn.test.generic.multi.r4</targetPackage>
+							<filenameSuffix>ResourceTest.java</filenameSuffix>
+							<includeResources>
+								<includeResource>patient</includeResource>
+								<includeResource>organization</includeResource>
+							</includeResources>
+						</configuration>
+					</execution>
+					<execution>
+						<id>generic_multi_r5</id>
+						<goals>
+							<goal>generate-multi-files</goal>
+						</goals>
+						<configuration>
+							<version>r5</version>
+							<generateResources>true</generateResources>
+							<resourceSource>model</resourceSource>
+							<templateFile>${project.basedir}/src/test/resources/templates/resource_test.vm</templateFile>
+							<targetSourceDirectory>${project.build.directory}/generated-sources/tinder</targetSourceDirectory>
+							<targetPackage>ca.uhn.test.generic.multi.r5</targetPackage>
 							<filenameSuffix>ResourceTest.java</filenameSuffix>
 							<includeResources>
 								<includeResource>patient</includeResource>
@@ -128,6 +266,7 @@
 						<configuration>
 							<version>dstu2</version>
 							<generateResources>true</generateResources>
+							<resourceSource>spreadsheet</resourceSource>
 							<templateFile>${project.basedir}/src/test/resources/templates/resource_map.vm</templateFile>
 							<velocityPath>${project.basedir}/src/test/resources/macros</velocityPath>
 							<targetResourceDirectory>${project.build.directory}/generated-resources/tinder</targetResourceDirectory>
@@ -142,18 +281,78 @@
 						</configuration>
 					</execution>
 					<execution>
-						<id>generic_single</id>
+						<id>generic_single_dstu2</id>
 						<goals>
 							<goal>generate-single-file</goal>
 						</goals>
 						<configuration>
-							<version>dstu</version>
+							<version>dstu2</version>
 							<generateResources>true</generateResources>
 							<templateFile>${project.basedir}/src/test/resources/templates/resource_test_beans_java.vm</templateFile>
 							<targetSourceDirectory>${project.build.directory}/generated-sources/tinder</targetSourceDirectory>
 							<targetPackage>ca.uhn.test.generic.single</targetPackage>
 							<packageBase>ca.uhn.test.generic.multi</packageBase>
-							<targetFile>TestConfigDstu1.java</targetFile>
+							<targetFile>TestConfigDstu2.java</targetFile>
+							<includeResources>
+								<includeResource>patient</includeResource>
+								<includeResource>organization</includeResource>
+							</includeResources>
+						</configuration>
+					</execution>
+					<execution>
+						<id>generic_single_dstu3</id>
+						<goals>
+							<goal>generate-single-file</goal>
+						</goals>
+						<configuration>
+							<version>dstu3</version>
+							<generateResources>true</generateResources>
+							<resourceSource>model</resourceSource>
+							<templateFile>${project.basedir}/src/test/resources/templates/resource_test_beans_java.vm</templateFile>
+							<targetSourceDirectory>${project.build.directory}/generated-sources/tinder</targetSourceDirectory>
+							<targetPackage>ca.uhn.test.generic.single</targetPackage>
+							<packageBase>ca.uhn.test.generic.multi</packageBase>
+							<targetFile>TestConfigDstu3.java</targetFile>
+							<includeResources>
+								<includeResource>patient</includeResource>
+								<includeResource>organization</includeResource>
+							</includeResources>
+						</configuration>
+					</execution>
+					<execution>
+						<id>generic_single_r4</id>
+						<goals>
+							<goal>generate-single-file</goal>
+						</goals>
+						<configuration>
+							<version>r4</version>
+							<generateResources>true</generateResources>
+							<resourceSource>model</resourceSource>
+							<templateFile>${project.basedir}/src/test/resources/templates/resource_test_beans_java.vm</templateFile>
+							<targetSourceDirectory>${project.build.directory}/generated-sources/tinder</targetSourceDirectory>
+							<targetPackage>ca.uhn.test.generic.single.r4</targetPackage>
+							<packageBase>ca.uhn.test.generic.multi.r4</packageBase>
+							<targetFile>TestConfigR4.java</targetFile>
+							<includeResources>
+								<includeResource>patient</includeResource>
+								<includeResource>organization</includeResource>
+							</includeResources>
+						</configuration>
+					</execution>
+					<execution>
+						<id>generic_single_r5</id>
+						<goals>
+							<goal>generate-single-file</goal>
+						</goals>
+						<configuration>
+							<version>r5</version>
+							<generateResources>true</generateResources>
+							<resourceSource>model</resourceSource>
+							<templateFile>${project.basedir}/src/test/resources/templates/resource_test_beans_java.vm</templateFile>
+							<targetSourceDirectory>${project.build.directory}/generated-sources/tinder</targetSourceDirectory>
+							<targetPackage>ca.uhn.test.generic.single.r5</targetPackage>
+							<packageBase>ca.uhn.test.generic.multi.r5</packageBase>
+							<targetFile>TestConfigR5.java</targetFile>
 							<includeResources>
 								<includeResource>patient</includeResource>
 								<includeResource>organization</includeResource>
@@ -179,187 +378,201 @@
 							</includeResources>
 						</configuration>
 					</execution>
- 					<!-- <execution> <id>client</id> <goals> <goal>generate-client</goal> </goals> <configuration> <clientClassName>ca.uhn.hitest.HiTest</clientClassName> <serverBaseHref>http://fhir.healthintersections.com.au/open</serverBaseHref> 
-						<generateSearchForAllParams>true</generateSearchForAllParams> </configuration> </execution> -->
+				</executions>
+			</plugin>
+			<plugin>
+				<artifactId>maven-antrun-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>testTinderTask</id>
+						<phase>generate-sources</phase>
+						<goals>
+							<goal>run</goal>
+						</goals>
+						<configuration>
+							<target>
+								<taskdef name="hapi-tinder" classname="ca.uhn.fhir.tinder.ant.TinderGeneratorTask" classpathref="maven.plugin.classpath" />
+
+								<hapi-tinder templateFile="${project.basedir}/src/test/resources/templates/resource_test.vm" 
+								             generateResources="true" targetSourceDirectory="${project.build.directory}/generated-sources/tinder"
+									         targetPackage="ca.uhn.test.ant.multi" filenameSuffix="ResourceTest.java" projectHome="${project.basedir}/.." 
+									         version="dstu2" includeResources="patient,organization" />
+
+								<hapi-tinder templateFile="${project.basedir}/src/test/resources/templates/resource_test.vm" resourceSource="model"
+								             generateResources="true" targetSourceDirectory="${project.build.directory}/generated-sources/tinder"
+									         targetPackage="ca.uhn.test.ant.multi.dstu3" filenameSuffix="ResourceTest.java" projectHome="${project.basedir}/.." 
+									         version="dstu3" includeResources="patient,organization" />
+
+								<hapi-tinder templateFile="${project.basedir}/src/test/resources/templates/resource_test.vm" resourceSource="model" 
+								             generateResources="true" targetSourceDirectory="${project.build.directory}/generated-sources/tinder"
+									         targetPackage="ca.uhn.test.ant.multi.r4" filenameSuffix="ResourceTest.java" projectHome="${project.basedir}/.." 
+									         version="r4" includeResources="patient,organization" />
+
+								<hapi-tinder templateFile="${project.basedir}/src/test/resources/templates/resource_test.vm" resourceSource="model"
+								             generateResources="true" targetSourceDirectory="${project.build.directory}/generated-sources/tinder"
+									         targetPackage="ca.uhn.test.ant.multi.r5" filenameSuffix="ResourceTest.java" projectHome="${project.basedir}/.." 
+									         version="r5" includeResources="patient,organization" />
+
+								<hapi-tinder templateFile="${project.basedir}/src/test/resources/templates/resource_test_beans_java.vm" 
+								             generateResources="true" targetSourceDirectory="${project.build.directory}/generated-sources/tinder"
+									         targetFile="TestConfigDstu2.java" targetPackage="ca.uhn.test.ant.single" packageBase="ca.uhn.test.ant.multi" 
+									         projectHome="${project.basedir}/.." version="dstu2" includeResources="patient,organization" />
+									         
+								<hapi-tinder templateFile="${project.basedir}/src/test/resources/templates/resource_test_beans_java.vm"  resourceSource="model"
+								             generateResources="true" targetSourceDirectory="${project.build.directory}/generated-sources/tinder"
+									         targetFile="TestConfigDstu3.java" targetPackage="ca.uhn.test.ant.single" packageBase="ca.uhn.test.ant.multi.dstu3" 
+									         projectHome="${project.basedir}/.." version="dstu3" includeResources="patient,organization" />
+
+								<hapi-tinder templateFile="${project.basedir}/src/test/resources/templates/resource_test_beans_java.vm"  resourceSource="model"
+								             generateResources="true" targetSourceDirectory="${project.build.directory}/generated-sources/tinder"
+									         targetFile="TestConfigR4.java" targetPackage="ca.uhn.test.ant.single" packageBase="ca.uhn.test.ant.multi.r4" 
+									         projectHome="${project.basedir}/.." version="r4" includeResources="patient,organization" />
+
+								<hapi-tinder templateFile="${project.basedir}/src/test/resources/templates/resource_test_beans_java.vm"  resourceSource="model"
+								             generateResources="true" targetSourceDirectory="${project.build.directory}/generated-sources/tinder"
+									         targetFile="TestConfigR5.java" targetPackage="ca.uhn.test.ant.single" packageBase="ca.uhn.test.ant.multi.r5" 
+									         projectHome="${project.basedir}/.." version="r5" includeResources="patient,organization" />
+
+							</target>
+						</configuration>
+					</execution>
 				</executions>
 				<dependencies>
 					<dependency>
 						<groupId>ca.uhn.hapi.fhir</groupId>
 						<artifactId>hapi-fhir-base</artifactId>
-						<version>2.3-SNAPSHOT</version>
-					</dependency>
-					<dependency>
-						<groupId>ca.uhn.hapi.fhir</groupId>
-						<artifactId>hapi-fhir-structures-dstu</artifactId>
-						<version>2.3-SNAPSHOT</version>
+						<version>${project.version}</version>
 					</dependency>
 					<dependency>
 						<groupId>ca.uhn.hapi.fhir</groupId>
 						<artifactId>hapi-fhir-structures-dstu2</artifactId>
-						<version>2.3-SNAPSHOT</version>
+						<version>${project.version}</version>
 					</dependency>
-				</dependencies>
-			</plugin>
-		    <plugin>
-		        <artifactId>maven-antrun-plugin</artifactId>
-		        <executions>
-		          <execution>
-					<id>testTinderTask</id>
-					<phase>generate-sources</phase>
-					<goals>
-						<goal>run</goal>
-					</goals>
-		            <configuration>
-		              <target>
-						<taskdef name="hapi-tinder" classname="ca.uhn.fhir.tinder.ant.TinderGeneratorTask" classpathref="maven.plugin.classpath"/>
-		
-						<hapi-tinder templateFile="${project.basedir}/src/test/resources/templates/resource_test.vm"
-						             generateResources="true"
-						             targetSourceDirectory="${project.build.directory}/generated-sources/tinder"
-									 targetPackage="ca.uhn.test.ant.multi"
-						             filenameSuffix="ResourceTest.java"
-				                     projectHome="${project.basedir}/.."
-						             version="dstu2"
-							         includeResources="patient,organization"
-						/>
-		
-						<hapi-tinder templateFile="${project.basedir}/src/test/resources/templates/resource_test_beans_java.vm"
-						             generateResources="true"
-						             targetSourceDirectory="${project.build.directory}/generated-sources/tinder"
-						             targetFile="TestConfigDstu2.java"
-									 targetPackage="ca.uhn.test.ant.single"
-									 packageBase="ca.uhn.test.ant.multi"
-				                     projectHome="${project.basedir}/.."
-						             version="dstu2"
-							         includeResources="patient,organization"
-						/>
-		
-		              </target>
-		            </configuration>
-		          </execution>
-		        </executions>
-		        <dependencies>
 					<dependency>
 						<groupId>ca.uhn.hapi.fhir</groupId>
-						<artifactId>hapi-fhir-base</artifactId>
-						<version>2.3-SNAPSHOT</version>
+						<artifactId>hapi-fhir-structures-dstu2.1</artifactId>
+						<version>${project.version}</version>
+						<exclusions>
+							<exclusion>
+								<groupId>ca.uhn.hapi.fhir</groupId>
+								<artifactId>hapi-fhir-base</artifactId>
+							</exclusion>
+						</exclusions>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-structures-dstu3</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-structures-r4</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-structures-r5</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-structures-hl7org-dstu2</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-validation-resources-dstu2</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-validation-resources-dstu3</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-validation-resources-r4</artifactId>
+						<version>${project.version}</version>
+					</dependency>
+					<dependency>
+						<groupId>ca.uhn.hapi.fhir</groupId>
+						<artifactId>hapi-fhir-validation-resources-r5</artifactId>
+						<version>${project.version}</version>
 					</dependency>
 					<dependency>
 						<groupId>ca.uhn.hapi.fhir</groupId>
 						<artifactId>hapi-tinder-plugin</artifactId>
-						<version>2.3-SNAPSHOT</version>
+						<version>${project.version}</version>
 					</dependency>
-					<dependency>
-						<groupId>ca.uhn.hapi.fhir</groupId>
-						<artifactId>hapi-fhir-structures-dstu2</artifactId>
-						<version>2.3-SNAPSHOT</version>
-					</dependency>
-<!-- 
-					<dependency>
-						<groupId>org.slf4j</groupId>
-						<artifactId>slf4j-api</artifactId>
-					</dependency>
-					<dependency>
-						<groupId>commons-collections</groupId>
-						<artifactId>commons-collections</artifactId>
-						<version>3.2</version>
-					</dependency>
-					<dependency>
-						<groupId>log4j</groupId>
-						<artifactId>log4j</artifactId>
-						<version>1.2</version>
-					</dependency>
-					<dependency>
-						<groupId>commons-lang</groupId>
-						<artifactId>commons-lang</artifactId>
-						<version>2.6</version>
-					</dependency>
-					<dependency>
-						<groupId>org.apache.commons</groupId>
-						<artifactId>commons-lang3</artifactId>
-						<version>3.3</version>
-					</dependency>
-					<dependency>
-						<groupId>org.apache.maven</groupId>
-						<artifactId>maven-plugin-api</artifactId>
-						<version>3.2</version>
-					</dependency>
-					<dependency>
-						<groupId>velocity</groupId>
-						<artifactId>velocity</artifactId>
-						<version>1.7</version>
-					</dependency>
-					<dependency>
-						<groupId>velocity-tools</groupId>
-						<artifactId>velocity-tools</artifactId>
-						<version>2.0</version>
-					</dependency>
--->					
-		        </dependencies>
-		    </plugin>
+				</dependencies>
+			</plugin>
 			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-deploy-plugin</artifactId>
-				<configuration>
-					<skip>true</skip>
-				</configuration>
+				<groupId>org.codehaus.mojo</groupId>
+				<artifactId>build-helper-maven-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>add-source</id>
+						<phase>generate-sources</phase>
+						<goals>
+							<goal>add-source</goal>
+						</goals>
+						<configuration>
+							<sources>
+								<source>target/generated-sources/tinder</source>
+							</sources>
+						</configuration>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
-		<pluginManagement>
-			<plugins>
-				<!--This plugin's configuration is used to store Eclipse m2e settings only. It has no influence on the Maven build itself.-->
-				<plugin>
-					<groupId>org.eclipse.m2e</groupId>
-					<artifactId>lifecycle-mapping</artifactId>
-					<version>1.0.0</version>
-					<configuration>
-						<lifecycleMappingMetadata>
-							<pluginExecutions>
-								<pluginExecution>
-									<pluginExecutionFilter>
-										<groupId>ca.uhn.hapi.fhir</groupId>
-										<artifactId>hapi-tinder-plugin</artifactId>
-										<versionRange>[0.4-SNAPSHOT,)</versionRange>
-										<goals>
-											<goal>generate-structures</goal>
-										</goals>
-									</pluginExecutionFilter>
-									<action>
-										<ignore></ignore>
-									</action>
-								</pluginExecution>
-								<pluginExecution>
-									<pluginExecutionFilter>
-										<groupId>ca.uhn.hapi.fhir</groupId>
-										<artifactId>hapi-tinder-plugin</artifactId>
-										<versionRange>[0.4-SNAPSHOT,)</versionRange>
-										<goals>
-											<goal>generate-multi-files</goal>
-										</goals>
-									</pluginExecutionFilter>
-									<action>
-										<ignore></ignore>
-									</action>
-								</pluginExecution>
-								<pluginExecution>
-									<pluginExecutionFilter>
-										<groupId>ca.uhn.hapi.fhir</groupId>
-										<artifactId>hapi-tinder-plugin</artifactId>
-										<versionRange>[0.4-SNAPSHOT,)</versionRange>
-										<goals>
-											<goal>generate-single-file</goal>
-										</goals>
-									</pluginExecutionFilter>
-									<action>
-										<ignore></ignore>
-									</action>
-								</pluginExecution>
-							</pluginExecutions>
-						</lifecycleMappingMetadata>
-					</configuration>
-				</plugin>
-			</plugins>
-		</pluginManagement>
+		<resources>
+			<resource>
+				<directory>${basedir}/src/main/resources</directory>
+			</resource>
+			<resource>
+				<directory>${basedir}/target/generated-resources/tinder</directory>
+			</resource>
+		</resources>
 	</build>
-
+	<profiles>
+		<!-- For releases, we need to generate javadoc and sources JAR -->
+		<profile>
+			<id>release</id>
+			<activation>
+				<activeByDefault>false</activeByDefault>
+				<property>
+					<name>deployToCentral</name>
+				</property>
+			</activation>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-source-plugin</artifactId>
+						<version>3.2.1</version>
+						<executions>
+							<execution>
+								<id>attach-sources</id>
+								<goals>
+									<goal>jar-no-fork</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-javadoc-plugin</artifactId>
+						<executions>
+							<execution>
+								<id>attach-javadoc</id>
+								<goals>
+									<goal>jar</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 </project>

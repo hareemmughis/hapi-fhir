@@ -1,37 +1,55 @@
 package ca.uhn.fhir.android;
 
-import static org.junit.Assert.*;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.dstu2.composite.QuantityDt;
+import ca.uhn.fhir.model.dstu2.resource.Conformance;
+import ca.uhn.fhir.model.dstu2.resource.Observation;
+import ca.uhn.fhir.model.dstu2.resource.Patient;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import ca.uhn.fhir.rest.client.exceptions.FhirClientConnectionException;
+import ca.uhn.fhir.util.XmlUtil;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.filefilter.WildcardFileFilter;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Enumeration;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
-import javax.naming.ConfigurationException;
-
-import org.apache.commons.io.FileUtils;
-import org.apache.commons.io.filefilter.WildcardFileFilter;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.model.dstu2.composite.QuantityDt;
-import ca.uhn.fhir.model.dstu2.resource.Observation;
-import ca.uhn.fhir.model.dstu2.resource.Patient;
-import ca.uhn.fhir.rest.client.IGenericClient;
-import ca.uhn.fhir.rest.client.exceptions.FhirClientConnectionException;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class BuiltJarDstu2IT {
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BuiltJarDstu2IT.class);
 
-	@BeforeClass
+	@BeforeAll
 	public static void beforeClass() {
-		System.setProperty("javax.xml.stream.XMLInputFactory", "FOO");
-		System.setProperty("javax.xml.stream.XMLOutputFactory", "FOO");
+		// Reset OutputFactory as this test creates custom OutputFactory
+		XmlUtil.resetOutputFactoryForTest();
+		System.setProperty(javax.xml.stream.XMLInputFactory.class.getName(), "FOO");
+		System.setProperty(javax.xml.stream.XMLOutputFactory.class.getName(), "FOO");
+	}
+
+	@AfterAll
+	public static void afterClass() {
+		// Clear environment settings to avoid leaking to later tests.
+		System.clearProperty(javax.xml.stream.XMLInputFactory.class.getName());
+		System.clearProperty(javax.xml.stream.XMLOutputFactory.class.getName());
+		// Reset OutputFactory as this test creates custom OutputFactory
+		XmlUtil.resetOutputFactoryForTest();
 	}
 
 	@Test
-	public void testParserXml() throws Exception {
+	public void testParserXml() {
 
 		FhirContext ctx = FhirContext.forDstu2();
 
@@ -42,7 +60,7 @@ public class BuiltJarDstu2IT {
 			ctx.newXmlParser().encodeResourceToString(p);
 			fail();
 		} catch (ca.uhn.fhir.context.ConfigurationException e) {
-			assertEquals("Unable to initialize StAX - XML processing is disabled",e.getMessage());
+			assertEquals(Msg.code(1754) + "Unable to initialize StAX - XML processing is disabled", e.getMessage());
 		}
 	}
 
@@ -74,11 +92,12 @@ public class BuiltJarDstu2IT {
 	 * android uses) and see if this passes
 	 */
 	@SuppressWarnings("deprecation")
+	@Test
 	public void testClient() {
 		FhirContext ctx = FhirContext.forDstu2();
 		try {
 			IGenericClient client = ctx.newRestfulGenericClient("http://127.0.0.1:44442/SomeBase");
-			client.conformance();
+			client.capabilities().ofType(Conformance.class).execute();
 		} catch (FhirClientConnectionException e) {
 			// this is good
 		}

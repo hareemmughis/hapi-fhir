@@ -1,0 +1,213 @@
+/*-
+ * #%L
+ * HAPI FHIR Storage api
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.dao.tx;
+
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.api.server.storage.TransactionDetails;
+import ca.uhn.fhir.util.ICallable;
+import com.google.common.annotations.Beta;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionOperations;
+
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.stream.Stream;
+
+/**
+ * This class is used to execute code within the context of a database transaction,
+ * just like Spring's {@link org.springframework.transaction.support.TransactionTemplate}
+ * but with more functionality. It can auto-execute code upon rollback, it translates
+ * specific exceptions, and it stores transaction context in a ThreadLocal.
+ */
+public interface IHapiTransactionService {
+
+	/**
+	 * Fluent builder for creating a transactional callback
+	 * <p>
+	 * Method chain must end with a call to {@link IExecutionBuilder#execute(Runnable)} or one of the other
+	 * overloads of <code>task(...)</code>
+	 * </p>
+	 */
+	IExecutionBuilder withRequest(@Nullable RequestDetails theRequestDetails);
+
+	/**
+	 * Fluent builder for internal system requests with no external
+	 * requestdetails associated
+	 */
+	IExecutionBuilder withSystemRequest();
+
+	/**
+	 * Fluent builder for internal system requests with no external
+	 * {@link RequestDetails} associated and a pre-specified partition ID.
+	 * This method is sugar for
+	 * <pre>
+	 *    withSystemRequest()
+	 * 			.withRequestPartitionId(thePartitionId);
+	 * </pre>
+	 *
+	 * @since 6.6.0
+	 */
+	default IExecutionBuilder withSystemRequestOnPartition(RequestPartitionId theRequestPartitionId) {
+		return withSystemRequest().withRequestPartitionId(theRequestPartitionId);
+	}
+
+	/**
+	 * Convenience for transactions working with non-partitioned entities, or with whichever partition is
+	 * configured as the default. Concrete implementations should override to route through the configured
+	 * default partition ID (see
+	 * {@link ca.uhn.fhir.interceptor.model.IDefaultPartitionSettings#getDefaultRequestPartitionId()}). The
+	 * interface-level default falls back to a {@code null} partition ID, matching the historical behavior
+	 * when no settings instance is reachable.
+	 */
+	default IExecutionBuilder withSystemRequestOnDefaultPartition() {
+		return withSystemRequestOnPartition(RequestPartitionId.fromPartitionId(null));
+	}
+
+	/**
+	 * @deprecated It is highly recommended to use {@link #withRequest(RequestDetails)} instead of this method, for increased visibility.
+	 */
+	@Deprecated(since = "6.10")
+	<T> T withRequest(
+			@Nullable RequestDetails theRequestDetails,
+			@Nullable TransactionDetails theTransactionDetails,
+			@Nonnull Propagation thePropagation,
+			@Nonnull Isolation theIsolation,
+			@Nonnull ICallable<T> theCallback);
+
+	/**
+	 * Can work scoped to {@code theCandidatePartitionId} execute inside a transaction scoped to
+	 * {@code theTransactionPartitionId}?
+	 * <p>
+	 * This is an experimental API, subject to change in a future release.
+	 * </p>
+	 * <p>
+	 * For two concrete partitions the relation is symmetric. It is directional when all partitions are
+	 * involved: a transaction opened for all partitions with no explicit partition id list is
+	 * partition-unscoped and can host work for any partition, while all-partition work cannot execute
+	 * inside a transaction scoped to a single partition. All-partitions with an explicit id list (e.g.
+	 * all partitions on a given shard) is a bounded scope, not an unscoped host.
+	 * </p>
+	 *
+	 * @since 7.4.0
+	 */
+	@Beta
+	default boolean isCompatiblePartition(
+			RequestPartitionId theTransactionPartitionId, RequestPartitionId theCandidatePartitionId) {
+		return true;
+	}
+
+	/**
+	 * Returns <code>true</code> if the partition contains multiple IDs which
+	 * are not compatible with each other, per {@link #isCompatiblePartition(RequestPartitionId, RequestPartitionId)}.
+	 */
+	@Beta
+	default boolean containsIncompatiblePartitions(RequestPartitionId theRequestPartitionId) {
+		return false;
+	}
+
+	@Beta
+	default boolean isRequiresNewTransactionWhenChangingPartitions() {
+		return false;
+	}
+
+	interface IExecutionBuilder extends TransactionOperations {
+
+		IExecutionBuilder withIsolation(Isolation theIsolation);
+
+		IExecutionBuilder withTransactionDetails(TransactionDetails theTransactionDetails);
+
+		IExecutionBuilder withPropagation(Propagation thePropagation);
+
+		IExecutionBuilder withRequestPartitionId(RequestPartitionId theRequestPartitionId);
+
+		/**
+		 * Sets a fixed maximum number of retries to attempt in the case that a
+		 * retriable error occurs during execution. Retriable errors are things like
+		 * constraint errors and optimistic locking failures, where it is assumed that
+		 * a subsequent retry could realistically succeed.
+		 *
+		 * @since 8.14.0
+		 */
+		IExecutionBuilder withMaxRetries(int theMaxRetries);
+
+		/**
+		 * Mark the transaction as read-only.
+		 */
+		IExecutionBuilder readOnly();
+
+		/**
+		 * Mark the transaction as read-only, if {@literal theReadOnly} is true.
+		 *
+		 * @since 8.6.0
+		 */
+		default IExecutionBuilder readOnly(boolean theReadOnly) {
+			if (theReadOnly) {
+				return readOnly();
+			} else {
+				return this;
+			}
+		}
+
+		/**
+		 * @deprecated Use {@link TransactionDetails#addRollbackUndoAction(Runnable)} instead
+		 */
+		@Deprecated(since = "8.6", forRemoval = true)
+		IExecutionBuilder onRollback(Runnable theOnRollback);
+
+		void execute(Runnable theTask);
+
+		<T> T execute(Callable<T> theTask);
+
+		<T> T execute(@Nonnull TransactionCallback<T> callback);
+
+		/**
+		 * Read query path.
+		 */
+		<T> T read(IExecutionCallable<T> theCallback);
+
+		/**
+		 * Search for open Stream.
+		 * The Stream may not be readable outside an outermost transaction.
+		 */
+		<T> Stream<T> search(IExecutionCallable<Stream<T>> theCallback);
+
+		/**
+		 * Search for concrete List.
+		 */
+		<T> List<T> searchList(IExecutionCallable<List<T>> theCallback);
+
+		/**
+		 * Execute a partition-specific action with no return result
+		 *
+		 * @since 8.10.0
+		 */
+		void executeWithoutResult(IExecutionCallable<Void> theCallback);
+	}
+
+	interface IExecutionCallable<T> {
+
+		T call(RequestPartitionId theRequestPartition);
+	}
+}

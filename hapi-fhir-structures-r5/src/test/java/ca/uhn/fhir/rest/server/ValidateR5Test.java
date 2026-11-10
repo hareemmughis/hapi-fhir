@@ -1,0 +1,259 @@
+package ca.uhn.fhir.rest.server;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.annotation.ResourceParam;
+import ca.uhn.fhir.rest.annotation.Validate;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.api.MethodOutcome;
+import ca.uhn.fhir.rest.api.ValidationModeEnum;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.r5.model.CodeType;
+import org.hl7.fhir.r5.model.IdType;
+import org.hl7.fhir.r5.model.OperationOutcome;
+import org.hl7.fhir.r5.model.Organization;
+import org.hl7.fhir.r5.model.Parameters;
+import org.hl7.fhir.r5.model.Patient;
+import org.hl7.fhir.r5.model.Resource;
+import org.hl7.fhir.r5.model.StringType;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class ValidateR5Test {
+	private static final FhirContext ourCtx = FhirContext.forR5Cached();
+
+	@RegisterExtension
+	private static final RestfulServerExtension ourServer = new RestfulServerExtension(ourCtx)
+		.setDefaultResponseEncoding(EncodingEnum.XML)
+		.registerProvider(new PatientProvider())
+		.registerProvider(new OrganizationProvider())
+		.withPagingProvider(new FifoMemoryPagingProvider(100))
+		.setDefaultPrettyPrint(false);
+
+
+	public static Patient ourLastPatient;
+	private static EncodingEnum ourLastEncoding;
+	private static IdType ourLastId;
+	private static ValidationModeEnum ourLastMode;
+	private static String ourLastProfile;
+	private static String ourLastResourceBody;
+	private static OperationOutcome ourOutcomeToReturn;
+
+	@AfterAll
+	public static void afterClassClearContext() throws Exception {
+		TestUtil.randomizeLocaleAndTimezone();
+	}
+
+	@BeforeEach()
+	public void before() {
+		ourLastResourceBody = null;
+		ourLastEncoding = null;
+		ourOutcomeToReturn = null;
+		ourLastMode = null;
+		ourLastProfile = null;
+	}
+
+	@Test
+	public void testValidate() {
+
+		Patient patient = new Patient();
+		patient.addIdentifier().setValue("001");
+		patient.addIdentifier().setValue("002");
+
+		Parameters params = new Parameters();
+		params.addParameter().setName("resource").setResource(patient);
+
+		ourServer.fhirRequest("/Patient/$validate")
+				.post(ourCtx.newXmlParser().encodeResourceToString(params), Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.assertBodyContains("<OperationOutcome");
+	}
+
+	@Test
+	public void testValidateBlankMode() {
+
+		Patient patient = new Patient();
+		patient.addIdentifier().setValue("001");
+		patient.addIdentifier().setValue("002");
+
+		Parameters params = new Parameters();
+		params.addParameter().setName("resource").setResource(patient);
+		params.addParameter().setName("mode").setValue(new CodeType(" "));
+
+		ourServer.fhirRequest("/Patient/$validate")
+			.post(ourCtx.newXmlParser().encodeResourceToString(params), Constants.CT_FHIR_XML)
+			.assertStatus(200);
+	}
+
+	@Test
+	public void testValidateInvalidMode() {
+
+		Patient patient = new Patient();
+		patient.addIdentifier().setValue("001");
+		patient.addIdentifier().setValue("002");
+
+		Parameters params = new Parameters();
+		params.addParameter().setName("resource").setResource(patient);
+		params.addParameter().setName("mode").setValue(new CodeType("AAA"));
+
+		ourServer.fhirRequest("/Patient/$validate")
+				.post(ourCtx.newXmlParser().encodeResourceToString(params), Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertBodyContains("Invalid mode value: &quot;AAA&quot;");
+	}
+
+	@Test
+	public void testValidateMissingResource() {
+
+		Patient patient = new Patient();
+		patient.addIdentifier().setValue("001");
+		patient.addIdentifier().setValue("002");
+
+		Parameters params = new Parameters();
+		params.addParameter().setName("mode").setValue(new CodeType("create"));
+
+		ourServer.fhirRequest("/Patient/$validate")
+			.post(ourCtx.newXmlParser().encodeResourceToString(params), Constants.CT_FHIR_XML)
+			.assertStatus(200);
+
+		assertThat(ourLastPatient).isNull();
+	}
+
+	@Test
+	public void testValidateWithGet() {
+		ourOutcomeToReturn = new OperationOutcome();
+		ourOutcomeToReturn.addIssue().setDiagnostics("FOOBAR");
+
+		ourServer.fhirRequest("/Patient/123/$validate").get()
+				.assertStatus(200)
+				.assertBodyContains("<OperationOutcome", "FOOBAR");
+
+		assertThat(ourLastPatient).isNull();
+		assertThat(ourLastId.getResourceType()).isEqualTo("Patient");
+		assertThat(ourLastId.getIdPart()).isEqualTo("123");
+	}
+
+	@Test
+	public void testValidateWithNoParsed() {
+
+		Organization org = new Organization();
+		org.addIdentifier().setValue("001");
+		org.addIdentifier().setValue("002");
+
+		Parameters params = new Parameters();
+		params.addParameter().setName("resource").setResource(org);
+
+		ourServer.fhirRequest("/Organization/$validate")
+			.post(ourCtx.newJsonParser().encodeResourceToString(params), Constants.CT_FHIR_JSON)
+			.assertStatus(200);
+
+		assertThat(ourLastResourceBody).contains("\"resourceType\":\"Organization\"", "\"identifier\"", "\"value\":\"001");
+		assertThat(ourLastEncoding).isEqualTo(EncodingEnum.JSON);
+	}
+
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false})
+	public void testValidateWithOptions(boolean theUseParametersRequest) {
+
+		Patient patient = new Patient();
+		patient.addIdentifier().setValue("001");
+		patient.addIdentifier().setValue("002");
+
+		String path = "/Patient/$validate";
+		Resource body = patient;
+		if (theUseParametersRequest) {
+			Parameters params = new Parameters();
+			params.addParameter().setName("resource").setResource(patient);
+			params.addParameter().setName("profile").setValue(new StringType("http://foo"));
+			params.addParameter().setName("mode").setValue(new StringType(ValidationModeEnum.CREATE.getCode()));
+			body = params;
+		} else {
+			path += "?profile=http://foo&mode=create";
+		}
+
+		ourServer.fhirRequest(path).post(body)
+				.assertStatus(200)
+				.assertBodyContains("\"resourceType\":\"OperationOutcome\"");
+
+		assertThat(ourLastPatient.getIdentifier().get(0).getValue()).isEqualTo("001");
+		assertThat(ourLastProfile).isEqualTo("http://foo");
+		assertThat(ourLastMode).isEqualTo(ValidationModeEnum.CREATE);
+	}
+
+	@Test
+	public void testValidateWithResults() {
+
+		ourOutcomeToReturn = new OperationOutcome();
+		ourOutcomeToReturn.addIssue().setDiagnostics("FOOBAR");
+
+		Patient patient = new Patient();
+		patient.addIdentifier().setValue("001");
+		patient.addIdentifier().setValue("002");
+
+		Parameters params = new Parameters();
+		params.addParameter().setName("resource").setResource(patient);
+
+		ourServer.fhirRequest("/Patient/$validate")
+				.post(ourCtx.newXmlParser().encodeResourceToString(params), Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.assertBodyContains("<OperationOutcome", "FOOBAR");
+	}
+
+	public static class OrganizationProvider implements IResourceProvider {
+
+		@Override
+		public Class<Organization> getResourceType() {
+			return Organization.class;
+		}
+
+		@Validate()
+		public MethodOutcome validate(@ResourceParam String theResourceBody, @ResourceParam EncodingEnum theEncoding) {
+			ourLastResourceBody = theResourceBody;
+			ourLastEncoding = theEncoding;
+
+			return new MethodOutcome(new IdType("001"));
+		}
+
+	}
+
+	public static class PatientProvider implements IResourceProvider {
+
+		@Override
+		public Class<Patient> getResourceType() {
+			return Patient.class;
+		}
+
+		@Validate()
+		public MethodOutcome validatePatient(@ResourceParam Patient thePatient, @IdParam(optional = true) IdType theId, @Validate.Mode ValidationModeEnum theMode, @Validate.Profile String theProfile) {
+
+			ourLastPatient = thePatient;
+			ourLastId = theId;
+			IdType id;
+			if (thePatient != null) {
+				id = new IdType(thePatient.getIdentifier().get(0).getValue());
+				if (!thePatient.getIdElement().isEmpty()) {
+					id = thePatient.getIdElement();
+				}
+			} else {
+				id = new IdType("1");
+			}
+			ourLastMode = theMode;
+			ourLastProfile = theProfile;
+
+			MethodOutcome outcome = new MethodOutcome(id.withVersion("002"));
+			outcome.setOperationOutcome(ourOutcomeToReturn);
+			return outcome;
+		}
+
+	}
+
+}

@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.param;
-
-/*
+/*-
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,14 +17,21 @@ package ca.uhn.fhir.rest.param;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.param;
 
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.parser.DataFormatException;
 
-import ca.uhn.fhir.model.dstu.valueset.QuantityCompararatorEnum;
-import ca.uhn.fhir.util.CoverageIgnore;
+import java.util.Objects;
 
-@SuppressWarnings("deprecation")
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
 public abstract class BaseParamWithPrefix<T extends BaseParam> extends BaseParam {
+
+	private static final long serialVersionUID = 1L;
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BaseParamWithPrefix.class);
+
+	public static final String MSG_PREFIX_INVALID_FORMAT = "Invalid date/time/quantity format: ";
 
 	private ParamPrefixEnum myPrefix;
 
@@ -44,32 +49,58 @@ public abstract class BaseParamWithPrefix<T extends BaseParam> extends BaseParam
 	String extractPrefixAndReturnRest(String theString) {
 		int offset = 0;
 		while (true) {
-			if (theString.length() == offset || Character.isDigit(theString.charAt(offset))) {
+			if (theString.length() == offset) {
 				break;
+			} else {
+				char nextChar = theString.charAt(offset);
+				if (nextChar == '-' || nextChar == '%' || Character.isDigit(nextChar)) {
+					break;
+				}
 			}
 			offset++;
 		}
 
+		if (offset > 0 && theString.length() == offset) {
+			throw new DataFormatException(Msg.code(1940) + MSG_PREFIX_INVALID_FORMAT + "\"" + theString + "\"");
+		}
+
 		String prefix = theString.substring(0, offset);
-		myPrefix = ParamPrefixEnum.forValue(prefix);
-		if (myPrefix == null) {
-			myPrefix = ParamPrefixEnum.forDstu1Value(prefix);
+		if (!isBlank(prefix)) {
+
+			myPrefix = ParamPrefixEnum.forValue(prefix);
+
+			if (myPrefix == null) {
+				// prefix doesn't match standard values.  Try legacy values
+				switch (prefix) {
+					case ">=":
+						myPrefix = ParamPrefixEnum.GREATERTHAN_OR_EQUALS;
+						break;
+					case ">":
+						myPrefix = ParamPrefixEnum.GREATERTHAN;
+						break;
+					case "<=":
+						myPrefix = ParamPrefixEnum.LESSTHAN_OR_EQUALS;
+						break;
+					case "<":
+						myPrefix = ParamPrefixEnum.LESSTHAN;
+						break;
+					case "~":
+						myPrefix = ParamPrefixEnum.APPROXIMATE;
+						break;
+					case "=":
+						myPrefix = ParamPrefixEnum.EQUAL;
+						break;
+					default:
+						throw new DataFormatException(Msg.code(1941) + "Invalid prefix: \"" + prefix + "\"");
+				}
+				ourLog.warn(
+						"Date parameter has legacy prefix '{}' which has been removed from FHIR. This should be replaced with '{}'",
+						prefix,
+						myPrefix.getValue());
+			}
 		}
 
 		return theString.substring(offset);
-	}
-
-	/**
-	 * @deprecated Use {@link #getPrefix() instead}
-	 */
-	@Deprecated
-	public QuantityCompararatorEnum getComparator() {
-		ParamPrefixEnum prefix = getPrefix();
-		if (prefix == null) {
-			return null;
-		}
-		
-		return QuantityCompararatorEnum.forCode(prefix.getDstu1Value());
 	}
 
 	/**
@@ -77,36 +108,6 @@ public abstract class BaseParamWithPrefix<T extends BaseParam> extends BaseParam
 	 */
 	public ParamPrefixEnum getPrefix() {
 		return myPrefix;
-	}
-
-	/**
-	 * @deprecated Use {@link #setPrefix(ParamPrefixEnum)} instead
-	 */
-	@SuppressWarnings("unchecked")
-	@CoverageIgnore
-	@Deprecated
-	public T setComparator(QuantityCompararatorEnum theComparator) {
-		if (theComparator != null) {
-			myPrefix = ParamPrefixEnum.forDstu1Value(theComparator.getCode());
-		} else {
-			myPrefix = null;
-		}
-		return (T) this;
-	}
-
-	/**
-	 * @deprecated Use {@link #setPrefix(ParamPrefixEnum)} instead
-	 */
-	@SuppressWarnings("unchecked")
-	@CoverageIgnore
-	@Deprecated
-	public T setComparator(String theComparator) {
-		if (isNotBlank(theComparator)) {
-			myPrefix = ParamPrefixEnum.forDstu1Value(theComparator);
-		} else {
-			myPrefix = null;
-		}
-		return (T) this;
 	}
 
 	/**
@@ -118,4 +119,16 @@ public abstract class BaseParamWithPrefix<T extends BaseParam> extends BaseParam
 		return (T) this;
 	}
 
+	@Override
+	public boolean equals(Object theO) {
+		if (!(theO instanceof BaseParamWithPrefix<?> that)) {
+			return false;
+		}
+		return super.equals(theO) && this.myPrefix == that.myPrefix;
+	}
+
+	@Override
+	public int hashCode() {
+		return Objects.hash(this.myPrefix, super.hashCode());
+	}
 }

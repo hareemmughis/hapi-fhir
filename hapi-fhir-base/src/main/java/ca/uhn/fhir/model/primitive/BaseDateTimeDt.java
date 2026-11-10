@@ -1,17 +1,15 @@
-package ca.uhn.fhir.model.primitive;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,30 +17,37 @@ package ca.uhn.fhir.model.primitive;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.model.primitive;
 
-import static org.apache.commons.lang3.StringUtils.isBlank;
-
-import java.util.Calendar;
-import java.util.Date;
-import java.util.GregorianCalendar;
-import java.util.TimeZone;
-
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.api.BasePrimitive;
+import ca.uhn.fhir.model.api.TemporalPrecisionEnum;
+import ca.uhn.fhir.parser.DataFormatException;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.time.DateUtils;
 import org.apache.commons.lang3.time.FastDateFormat;
 
-import ca.uhn.fhir.model.api.BasePrimitive;
-import ca.uhn.fhir.model.api.TemporalPrecisionEnum;
-import ca.uhn.fhir.parser.DataFormatException;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.GregorianCalendar;
+import java.util.Map;
+import java.util.TimeZone;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
 
 public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 	static final long NANOS_PER_MILLIS = 1000000L;
 	static final long NANOS_PER_SECOND = 1000000000L;
 
-	private static final FastDateFormat ourHumanDateFormat = FastDateFormat.getDateInstance(FastDateFormat.MEDIUM);
-	private static final FastDateFormat ourHumanDateTimeFormat = FastDateFormat.getDateTimeInstance(FastDateFormat.MEDIUM, FastDateFormat.MEDIUM);
+	private static final Map<String, TimeZone> timezoneCache = new ConcurrentHashMap<>();
 
+	private static final FastDateFormat ourHumanDateFormat = FastDateFormat.getDateInstance(FastDateFormat.MEDIUM);
+	private static final FastDateFormat ourHumanDateTimeFormat =
+			FastDateFormat.getDateTimeInstance(FastDateFormat.MEDIUM, FastDateFormat.MEDIUM);
+	public static final String NOW_DATE_CONSTANT = "%now";
+	public static final String TODAY_DATE_CONSTANT = "%today";
 	private String myFractionalSeconds;
 	private TemporalPrecisionEnum myPrecision = null;
 	private TimeZone myTimeZone;
@@ -57,14 +62,15 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @throws DataFormatException
 	 *            If the specified precision is not allowed for this type
 	 */
 	public BaseDateTimeDt(Date theDate, TemporalPrecisionEnum thePrecision) {
 		setValue(theDate, thePrecision);
 		if (isPrecisionAllowed(thePrecision) == false) {
-			throw new DataFormatException("Invalid date/time string (datatype " + getClass().getSimpleName() + " does not support " + thePrecision + " precision): " + theDate);
+			throw new DataFormatException(Msg.code(1880) + "Invalid date/time string (datatype "
+					+ getClass().getSimpleName() + " does not support " + thePrecision + " precision): " + theDate);
 		}
 	}
 
@@ -78,15 +84,13 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @throws DataFormatException
 	 *            If the specified precision is not allowed for this type
 	 */
 	public BaseDateTimeDt(String theString) {
 		setValueAsString(theString);
-		if (isPrecisionAllowed(getPrecision()) == false) {
-			throw new DataFormatException("Invalid date/time string (datatype " + getClass().getSimpleName() + " does not support " + getPrecision() + " precision): " + theString);
-		}
+		validatePrecisionAndThrowDataFormatException(theString, getPrecision());
 	}
 
 	private void clearTimeZone() {
@@ -98,65 +102,71 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 	protected String encode(Date theValue) {
 		if (theValue == null) {
 			return null;
+		}
+		GregorianCalendar cal;
+		if (myTimeZoneZulu) {
+			cal = new GregorianCalendar(getTimeZone("GMT"));
+		} else if (myTimeZone != null) {
+			cal = new GregorianCalendar(myTimeZone);
 		} else {
-			GregorianCalendar cal;
-			if (myTimeZoneZulu) {
-				cal = new GregorianCalendar(TimeZone.getTimeZone("GMT"));
-			} else if (myTimeZone != null) {
-				cal = new GregorianCalendar(myTimeZone);
-			} else {
-				cal = new GregorianCalendar();
-			}
-			cal.setTime(theValue);
+			cal = new GregorianCalendar();
+		}
+		cal.setTime(theValue);
 
-			StringBuilder b = new StringBuilder();
-			leftPadWithZeros(cal.get(Calendar.YEAR), 4, b);
-			if (myPrecision.ordinal() > TemporalPrecisionEnum.YEAR.ordinal()) {
+		StringBuilder b = new StringBuilder();
+		leftPadWithZeros(cal.get(Calendar.YEAR), 4, b);
+		if (myPrecision.ordinal() > TemporalPrecisionEnum.YEAR.ordinal()) {
+			b.append('-');
+			leftPadWithZeros(cal.get(Calendar.MONTH) + 1, 2, b);
+			if (myPrecision.ordinal() > TemporalPrecisionEnum.MONTH.ordinal()) {
 				b.append('-');
-				leftPadWithZeros(cal.get(Calendar.MONTH) + 1, 2, b);
-				if (myPrecision.ordinal() > TemporalPrecisionEnum.MONTH.ordinal()) {
-					b.append('-');
-					leftPadWithZeros(cal.get(Calendar.DATE), 2, b);
-					if (myPrecision.ordinal() > TemporalPrecisionEnum.DAY.ordinal()) {
-						b.append('T');
-						leftPadWithZeros(cal.get(Calendar.HOUR_OF_DAY), 2, b);
+				leftPadWithZeros(cal.get(Calendar.DATE), 2, b);
+				if (myPrecision.ordinal() > TemporalPrecisionEnum.DAY.ordinal()) {
+					b.append('T');
+					leftPadWithZeros(cal.get(Calendar.HOUR_OF_DAY), 2, b);
+					b.append(':');
+					leftPadWithZeros(cal.get(Calendar.MINUTE), 2, b);
+					if (myPrecision.ordinal() > TemporalPrecisionEnum.MINUTE.ordinal()) {
 						b.append(':');
-						leftPadWithZeros(cal.get(Calendar.MINUTE), 2, b);
-						if (myPrecision.ordinal() > TemporalPrecisionEnum.MINUTE.ordinal()) {
-							b.append(':');
-							leftPadWithZeros(cal.get(Calendar.SECOND), 2, b);
-							if (myPrecision.ordinal() > TemporalPrecisionEnum.SECOND.ordinal()) {
-								b.append('.');
-								b.append(myFractionalSeconds);
-								for (int i = myFractionalSeconds.length(); i < 3; i++) {
-									b.append('0');
-								}
+						leftPadWithZeros(cal.get(Calendar.SECOND), 2, b);
+						if (myPrecision.ordinal() > TemporalPrecisionEnum.SECOND.ordinal()) {
+							b.append('.');
+							b.append(myFractionalSeconds);
+							for (int i = myFractionalSeconds.length(); i < 3; i++) {
+								b.append('0');
 							}
 						}
+					}
 
-						if (myTimeZoneZulu) {
-							b.append('Z');
-						} else if (myTimeZone != null) {
-							int offset = myTimeZone.getOffset(theValue.getTime());
-							if (offset >= 0) {
-								b.append('+');
-							} else {
-								b.append('-');
-								offset = Math.abs(offset);
-							}
-
-							int hoursOffset = (int) (offset / DateUtils.MILLIS_PER_HOUR);
-							leftPadWithZeros(hoursOffset, 2, b);
-							b.append(':');
-							int minutesOffset = (int) (offset % DateUtils.MILLIS_PER_HOUR);
-							minutesOffset = (int) (minutesOffset / DateUtils.MILLIS_PER_MINUTE);
-							leftPadWithZeros(minutesOffset, 2, b);
+					if (myTimeZoneZulu) {
+						b.append('Z');
+					} else if (myTimeZone != null) {
+						int offset = myTimeZone.getOffset(theValue.getTime());
+						if (offset >= 0) {
+							b.append('+');
+						} else {
+							b.append('-');
+							offset = Math.abs(offset);
 						}
+
+						int hoursOffset = (int) (offset / DateUtils.MILLIS_PER_HOUR);
+						leftPadWithZeros(hoursOffset, 2, b);
+						b.append(':');
+						int minutesOffset = (int) (offset % DateUtils.MILLIS_PER_HOUR);
+						minutesOffset = (int) (minutesOffset / DateUtils.MILLIS_PER_MINUTE);
+						leftPadWithZeros(minutesOffset, 2, b);
 					}
 				}
 			}
-			return b.toString();
 		}
+		return b.toString();
+	}
+
+	/**
+	 * Returns the month with 1-index, e.g. 1=the first day of the month
+	 */
+	public Integer getDay() {
+		return getFieldValue(Calendar.DAY_OF_MONTH);
 	}
 
 	/**
@@ -164,23 +174,103 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 	 */
 	protected abstract TemporalPrecisionEnum getDefaultPrecisionForDatatype();
 
+	private Integer getFieldValue(int theField) {
+		if (getValue() == null) {
+			return null;
+		}
+		Calendar cal = getValueAsCalendar();
+		return cal.get(theField);
+	}
+
+	/**
+	 * Returns the hour of the day in a 24h clock, e.g. 13=1pm
+	 */
+	public Integer getHour() {
+		return getFieldValue(Calendar.HOUR_OF_DAY);
+	}
+
+	/**
+	 * Returns the milliseconds within the current second.
+	 * <p>
+	 * Note that this method returns the
+	 * same value as {@link #getNanos()} but with less precision.
+	 * </p>
+	 */
+	public Integer getMillis() {
+		return getFieldValue(Calendar.MILLISECOND);
+	}
+
+	/**
+	 * Returns the minute of the hour in the range 0-59
+	 */
+	public Integer getMinute() {
+		return getFieldValue(Calendar.MINUTE);
+	}
+
+	/**
+	 * Returns the month with 0-index, e.g. 0=January
+	 */
+	public Integer getMonth() {
+		return getFieldValue(Calendar.MONTH);
+	}
+
+	/**
+	 * Returns the nanoseconds within the current second
+	 * <p>
+	 * Note that this method returns the
+	 * same value as {@link #getMillis()} but with more precision.
+	 * </p>
+	 */
+	public Long getNanos() {
+		if (isBlank(myFractionalSeconds)) {
+			return null;
+		}
+		String retVal = StringUtils.rightPad(myFractionalSeconds, 9, '0');
+		retVal = retVal.substring(0, 9);
+		return Long.parseLong(retVal);
+	}
+
+	/**
+	 * Find the offset for a timestamp.  If it exists.  An offset may start either with '-', 'Z', '+', or ' '.
+	 * <p/>
+	 * There is a special case where ' ' is considered a valid offset initial character and this is because when
+	 * handling URLs with timestamps, '+' is considered an escape character for ' ', so '+' may have been replaced with
+	 * ' ' by the time execution reaches this method.  This is why this method handles both characters.
+	 *
+	 * @param theValueString A timestamp containing either a timezone offset or nothing.
+	 * @return The index of the offset portion of the timestamp, if applicable, otherwise -1
+	 */
 	private int getOffsetIndex(String theValueString) {
 		int plusIndex = theValueString.indexOf('+', 16);
+		int spaceIndex = theValueString.indexOf(' ', 16);
 		int minusIndex = theValueString.indexOf('-', 16);
 		int zIndex = theValueString.indexOf('Z', 16);
-		int retVal = Math.max(Math.max(plusIndex, minusIndex), zIndex);
-		if (retVal == -1) {
+		int maxIndexPlusAndMinus = Math.max(Math.max(plusIndex, minusIndex), zIndex);
+		int maxIndexSpaceAndMinus = Math.max(Math.max(spaceIndex, minusIndex), zIndex);
+		if (maxIndexPlusAndMinus == -1 && maxIndexSpaceAndMinus == -1) {
 			return -1;
 		}
-		if ((retVal - 2) != (plusIndex + minusIndex + zIndex)) {
-			throwBadDateFormat(theValueString);
+		int retVal = 0;
+		if (maxIndexPlusAndMinus != -1) {
+			if ((maxIndexPlusAndMinus - 2) != (plusIndex + minusIndex + zIndex)) {
+				throwBadDateFormat(theValueString);
+			}
+			retVal = maxIndexPlusAndMinus;
 		}
+
+		if (maxIndexSpaceAndMinus != -1) {
+			if ((maxIndexSpaceAndMinus - 2) != (spaceIndex + minusIndex + zIndex)) {
+				throwBadDateFormat(theValueString);
+			}
+			retVal = maxIndexSpaceAndMinus;
+		}
+
 		return retVal;
 	}
 
 	/**
 	 * Gets the precision for this datatype (using the default for the given type if not set)
-	 * 
+	 *
 	 * @see #setPrecision(TemporalPrecisionEnum)
 	 */
 	public TemporalPrecisionEnum getPrecision() {
@@ -191,12 +281,19 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 	}
 
 	/**
+	 * Returns the second of the minute in the range 0-59
+	 */
+	public Integer getSecond() {
+		return getFieldValue(Calendar.SECOND);
+	}
+
+	/**
 	 * Returns the TimeZone associated with this dateTime's value. May return <code>null</code> if no timezone was
 	 * supplied.
 	 */
 	public TimeZone getTimeZone() {
 		if (myTimeZoneZulu) {
-			return TimeZone.getTimeZone("Z");
+			return getTimeZone("GMT");
 		}
 		return myTimeZone;
 	}
@@ -219,9 +316,16 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 	}
 
 	/**
+	 * Returns the year, e.g. 2015
+	 */
+	public Integer getYear() {
+		return getFieldValue(Calendar.YEAR);
+	}
+
+	/**
 	 * To be implemented by subclasses to indicate whether the given precision is allowed by this type
 	 */
-	abstract boolean isPrecisionAllowed(TemporalPrecisionEnum thePrecision);
+	protected abstract boolean isPrecisionAllowed(TemporalPrecisionEnum thePrecision);
 
 	/**
 	 * Returns true if the timezone is set to GMT-0:00 (Z)
@@ -232,7 +336,7 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 
 	/**
 	 * Returns <code>true</code> if this object represents a date that is today's date
-	 * 
+	 *
 	 * @throws NullPointerException
 	 *            if {@link #getValue()} returns <code>null</code>
 	 */
@@ -286,12 +390,12 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 				cal.set(Calendar.DAY_OF_MONTH, parseInt(value, value.substring(8, 10), 1, actualMaximum));
 				precision = TemporalPrecisionEnum.DAY;
 				if (length > 10) {
-					validateLengthIsAtLeast(value, 17);
+					validateLengthIsAtLeast(value, 16);
 					validateCharAtIndexIs(value, 10, 'T'); // yyyy-mm-ddThh:mm:ss
 					int offsetIdx = getOffsetIndex(value);
 					String time;
 					if (offsetIdx == -1) {
-						//throwBadDateFormat(theValue);
+						// throwBadDateFormat(theValue);
 						// No offset - should this be an error?
 						time = value.substring(11);
 					} else {
@@ -353,9 +457,12 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 			myFractionalSeconds = "";
 		}
 
+		if (precision == TemporalPrecisionEnum.MINUTE) {
+			validatePrecisionAndThrowDataFormatException(value, precision);
+		}
+
 		setPrecision(precision);
 		return cal.getTime();
-
 	}
 
 	private int parseInt(String theValue, String theSubstring, int theLowerBound, int theUpperBound) {
@@ -374,16 +481,111 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 	}
 
 	/**
+	 * Sets the month with 1-index, e.g. 1=the first day of the month
+	 */
+	public BaseDateTimeDt setDay(int theDay) {
+		setFieldValue(Calendar.DAY_OF_MONTH, theDay, null, 0, 31);
+		return this;
+	}
+
+	private void setFieldValue(
+			int theField, int theValue, String theFractionalSeconds, int theMinimum, int theMaximum) {
+		validateValueInRange(theValue, theMinimum, theMaximum);
+		Calendar cal;
+		if (getValue() == null) {
+			cal = new GregorianCalendar(0, 0, 0);
+		} else {
+			cal = getValueAsCalendar();
+		}
+		if (theField != -1) {
+			cal.set(theField, theValue);
+		}
+		if (theFractionalSeconds != null) {
+			myFractionalSeconds = theFractionalSeconds;
+		} else if (theField == Calendar.MILLISECOND) {
+			myFractionalSeconds = StringUtils.leftPad(Integer.toString(theValue), 3, '0');
+		}
+		super.setValue(cal.getTime());
+	}
+
+	/**
+	 * Sets the hour of the day in a 24h clock, e.g. 13=1pm
+	 */
+	public BaseDateTimeDt setHour(int theHour) {
+		setFieldValue(Calendar.HOUR_OF_DAY, theHour, null, 0, 23);
+		return this;
+	}
+
+	/**
+	 * Sets the milliseconds within the current second.
+	 * <p>
+	 * Note that this method sets the
+	 * same value as {@link #setNanos(long)} but with less precision.
+	 * </p>
+	 */
+	public BaseDateTimeDt setMillis(int theMillis) {
+		setFieldValue(Calendar.MILLISECOND, theMillis, null, 0, 999);
+		return this;
+	}
+
+	/**
+	 * Sets the minute of the hour in the range 0-59
+	 */
+	public BaseDateTimeDt setMinute(int theMinute) {
+		setFieldValue(Calendar.MINUTE, theMinute, null, 0, 59);
+		return this;
+	}
+
+	/**
+	 * Sets the month with 0-index, e.g. 0=January
+	 */
+	public BaseDateTimeDt setMonth(int theMonth) {
+		setFieldValue(Calendar.MONTH, theMonth, null, 0, 11);
+		return this;
+	}
+
+	/**
+	 * Sets the nanoseconds within the current second
+	 * <p>
+	 * Note that this method sets the
+	 * same value as {@link #setMillis(int)} but with more precision.
+	 * </p>
+	 */
+	public BaseDateTimeDt setNanos(long theNanos) {
+		validateValueInRange(theNanos, 0, NANOS_PER_SECOND - 1);
+		String fractionalSeconds = StringUtils.leftPad(Long.toString(theNanos), 9, '0');
+
+		// Strip trailing 0s
+		for (int i = fractionalSeconds.length(); i > 0; i--) {
+			if (fractionalSeconds.charAt(i - 1) != '0') {
+				fractionalSeconds = fractionalSeconds.substring(0, i);
+				break;
+			}
+		}
+		int millis = (int) (theNanos / NANOS_PER_MILLIS);
+		setFieldValue(Calendar.MILLISECOND, millis, fractionalSeconds, 0, 999);
+		return this;
+	}
+
+	/**
 	 * Sets the precision for this datatype
-	 * 
+	 *
 	 * @throws DataFormatException
 	 */
 	public BaseDateTimeDt setPrecision(TemporalPrecisionEnum thePrecision) throws DataFormatException {
 		if (thePrecision == null) {
-			throw new NullPointerException("Precision may not be null");
+			throw new NullPointerException(Msg.code(1881) + "Precision may not be null");
 		}
 		myPrecision = thePrecision;
 		updateStringValue();
+		return this;
+	}
+
+	/**
+	 * Sets the second of the minute in the range 0-59
+	 */
+	public BaseDateTimeDt setSecond(int theSecond) {
+		setFieldValue(Calendar.SECOND, theSecond, null, 0, 59);
 		return this;
 	}
 
@@ -396,16 +598,22 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 			setTimeZoneZulu(true);
 		} else if (theValue.length() != 6) {
 			throwBadDateFormat(theWholeValue, "Timezone offset must be in the form \"Z\", \"-HH:mm\", or \"+HH:mm\"");
-		} else if (theValue.charAt(3) != ':' || !(theValue.charAt(0) == '+' || theValue.charAt(0) == '-')) {
+		} else if (theValue.charAt(3) != ':'
+				|| !(theValue.charAt(0) == '+' || theValue.charAt(0) == ' ' || theValue.charAt(0) == '-')) {
 			throwBadDateFormat(theWholeValue, "Timezone offset must be in the form \"Z\", \"-HH:mm\", or \"+HH:mm\"");
 		} else {
 			parseInt(theWholeValue, theValue.substring(1, 3), 0, 23);
 			parseInt(theWholeValue, theValue.substring(4, 6), 0, 59);
 			clearTimeZone();
-			setTimeZone(TimeZone.getTimeZone("GMT" + theValue));
+			final String valueToUse = theValue.startsWith(" ") ? theValue.replace(' ', '+') : theValue;
+			setTimeZone(getTimeZone("GMT" + valueToUse));
 		}
 
 		return this;
+	}
+
+	private TimeZone getTimeZone(String offset) {
+		return timezoneCache.computeIfAbsent(offset, TimeZone::getTimeZone);
 	}
 
 	public BaseDateTimeDt setTimeZone(TimeZone theTimeZone) {
@@ -435,7 +643,7 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 	 * Sets the value for this type using the given Java Date object as the time, and using the specified precision, as
 	 * well as the local timezone as determined by the local operating system. Both of
 	 * these properties may be modified in subsequent calls if neccesary.
-	 * 
+	 *
 	 * @param theValue
 	 *           The date value
 	 * @param thePrecision
@@ -463,15 +671,31 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 	@Override
 	public void setValueAsString(String theValue) throws DataFormatException {
 		clearTimeZone();
-		super.setValueAsString(theValue);
+
+		if (NOW_DATE_CONSTANT.equalsIgnoreCase(theValue)) {
+			setValue(new Date());
+		} else if (TODAY_DATE_CONSTANT.equalsIgnoreCase(theValue)) {
+			setValue(new Date(), TemporalPrecisionEnum.DAY);
+		} else {
+			super.setValueAsString(theValue);
+		}
+	}
+
+	/**
+	 * Sets the year, e.g. 2015
+	 */
+	public BaseDateTimeDt setYear(int theYear) {
+		setFieldValue(Calendar.YEAR, theYear, null, 0, 9999);
+		return this;
 	}
 
 	private void throwBadDateFormat(String theValue) {
-		throw new DataFormatException("Invalid date/time format: \"" + theValue + "\"");
+		throw new DataFormatException(Msg.code(1882) + "Invalid date/time format: \"" + theValue + "\"");
 	}
 
 	private void throwBadDateFormat(String theValue, String theMesssage) {
-		throw new DataFormatException("Invalid date/time format: \"" + theValue + "\": " + theMesssage);
+		throw new DataFormatException(
+				Msg.code(1883) + "Invalid date/time format: \"" + theValue + "\": " + theMesssage);
 	}
 
 	/**
@@ -490,39 +714,42 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 		value.setTime(getValue());
 
 		switch (getPrecision()) {
-		case YEAR:
-		case MONTH:
-		case DAY:
-			return ourHumanDateFormat.format(value);
-		case MILLI:
-		case SECOND:
-		default:
-			return ourHumanDateTimeFormat.format(value);
+			case YEAR:
+			case MONTH:
+			case DAY:
+				return ourHumanDateFormat.format(value);
+			case MILLI:
+			case SECOND:
+			default:
+				return ourHumanDateTimeFormat.format(value);
 		}
 	}
 
 	/**
 	 * Returns a human readable version of this date/time using the system local format, converted to the local timezone
 	 * if neccesary.
-	 * 
+	 *
 	 * @see #toHumanDisplay() for a method which does not convert the time to the local timezone before rendering it.
 	 */
 	public String toHumanDisplayLocalTimezone() {
 		switch (getPrecision()) {
-		case YEAR:
-		case MONTH:
-		case DAY:
-			return ourHumanDateFormat.format(getValue());
-		case MILLI:
-		case SECOND:
-		default:
-			return ourHumanDateTimeFormat.format(getValue());
+			case YEAR:
+			case MONTH:
+			case DAY:
+				return ourHumanDateFormat.format(getValue());
+			case MILLI:
+			case SECOND:
+			default:
+				return ourHumanDateTimeFormat.format(getValue());
 		}
 	}
 
 	private void validateCharAtIndexIs(String theValue, int theIndex, char theChar) {
 		if (theValue.charAt(theIndex) != theChar) {
-			throwBadDateFormat(theValue, "Expected character '" + theChar + "' at index " + theIndex + " but found " + theValue.charAt(theIndex));
+			throwBadDateFormat(
+					theValue,
+					"Expected character '" + theChar + "' at index " + theIndex + " but found "
+							+ theValue.charAt(theIndex));
 		}
 	}
 
@@ -532,189 +759,17 @@ public abstract class BaseDateTimeDt extends BasePrimitive<Date> {
 		}
 	}
 
-	/**
-	 * Returns the year, e.g. 2015
-	 */
-	public Integer getYear() {
-		return getFieldValue(Calendar.YEAR);
-	}
-
-	/**
-	 * Returns the month with 0-index, e.g. 0=January
-	 */
-	public Integer getMonth() {
-		return getFieldValue(Calendar.MONTH);
-	}
-
-	/**
-	 * Returns the month with 1-index, e.g. 1=the first day of the month
-	 */
-	public Integer getDay() {
-		return getFieldValue(Calendar.DAY_OF_MONTH);
-	}
-
-	/**
-	 * Returns the hour of the day in a 24h clock, e.g. 13=1pm
-	 */
-	public Integer getHour() {
-		return getFieldValue(Calendar.HOUR_OF_DAY);
-	}
-
-	/**
-	 * Returns the minute of the hour in the range 0-59
-	 */
-	public Integer getMinute() {
-		return getFieldValue(Calendar.MINUTE);
-	}
-
-	/**
-	 * Returns the second of the minute in the range 0-59
-	 */
-	public Integer getSecond() {
-		return getFieldValue(Calendar.SECOND);
-	}
-
-	/**
-	 * Returns the milliseconds within the current second.
-	 * <p>
-	 * Note that this method returns the
-	 * same value as {@link #getNanos()} but with less precision.
-	 * </p>
-	 */
-	public Integer getMillis() {
-		return getFieldValue(Calendar.MILLISECOND);
-	}
-
-	/**
-	 * Returns the nanoseconds within the current second
-	 * <p>
-	 * Note that this method returns the
-	 * same value as {@link #getMillis()} but with more precision.
-	 * </p>
-	 */
-	public Long getNanos() {
-		if (isBlank(myFractionalSeconds)) {
-			return null;
-		}
-		String retVal = StringUtils.rightPad(myFractionalSeconds, 9, '0');
-		retVal = retVal.substring(0, 9);
-		return Long.parseLong(retVal);
-	}
-
-	/**
-	 * Sets the year, e.g. 2015
-	 */
-	public BaseDateTimeDt setYear(int theYear) {
-		setFieldValue(Calendar.YEAR, theYear, null, 0, 9999);
-		return this;
-	}
-
-	/**
-	 * Sets the month with 0-index, e.g. 0=January
-	 */
-	public BaseDateTimeDt setMonth(int theMonth) {
-		setFieldValue(Calendar.MONTH, theMonth, null, 0, 11);
-		return this;
-	}
-
-	/**
-	 * Sets the month with 1-index, e.g. 1=the first day of the month
-	 */
-	public BaseDateTimeDt setDay(int theDay) {
-		setFieldValue(Calendar.DAY_OF_MONTH, theDay, null, 0, 31);
-		return this;
-	}
-
-	/**
-	 * Sets the hour of the day in a 24h clock, e.g. 13=1pm
-	 */
-	public BaseDateTimeDt setHour(int theHour) {
-		setFieldValue(Calendar.HOUR_OF_DAY, theHour, null, 0, 23);
-		return this;
-	}
-
-	/**
-	 * Sets the minute of the hour in the range 0-59
-	 */
-	public BaseDateTimeDt setMinute(int theMinute) {
-		setFieldValue(Calendar.MINUTE, theMinute, null, 0, 59);
-		return this;
-	}
-
-	/**
-	 * Sets the second of the minute in the range 0-59
-	 */
-	public BaseDateTimeDt setSecond(int theSecond) {
-		setFieldValue(Calendar.SECOND, theSecond, null, 0, 59);
-		return this;
-	}
-
-	/**
-	 * Sets the milliseconds within the current second.
-	 * <p>
-	 * Note that this method sets the
-	 * same value as {@link #setNanos(long)} but with less precision.
-	 * </p>
-	 */
-	public BaseDateTimeDt setMillis(int theMillis) {
-		setFieldValue(Calendar.MILLISECOND, theMillis, null, 0, 999);
-		return this;
-	}
-
-	/**
-	 * Sets the nanoseconds within the current second
-	 * <p>
-	 * Note that this method sets the
-	 * same value as {@link #setMillis(int)} but with more precision.
-	 * </p>
-	 */
-	public BaseDateTimeDt setNanos(long theNanos) {
-		validateValueInRange(theNanos, 0, NANOS_PER_SECOND-1);
-		String fractionalSeconds = StringUtils.leftPad(Long.toString(theNanos), 9, '0');
-		
-		// Strip trailing 0s
-		for (int i = fractionalSeconds.length(); i > 0; i--) {
-			if (fractionalSeconds.charAt(i-1) != '0') {
-				fractionalSeconds = fractionalSeconds.substring(0, i);
-				break;
-			}
-		}
-		int millis = (int)(theNanos / NANOS_PER_MILLIS);
-		setFieldValue(Calendar.MILLISECOND, millis, fractionalSeconds, 0, 999);
-		return this;
-	}
-
-	private void setFieldValue(int theField, int theValue, String theFractionalSeconds, int theMinimum, int theMaximum) {
-		validateValueInRange(theValue, theMinimum, theMaximum);
-		Calendar cal;
-		if (getValue() == null) {
-			cal = new GregorianCalendar(0, 0, 0);
-		} else {
-			cal = getValueAsCalendar();
-		}
-		if (theField != -1) {
-			cal.set(theField, theValue);
-		}
-		if (theFractionalSeconds != null) {
-			myFractionalSeconds = theFractionalSeconds;
-		} else if (theField == Calendar.MILLISECOND) {
-			myFractionalSeconds = StringUtils.leftPad(Integer.toString(theValue), 3, '0');
-		}
-		super.setValue(cal.getTime());
-	}
-
 	private void validateValueInRange(long theValue, long theMinimum, long theMaximum) {
 		if (theValue < theMinimum || theValue > theMaximum) {
-			throw new IllegalArgumentException("Value " + theValue + " is not between allowable range: " + theMinimum + " - " + theMaximum);
+			throw new IllegalArgumentException(Msg.code(1884) + "Value " + theValue
+					+ " is not between allowable range: " + theMinimum + " - " + theMaximum);
 		}
 	}
 
-	private Integer getFieldValue(int theField) {
-		if (getValue() == null) {
-			return null;
+	private void validatePrecisionAndThrowDataFormatException(String theValue, TemporalPrecisionEnum thePrecision) {
+		if (isPrecisionAllowed(thePrecision) == false) {
+			throw new DataFormatException(Msg.code(1885) + "Invalid date/time string (datatype "
+					+ getClass().getSimpleName() + " does not support " + thePrecision + " precision): " + theValue);
 		}
-		Calendar cal = getValueAsCalendar();
-		return cal.get(theField);
 	}
-
 }

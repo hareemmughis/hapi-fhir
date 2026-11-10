@@ -1,0 +1,158 @@
+/*
+ * #%L
+ * HAPI FHIR JPA Server
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.dao.data;
+
+import ca.uhn.fhir.jpa.entity.TermValueSet;
+import ca.uhn.fhir.jpa.entity.TermValueSetPreExpansionStatusEnum;
+import ca.uhn.fhir.jpa.model.dao.JpaPid;
+import ca.uhn.fhir.jpa.model.entity.IdAndPartitionId;
+import jakarta.annotation.Nonnull;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Slice;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
+import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
+
+public interface ITermValueSetDao extends JpaRepository<TermValueSet, IdAndPartitionId>, IHapiFhirJpaRepository {
+
+	/**
+	 * There should generally be only one TermValueSet per resource under normal operation, but
+	 * more than one is possible given that there is no unique constraint on {@link TermValueSet#getResource()}.
+	 * The typical case for multiple TermValueSets for the same resource is when the resource
+	 * is being pre-expanded but a previous pre-expansion already exists. In this case, a new
+	 * staging version is created with a temporary version identifier and eventually it replaces
+	 * the previous version.
+	 */
+	@Query("SELECT vs FROM TermValueSet vs WHERE vs.myResource.myPid = :resource_pid")
+	List<TermValueSet> findByResourcePid(@Param("resource_pid") JpaPid theResourcePid);
+
+	// Keeping for backwards compatibility but recommend using findTermValueSetByUrlAndNullVersion instead.
+	@Deprecated
+	@Query("SELECT vs FROM TermValueSet vs WHERE vs.myUrl = :url")
+	Optional<TermValueSet> findByUrl(@Param("url") String theUrl);
+
+	@Query("SELECT vs FROM TermValueSet vs WHERE vs.myExpansionStatus = :expansion_status")
+	Slice<TermValueSet> findByExpansionStatus(
+			Pageable pageable, @Param("expansion_status") TermValueSetPreExpansionStatusEnum theExpansionStatus);
+
+	/**
+	 * Returns the ValueSets with the given pre-expansion status that include a CodeSystem directly but whose stored
+	 * expansion holds none of its concepts. ValueSets are found through the search index of their
+	 * {@code compose.include.system}, so a ValueSet that uses the CodeSystem only through an included ValueSet is not
+	 * returned.
+	 *
+	 * @param theExpansionStatus the pre-expansion status to restrict the search to
+	 * @param theHashUri         the {@code HASH_URI} of the ValueSet {@code reference} search parameter for the
+	 *                           CodeSystem URL
+	 * @param theSystem          the CodeSystem URL
+	 * @return the matching ValueSets
+	 */
+	// Created by Claude Opus 5.5
+	@Nonnull
+	@Query("SELECT vs FROM TermValueSet vs "
+			+ "WHERE vs.myExpansionStatus = :expansion_status "
+			+ "AND EXISTS (SELECT 1 FROM ResourceIndexedSearchParamUri uri "
+			+ "WHERE uri.myHashUri = :hash_uri AND uri.myResourceId = vs.myResourcePid) "
+			+ "AND NOT EXISTS (SELECT 1 FROM TermValueSetConcept concept "
+			+ "WHERE concept.myValueSet = vs AND concept.mySystem = :system)")
+	List<TermValueSet> findByIncludedSystemWithoutItsConcepts(
+			@Nonnull @Param("expansion_status") TermValueSetPreExpansionStatusEnum theExpansionStatus,
+			@Param("hash_uri") long theHashUri,
+			@Nonnull @Param("system") String theSystem);
+
+	@Query(
+			value =
+					"SELECT vs FROM TermValueSet vs INNER JOIN ResourceTable r ON r = vs.myResource WHERE vs.myUrl = :url ORDER BY r.myUpdated DESC")
+	List<TermValueSet> findTermValueSetByUrl(Pageable thePage, @Param("url") String theUrl);
+
+	/**
+	 * The current TermValueSet is not necessarily the last uploaded anymore, but the current VS resource
+	 * is pointed by a specific ForcedId, so we locate current ValueSet as the one pointing to current VS resource
+	 */
+	@Query(value = "SELECT vs FROM TermValueSet vs where vs.myResource.myFhirId = :forcedId ")
+	Optional<TermValueSet> findTermValueSetByForcedId(@Param("forcedId") String theForcedId);
+
+	@Query("SELECT vs FROM TermValueSet vs WHERE vs.myUrl = :url AND vs.myVersion IS NULL")
+	Optional<TermValueSet> findTermValueSetByUrlAndNullVersion(@Param("url") String theUrl);
+
+	@Query("SELECT vs FROM TermValueSet vs WHERE vs.myUrl = :url AND vs.myVersion = :version")
+	Optional<TermValueSet> findTermValueSetByUrlAndVersion(
+			@Param("url") String theUrl, @Param("version") String theVersion);
+
+	/**
+	 * Finds the ValueSets in one of the given pre-expansion statuses which contain at least one concept
+	 * drawn from the given CodeSystem URL.
+	 * <p>
+	 * This is deliberately expressed as a semi-join (EXISTS) rather than as a DISTINCT over a join: a
+	 * DISTINCT over the join would need to de-duplicate one row per matching concept, and would put
+	 * every selected column - including the CLOB-typed EXPANSION_ERROR - into the DISTINCT comparison
+	 * key, which Oracle rejects with ORA-22848.
+	 * </p>
+	 *
+	 * @param theCodeSystemUrl the CodeSystem URL to look for among each ValueSet's pre-expanded concepts
+	 * @param theStatuses the pre-expansion statuses to restrict the search to
+	 * @return the matching ValueSets, each appearing at most once
+	 */
+	// Generated by claude-opus-4-8
+	@Query("SELECT vs FROM TermValueSet vs "
+			+ "WHERE vs.myExpansionStatus IN :statuses "
+			+ "AND EXISTS (SELECT 1 FROM TermValueSetConcept concept "
+			+ "WHERE concept.myValueSet = vs AND concept.mySystem = :system)")
+	List<TermValueSet> findExpandedByCodeSystemUrl(
+			@Param("system") String theCodeSystemUrl,
+			@Param("statuses") Collection<TermValueSetPreExpansionStatusEnum> theStatuses);
+
+	@Query("SELECT vs.myExpansionStatus, COUNT(vs) FROM TermValueSet vs GROUP BY vs.myExpansionStatus")
+	List<Object[]> countByExpansionStatus();
+
+	@Query("SELECT vs FROM TermValueSet vs WHERE vs.myExpansionStatus IN :statuses")
+	Slice<TermValueSet> findByExpansionStatusIn(
+			Pageable pageable, @Param("statuses") Collection<TermValueSetPreExpansionStatusEnum> theStatuses);
+
+	@Query(
+			"SELECT vs FROM TermValueSet vs WHERE vs.myExpansionStatus IN :statuses AND LOWER(vs.myUrl) LIKE LOWER(:urlPattern)")
+	Slice<TermValueSet> findByExpansionStatusInAndUrlLike(
+			Pageable pageable,
+			@Param("statuses") Collection<TermValueSetPreExpansionStatusEnum> theStatuses,
+			@Param("urlPattern") String theUrlPattern);
+
+	@Query(
+			"SELECT vs FROM TermValueSet vs WHERE vs.myExpansionStatus IN :statuses AND LOWER(vs.myName) LIKE LOWER(:namePattern)")
+	Slice<TermValueSet> findByExpansionStatusInAndNameLike(
+			Pageable pageable,
+			@Param("statuses") Collection<TermValueSetPreExpansionStatusEnum> theStatuses,
+			@Param("namePattern") String theNamePattern);
+
+	@Query("SELECT vs FROM TermValueSet vs WHERE vs.myExpansionStatus IN :statuses AND vs.myUrl = :url")
+	Slice<TermValueSet> findByExpansionStatusInAndUrlEquals(
+			Pageable pageable,
+			@Param("statuses") Collection<TermValueSetPreExpansionStatusEnum> theStatuses,
+			@Param("url") String theUrl);
+
+	@Query("SELECT vs FROM TermValueSet vs WHERE vs.myExpansionStatus IN :statuses AND vs.myName = :name")
+	Slice<TermValueSet> findByExpansionStatusInAndNameEquals(
+			Pageable pageable,
+			@Param("statuses") Collection<TermValueSetPreExpansionStatusEnum> theStatuses,
+			@Param("name") String theName);
+}

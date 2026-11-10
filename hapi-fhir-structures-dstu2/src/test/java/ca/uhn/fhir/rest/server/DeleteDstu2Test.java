@@ -1,23 +1,5 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-
-import java.util.concurrent.TimeUnit;
-
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.HttpDelete;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.model.api.IResource;
 import ca.uhn.fhir.model.dstu2.resource.Patient;
@@ -25,21 +7,35 @@ import ca.uhn.fhir.model.primitive.IdDt;
 import ca.uhn.fhir.rest.annotation.ConditionalUrlParam;
 import ca.uhn.fhir.rest.annotation.Delete;
 import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
 import ca.uhn.fhir.rest.api.MethodOutcome;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
 import ca.uhn.fhir.util.TestUtil;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 public class DeleteDstu2Test {
-	private static CloseableHttpClient ourClient;
-	private static FhirContext ourCtx = FhirContext.forDstu2();
+	private static final FhirContext ourCtx = FhirContext.forDstu2Cached();
 	private static boolean ourInvoked;
 	private static String ourLastConditionalUrl;
 	private static IdDt ourLastIdParam;
-	private static int ourPort;
-	private static Server ourServer;
-	
 
-	@Before
+	@RegisterExtension
+	public static final RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		.setDefaultResponseEncoding(EncodingEnum.XML)
+		.registerProvider(new PatientProvider())
+		.withPagingProvider(new FifoMemoryPagingProvider(100))
+		.setDefaultPrettyPrint(false);
+
+
+	@BeforeEach
 	public void before() {
 		ourLastConditionalUrl = null;
 		ourLastIdParam = null;
@@ -53,12 +49,8 @@ public class DeleteDstu2Test {
 		Patient patient = new Patient();
 		patient.addIdentifier().setValue("002");
 
-		HttpDelete httpPost = new HttpDelete("http://localhost:" + ourPort + "/Patient?identifier=system%7C001");
+		ourServer.fhirRequest("/Patient?identifier=system%7C001").delete().assertStatus(204);
 
-		HttpResponse status = ourClient.execute(httpPost);
-
-		assertEquals(204, status.getStatusLine().getStatusCode());
-		
 		assertNull(ourLastIdParam);
 		assertEquals("Patient?identifier=system%7C001", ourLastConditionalUrl);
 	}
@@ -68,46 +60,19 @@ public class DeleteDstu2Test {
 		Patient patient = new Patient();
 		patient.addIdentifier().setValue("002");
 
-		HttpDelete httpPost = new HttpDelete("http://localhost:" + ourPort + "/Patient/2");
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/2").delete().assertStatus(204);
+		assertNull(status.getHeader(Constants.HEADER_CONTENT_TYPE));
 
-		HttpResponse status = ourClient.execute(httpPost);
-
-		assertEquals(204, status.getStatusLine().getStatusCode());
-		assertNull(status.getFirstHeader(Constants.HEADER_CONTENT_TYPE));
-		
 		assertEquals("Patient/2", ourLastIdParam.toUnqualified().getValue());
 		assertNull(ourLastConditionalUrl);
 	}
 
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 		
-	
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		PatientProvider patientProvider = new PatientProvider();
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-		servlet.setResourceProviders(patientProvider);
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
-	}
 	
 	public static class PatientProvider implements IResourceProvider {
 

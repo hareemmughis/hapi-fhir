@@ -1,0 +1,169 @@
+/*
+ * #%L
+ * HAPI FHIR Storage api
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.api.dao;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.util.ParametersUtil;
+import ca.uhn.fhir.util.UrlUtil;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.hl7.fhir.instance.model.api.IBaseCoding;
+import org.hl7.fhir.instance.model.api.IBaseDatatype;
+import org.hl7.fhir.instance.model.api.IBaseParameters;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+import org.hl7.fhir.r4.model.codesystems.ConceptSubsumptionOutcome;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Collection;
+import java.util.List;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+public interface IFhirResourceDaoCodeSystem<T extends IBaseResource> extends IFhirResourceDao<T> {
+
+	List<IIdType> findCodeSystemIdsContainingSystemAndCode(String theCode, String theSystem, RequestDetails theRequest);
+
+	@Transactional
+	@Nonnull
+	IValidationSupport.LookupCodeResult lookupCode(
+			IPrimitiveType<String> theCode,
+			IPrimitiveType<String> theSystem,
+			IBaseCoding theCoding,
+			RequestDetails theRequestDetails);
+
+	@Nonnull
+	IValidationSupport.LookupCodeResult lookupCode(
+			IPrimitiveType<String> theCode,
+			IPrimitiveType<String> theSystem,
+			IBaseCoding theCoding,
+			IPrimitiveType<String> theDisplayLanguage,
+			RequestDetails theRequestDetails);
+
+	@Nonnull
+	IValidationSupport.LookupCodeResult lookupCode(
+			IPrimitiveType<String> theCode,
+			IPrimitiveType<String> theSystem,
+			IBaseCoding theCoding,
+			IPrimitiveType<String> theDisplayLanguage,
+			Collection<IPrimitiveType<String>> thePropertyNames,
+			RequestDetails theRequestDetails);
+
+	/**
+	 * Looks up a code, with the code system version as its own parameter rather than packed into the system.
+	 * <p>
+	 * The default implementation calls
+	 * {@link #lookupCode(IPrimitiveType, IPrimitiveType, IBaseCoding, IPrimitiveType, Collection, RequestDetails)},
+	 * with {@literal theVersion} packed into {@literal theSystem} as <code>url|version</code>, or set on a copy of
+	 * {@literal theCoding} when the coding has no version. The arguments are not modified.
+	 * </p>
+	 *
+	 * @param theCode the code to look up, given together with {@literal theSystem}
+	 * @param theSystem the code system url, without a version
+	 * @param theVersion the code system version, or null for whichever version is current
+	 * @param theCoding the coding to look up, given instead of {@literal theCode} and {@literal theSystem}; a version
+	 *                  on it must agree with {@literal theVersion}
+	 * @param theDisplayLanguage the language for the display, or null
+	 * @param thePropertyNames the properties to return, or empty for all
+	 * @param theRequestDetails the request
+	 * @return the outcome of the lookup
+	 * @throws ca.uhn.fhir.rest.server.exceptions.InvalidRequestException if {@literal theVersion} differs from the
+	 *                                                                     version on {@literal theCoding}
+	 * @since 8.14.0
+	 */
+	@Nonnull
+	default IValidationSupport.LookupCodeResult lookupCode(
+			@Nullable IPrimitiveType<String> theCode,
+			@Nullable IPrimitiveType<String> theSystem,
+			@Nullable IPrimitiveType<String> theVersion,
+			@Nullable IBaseCoding theCoding,
+			@Nullable IPrimitiveType<String> theDisplayLanguage,
+			@Nullable Collection<IPrimitiveType<String>> thePropertyNames,
+			@Nullable RequestDetails theRequestDetails) {
+		String version = theVersion != null ? theVersion.getValueAsString() : null;
+		if (isBlank(version)) {
+			return lookupCode(theCode, theSystem, theCoding, theDisplayLanguage, thePropertyNames, theRequestDetails);
+		}
+
+		IPrimitiveType<String> system = theSystem;
+		if (theSystem != null) {
+			system = getContext().newPrimitiveString(UrlUtil.toCanonicalUrl(theSystem.getValueAsString(), version));
+		}
+		IBaseCoding coding = theCoding;
+		if (theCoding != null) {
+			// throws if the coding names another version
+			UrlUtil.parseCanonicalUrl(theCoding.getSystem(), theCoding.getVersion(), version);
+			if (isBlank(theCoding.getVersion())) {
+				coding = (IBaseCoding)
+						getContext().getElementDefinition(theCoding.getClass()).newInstance();
+				getContext().newTerser().cloneInto(theCoding, coding, true);
+				coding.setVersion(version);
+			}
+		}
+		return lookupCode(theCode, system, coding, theDisplayLanguage, thePropertyNames, theRequestDetails);
+	}
+
+	SubsumesResult subsumes(
+			IPrimitiveType<String> theCodeA,
+			IPrimitiveType<String> theCodeB,
+			IPrimitiveType<String> theSystem,
+			IBaseCoding theCodingA,
+			IBaseCoding theCodingB,
+			RequestDetails theRequestDetails);
+
+	@Nonnull
+	IValidationSupport.CodeValidationResult validateCode(
+			IIdType theCodeSystemId,
+			IPrimitiveType<String> theCodeSystemUrl,
+			IPrimitiveType<String> theVersion,
+			IPrimitiveType<String> theCode,
+			IPrimitiveType<String> theDisplay,
+			IBaseCoding theCoding,
+			IBaseDatatype theCodeableConcept,
+			RequestDetails theRequestDetails);
+
+	class SubsumesResult {
+
+		private final ConceptSubsumptionOutcome myOutcome;
+
+		public SubsumesResult(ConceptSubsumptionOutcome theOutcome) {
+			myOutcome = theOutcome;
+		}
+
+		public ConceptSubsumptionOutcome getOutcome() {
+			return myOutcome;
+		}
+
+		@SuppressWarnings("unchecked")
+		public IBaseParameters toParameters(FhirContext theFhirContext) {
+			IBaseParameters retVal = ParametersUtil.newInstance(theFhirContext);
+
+			IPrimitiveType<String> outcomeValue = (IPrimitiveType<String>)
+					theFhirContext.getElementDefinition("code").newInstance();
+			outcomeValue.setValueAsString(getOutcome().toCode());
+			ParametersUtil.addParameterToParameters(theFhirContext, retVal, "outcome", outcomeValue);
+
+			return retVal;
+		}
+	}
+}

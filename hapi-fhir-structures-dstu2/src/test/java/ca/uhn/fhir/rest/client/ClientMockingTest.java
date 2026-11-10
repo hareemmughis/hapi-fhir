@@ -1,25 +1,26 @@
 package ca.uhn.fhir.rest.client;
 
-import static org.junit.Assert.*;
-import static org.mockito.Mockito.*;
-
-import org.hl7.fhir.instance.model.api.IBaseBundle;
-import org.junit.AfterClass;
-import org.junit.Test;
-import org.mockito.internal.stubbing.defaultanswers.ReturnsDeepStubs;
-import org.mockito.internal.stubbing.defaultanswers.ReturnsSmartNulls;
-
 import ca.uhn.fhir.model.dstu2.resource.Bundle;
 import ca.uhn.fhir.model.dstu2.resource.Condition;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.gclient.ICriterion;
-import ca.uhn.fhir.rest.gclient.IQuery;
 import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.instance.model.api.IBaseBundle;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.mockito.internal.stubbing.defaultanswers.ReturnsDeepStubs;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class ClientMockingTest {
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 
@@ -46,7 +47,7 @@ public class ClientMockingTest {
 		//@formatter:off
 		
 		Bundle actual = client.search().forResource(Condition.class).where(Condition.ASSERTER.hasId("123")).returnBundle(Bundle.class).execute();
-		assertSame(retVal, actual);
+		assertThat(actual).isSameAs(retVal);
 		
 	}
 	

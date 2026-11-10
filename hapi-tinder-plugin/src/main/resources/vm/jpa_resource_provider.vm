@@ -5,13 +5,7 @@ import java.util.*;
 
 import org.apache.commons.lang3.StringUtils;
 
-#if ( $version != 'dstu' && (${className} == 'Encounter' || ${className} == 'Patient' || ${className} == 'ValueSet' || ${className} == 'QuestionnaireAnswers' || ${className} == 'CodeSystem'))
-import ca.uhn.fhir.jpa.provider${package_suffix}.BaseJpaResourceProvider${className}${versionCapitalized};
-#else
-import ca.uhn.fhir.jpa.provider${package_suffix}.JpaResourceProvider${versionCapitalized};
-#end 
-import ca.uhn.fhir.jpa.dao.SearchParameterMap;
-import ca.uhn.fhir.model.api.IResource;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
 import ca.uhn.fhir.model.api.Include;
 import ca.uhn.fhir.model.api.annotation.*;
 #if ( $isRi )
@@ -23,14 +17,19 @@ import ca.uhn.fhir.model.${version}.resource.*; //
 import ca.uhn.fhir.rest.annotation.*;
 import ca.uhn.fhir.rest.param.*;
 import ca.uhn.fhir.rest.api.SortSpec;
+import ca.uhn.fhir.rest.api.SummaryEnum;
+import ca.uhn.fhir.rest.api.SearchTotalModeEnum;
+import ca.uhn.fhir.rest.api.SearchContainedModeEnum;
 
 public class ${className}ResourceProvider extends 
 ## We have specialized base classes for RPs that handle certain resource types. These
 ## RPs implement type specific operations 
-#if ( $version != 'dstu' && (${className} == 'Encounter' || ${className} == 'Patient' || ${className} == 'ValueSet' || ${className} == 'QuestionnaireAnswers' || ${className} == 'CodeSystem'))
+#if ( ${className} == 'CodeSystem' || ${className} == 'Composition' || ${className} == 'ConceptMap' || ${className} == 'Encounter' || ${className} == 'Observation' || ${className} == 'Patient' || ${className} == 'StructureDefinition' )
+	ca.uhn.fhir.jpa.provider.BaseJpaResourceProvider${className}<${className}>
+#elseif ( $version != 'dstu' && (${className} == 'QuestionnaireAnswers' || ${className} == 'CodeSystem' || ${className} == 'Composition' || ${className} == 'StructureDefinition'))
 	BaseJpaResourceProvider${className}${versionCapitalized}
 #else
-	JpaResourceProvider${versionCapitalized}<${className}>
+	ca.uhn.fhir.jpa.provider.BaseJpaResourceProvider<${className}>
 #end 
 	{
 
@@ -39,31 +38,52 @@ public class ${className}ResourceProvider extends
 		return ${className}.class;
 	}
 
-	@Search()
-	public ca.uhn.fhir.rest.server.IBundleProvider search(
-			javax.servlet.http.HttpServletRequest theServletRequest,
-			
-			ca.uhn.fhir.rest.method.RequestDetails theRequestDetails,
-			
+	@Search(allowUnknownParams=true)
+	public ca.uhn.fhir.rest.api.server.IBundleProvider search(
+			jakarta.servlet.http.HttpServletRequest theServletRequest,
+			jakarta.servlet.http.HttpServletResponse theServletResponse,
+
+			ca.uhn.fhir.rest.api.server.RequestDetails theRequestDetails,
+
+			@Description(shortDefinition="Search the contents of the resource's data using a filter")
+			@OptionalParam(name=ca.uhn.fhir.rest.api.Constants.PARAM_FILTER)
+			StringAndListParam theFtFilter,
+
 			@Description(shortDefinition="Search the contents of the resource's data using a fulltext search")
-			@OptionalParam(name=ca.uhn.fhir.rest.server.Constants.PARAM_CONTENT)
+			@OptionalParam(name=ca.uhn.fhir.rest.api.Constants.PARAM_CONTENT)
 			StringAndListParam theFtContent, 
 
 			@Description(shortDefinition="Search the contents of the resource's narrative using a fulltext search")
-			@OptionalParam(name=ca.uhn.fhir.rest.server.Constants.PARAM_TEXT)
+			@OptionalParam(name=ca.uhn.fhir.rest.api.Constants.PARAM_TEXT)
 			StringAndListParam theFtText, 
 
+## The _tag, _security and _profile parameters are added to the "${searchParams}"
+## list on DSTU3+, so we don't need to manually add them here
+#if ( $version == 'dstu2' )
 			@Description(shortDefinition="Search for resources which have the given tag")
-			@OptionalParam(name=ca.uhn.fhir.rest.server.Constants.PARAM_TAG)
+			@OptionalParam(name=ca.uhn.fhir.rest.api.Constants.PARAM_TAG)
 			TokenAndListParam theSearchForTag, 
 
 			@Description(shortDefinition="Search for resources which have the given security labels")
-			@OptionalParam(name=ca.uhn.fhir.rest.server.Constants.PARAM_SECURITY)
+			@OptionalParam(name=ca.uhn.fhir.rest.api.Constants.PARAM_SECURITY)
 			TokenAndListParam theSearchForSecurity, 
   
 			@Description(shortDefinition="Search for resources which have the given profile")
-			@OptionalParam(name=ca.uhn.fhir.rest.server.Constants.PARAM_PROFILE)
-			UriAndListParam theSearchForProfile, 
+			@OptionalParam(name=ca.uhn.fhir.rest.api.Constants.PARAM_PROFILE)
+			UriAndListParam theSearchForProfile,
+#end
+
+			@Description(shortDefinition="Search the contents of the resource's data using a list")
+			@OptionalParam(name=ca.uhn.fhir.rest.api.Constants.PARAM_LIST)
+			StringAndListParam theList,
+
+			@Description(shortDefinition="The language of the resource")
+			@OptionalParam(name=ca.uhn.fhir.rest.api.Constants.PARAM_LANGUAGE)
+			TokenAndListParam theResourceLanguage,
+
+			@Description(shortDefinition="Search for resources which have the given source value (Resource.meta.source)")
+			@OptionalParam(name=ca.uhn.fhir.rest.api.Constants.PARAM_SOURCE)
+			UriAndListParam theSearchForSource,
 
 			@Description(shortDefinition="Return resources linked to by the given target")
 			@OptionalParam(name="_has")
@@ -77,7 +97,10 @@ public class ${className}ResourceProvider extends
 			StringAndListParam the${param.nameCapitalized}, 
 #elseif (${param.type} == 'token' )
 			@OptionalParam(name="${param.name}")
-			TokenAndListParam the${param.nameCapitalized}, 
+			TokenAndListParam the${param.nameCapitalized},
+#elseif (${param.type} == 'special' )
+			@OptionalParam(name="${param.name}")
+			SpecialAndListParam the${param.nameCapitalized},
 #elseif (${param.type} == 'date' )
 			@OptionalParam(name="${param.name}")
 			DateRangeParam the${param.nameCapitalized}, 
@@ -99,59 +122,90 @@ public class ${className}ResourceProvider extends
 #end
 #end	
 
-#if ( $version != 'dstu' )
-			@IncludeParam(reverse=true)
-			Set<Include> theRevIncludes,
+			@RawParam
+			Map<String, List<String>> theAdditionalRawParams,
+
+	##DSTU2 is not an IAnyResource, yet supports LastUpdated, so we keep the magic SP in this case.
+	#if ( $version == 'dstu2' )
 			@Description(shortDefinition="Only return resources which were last updated as specified by the given range")
 			@OptionalParam(name="_lastUpdated")
-			DateRangeParam theLastUpdated, 
-#end
+			DateRangeParam the_lastUpdated,
+	#end
 
-			@IncludeParam(allow= {
-#foreach ( $param in $searchParamsReference )
-#set ( $haveMore = $foreach.hasNext )
-#if ( $version == 'dstu' )
-	#foreach ( $include in $param.paths )
-				"${include.path}" #{if}($foreach.hasNext || $haveMore), #{end}
+	## _compartmentLastUpdated is a non-standard search parameter only applicable to Patient
+	#if ( ${className} == 'Patient' )
+			@Description(shortDefinition="Find patients whose compartment data has changed within a given date range")
+			@OptionalParam(name=ca.uhn.fhir.rest.api.Constants.PARAM_COMPARTMENT_LAST_UPDATED)
+			DateRangeParam theCompartmentLastUpdated,
 	#end
-#else
-	#foreach ( $include in $includes )
-				"${include.path}" #{if}($foreach.hasNext || $haveMore), #{end}
-	#end
-#end				 
-#end
-				#{if}($searchParamsReference.empty == false), #{end}"*"
-			}) 
+
+			@IncludeParam
 			Set<Include> theIncludes,
-			
-			@Sort 
+
+			@IncludeParam(reverse=true)
+			Set<Include> theRevIncludes,
+
+			@Sort
 			SortSpec theSort,
 			
 			@ca.uhn.fhir.rest.annotation.Count
-			Integer theCount
-	) {
+			Integer theCount,
+
+			@ca.uhn.fhir.rest.annotation.Offset
+			Integer theOffset,
+
+			SummaryEnum theSummaryMode,
+
+			SearchTotalModeEnum theSearchTotalMode,
+
+			SearchContainedModeEnum theSearchContainedMode
+
+			) {
 		startRequest(theServletRequest);
 		try {
 			SearchParameterMap paramMap = new SearchParameterMap();
-			paramMap.add(ca.uhn.fhir.rest.server.Constants.PARAM_CONTENT, theFtContent);
-			paramMap.add(ca.uhn.fhir.rest.server.Constants.PARAM_TEXT, theFtText);
-			paramMap.add(ca.uhn.fhir.rest.server.Constants.PARAM_TAG, theSearchForTag);
-			paramMap.add(ca.uhn.fhir.rest.server.Constants.PARAM_SECURITY, theSearchForSecurity);
-			paramMap.add(ca.uhn.fhir.rest.server.Constants.PARAM_PROFILE, theSearchForProfile);
+			paramMap.add(ca.uhn.fhir.rest.api.Constants.PARAM_FILTER, theFtFilter);
+			paramMap.add(ca.uhn.fhir.rest.api.Constants.PARAM_CONTENT, theFtContent);
+			paramMap.add(ca.uhn.fhir.rest.api.Constants.PARAM_TEXT, theFtText);
+#if ( $version == 'dstu2' )
+			paramMap.add(ca.uhn.fhir.rest.api.Constants.PARAM_TAG, theSearchForTag);
+			paramMap.add(ca.uhn.fhir.rest.api.Constants.PARAM_SECURITY, theSearchForSecurity);
+			paramMap.add(ca.uhn.fhir.rest.api.Constants.PARAM_PROFILE, theSearchForProfile);
+#end
+			paramMap.add(ca.uhn.fhir.rest.api.Constants.PARAM_SOURCE, theSearchForSource);
+			paramMap.add(ca.uhn.fhir.rest.api.Constants.PARAM_LIST, theList);
+			paramMap.add(ca.uhn.fhir.rest.api.Constants.PARAM_LANGUAGE, theResourceLanguage);
+
 			paramMap.add("_has", theHas);
-#foreach ( $param in $searchParams ) 
-			paramMap.add("${param.name}", the${param.nameCapitalized});
+#foreach ( $param in $searchParams )
+			#if( ${param.name} == "_lastUpdated")
+				## Skip Last Updated since its handled by param defined below.
+			#else
+				paramMap.add("${param.name}", the${param.nameCapitalized});
+			#end
 #end
 #if ( $version != 'dstu' )
-			paramMap.setRevIncludes(theRevIncludes);
-			paramMap.setLastUpdated(theLastUpdated);
+paramMap.setRevIncludes(theRevIncludes);
+## Note that since we have added an SearchParamDefinition on IAnyResource for this, we had to remove
+## the magic _lastUpdated that was previously hardcoded as an OperationParam. However, we still need to populate
+## This special variable in the SP map.
+			paramMap.setLastUpdated(the_lastUpdated);
 #end
 			paramMap.setIncludes(theIncludes);
 			paramMap.setSort(theSort);
 			paramMap.setCount(theCount);
-			paramMap.setRequestDetails(theRequestDetails);
+			paramMap.setOffset(theOffset);
+			paramMap.setSummaryMode(theSummaryMode);
+			paramMap.setSearchTotalMode(theSearchTotalMode);
+			paramMap.setSearchContainedMode(theSearchContainedMode);
 
-			ca.uhn.fhir.rest.server.IBundleProvider retVal = getDao().search(paramMap);
+	#if ( ${className} == 'Patient' )
+			paramMap.setCompartmentLastUpdated(theCompartmentLastUpdated);
+	#end
+
+			getDao().translateRawParameters(theAdditionalRawParams, paramMap);
+
+			ca.uhn.fhir.rest.api.server.IBundleProvider retVal = getDao().search(paramMap, theRequestDetails, theServletResponse);
 			return retVal;
 		} finally {
 			endRequest(theServletRequest);

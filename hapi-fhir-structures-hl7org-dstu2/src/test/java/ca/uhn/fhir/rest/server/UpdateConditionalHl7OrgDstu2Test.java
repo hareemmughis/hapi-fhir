@@ -1,32 +1,5 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.HttpPut;
-import org.apache.http.entity.ContentType;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.hl7.fhir.instance.model.IdType;
-import org.hl7.fhir.instance.model.Patient;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.model.api.IResource;
 import ca.uhn.fhir.model.primitive.StringDt;
@@ -36,23 +9,44 @@ import ca.uhn.fhir.rest.annotation.OptionalParam;
 import ca.uhn.fhir.rest.annotation.ResourceParam;
 import ca.uhn.fhir.rest.annotation.Search;
 import ca.uhn.fhir.rest.annotation.Update;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
 import ca.uhn.fhir.rest.api.MethodOutcome;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.dstu2.model.IdType;
+import org.hl7.fhir.dstu2.model.Patient;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class UpdateConditionalHl7OrgDstu2Test {
-	private static CloseableHttpClient ourClient;
 	private static String ourLastConditionalUrl;
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(UpdateConditionalHl7OrgDstu2Test.class);
-	private static int ourPort;
-	private static FhirContext ourCtx = FhirContext.forDstu2Hl7Org();
-	private static Server ourServer;
+  private static final FhirContext ourCtx = FhirContext.forDstu2Hl7OrgCached();
 	private static String ourLastId;
 	private static IdType ourLastIdParam;
 	private static boolean ourLastRequestWasSearch;
-	
-	
-	
-	@Before
+
+
+  @RegisterExtension
+  public static RestfulServerExtension ourServer = new RestfulServerExtension(ourCtx)
+      .registerProvider(new PatientProvider())
+      .withPagingProvider(new FifoMemoryPagingProvider(100))
+      .setDefaultResponseEncoding(EncodingEnum.JSON)
+      .setDefaultPrettyPrint(false);
+
+
+  @BeforeEach
 	public void before() {
 		ourLastId = null;
 		ourLastConditionalUrl = null;
@@ -66,20 +60,16 @@ public class UpdateConditionalHl7OrgDstu2Test {
 		Patient patient = new Patient();
 		patient.addIdentifier().setValue("002");
 
-		HttpPut httpPost = new HttpPut("http://localhost:" + ourPort + "/Patient?identifier=system%7C001");
-		httpPost.setEntity(new StringEntity(ourCtx.newXmlParser().encodeResourceToString(patient), ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-
-		HttpResponse status = ourClient.execute(httpPost);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		HttpTestResponse status = ourServer.fhirRequest("/Patient?identifier=system%7C001")
+			.put(ourCtx.newXmlParser().encodeResourceToString(patient), Constants.CT_FHIR_XML)
+			.assertStatus(200);
+		String responseContent = status.getBody();
 
 		ourLog.info("Response was:\n{}", responseContent);
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		assertEquals("http://localhost:" + ourPort + "/Patient/001/_history/002", status.getFirstHeader("location").getValue());
-		assertEquals("http://localhost:" + ourPort + "/Patient/001/_history/002", status.getFirstHeader("content-location").getValue());
-		
+		assertNull(status.getHeader("location"));
+		assertEquals(ourServer.getBaseUrl() + "/Patient/001/_history/002", status.getHeader("content-location"));
+
 		assertNull(ourLastId);
 		assertNull(ourLastIdParam);
 		assertEquals("Patient?identifier=system%7C001", ourLastConditionalUrl);
@@ -93,20 +83,16 @@ public class UpdateConditionalHl7OrgDstu2Test {
 		patient.setId("2");
 		patient.addIdentifier().setValue("002");
 
-		HttpPut httpPost = new HttpPut("http://localhost:" + ourPort + "/Patient/2");
-		httpPost.setEntity(new StringEntity(ourCtx.newXmlParser().encodeResourceToString(patient), ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-
-		HttpResponse status = ourClient.execute(httpPost);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/2")
+			.put(ourCtx.newXmlParser().encodeResourceToString(patient), Constants.CT_FHIR_XML)
+			.assertStatus(200);
+		String responseContent = status.getBody();
 
 		ourLog.info("Response was:\n{}", responseContent);
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		assertEquals("http://localhost:" + ourPort + "/Patient/001/_history/002", status.getFirstHeader("location").getValue());
-		assertEquals("http://localhost:" + ourPort + "/Patient/001/_history/002", status.getFirstHeader("content-location").getValue());
-		
+		assertNull(status.getHeader("location"));
+		assertEquals(ourServer.getBaseUrl() + "/Patient/001/_history/002", status.getHeader("content-location"));
+
 		assertEquals("Patient/2", new IdType(ourLastId).toUnqualified().getValue());
 		assertEquals("Patient/2", ourLastIdParam.toUnqualified().getValue());
 		assertNull(ourLastConditionalUrl);
@@ -119,12 +105,7 @@ public class UpdateConditionalHl7OrgDstu2Test {
 		Patient patient = new Patient();
 		patient.addIdentifier().setValue("002");
 
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient?_pretty=true");
-
-		HttpResponse status = ourClient.execute(httpGet);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient?_pretty=true").get().getBody();
 
 		ourLog.info("Response was:\n{}", responseContent);
 
@@ -136,33 +117,11 @@ public class UpdateConditionalHl7OrgDstu2Test {
 	}
 
 	
-	@AfterClass
+	@AfterAll
 	public static void afterClass() throws Exception {
-		ourServer.stop();
+    TestUtil.randomizeLocaleAndTimezone();
 	}
 		
-	
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		PatientProvider patientProvider = new PatientProvider();
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-		servlet.setResourceProviders(patientProvider);
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
-	}
 	
 	public static class PatientProvider implements IResourceProvider {
 
@@ -174,7 +133,7 @@ public class UpdateConditionalHl7OrgDstu2Test {
 		@Search
 		public List<IResource> search(@OptionalParam(name="foo") StringDt theString) {
 			ourLastRequestWasSearch = true;
-			return new ArrayList<IResource>();
+			return new ArrayList<>();
 		}
 		
 		@Update()

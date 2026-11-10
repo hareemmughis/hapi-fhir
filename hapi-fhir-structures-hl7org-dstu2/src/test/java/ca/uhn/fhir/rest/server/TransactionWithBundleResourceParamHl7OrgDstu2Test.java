@@ -1,41 +1,37 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.entity.ContentType;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.hl7.fhir.instance.model.Bundle;
-import org.hl7.fhir.instance.model.Bundle.BundleEntryComponent;
-import org.hl7.fhir.instance.model.Bundle.HTTPVerb;
-import org.hl7.fhir.instance.model.Conformance;
-import org.hl7.fhir.instance.model.Conformance.SystemInteractionComponent;
-import org.hl7.fhir.instance.model.Conformance.SystemRestfulInteraction;
-import org.hl7.fhir.instance.model.IdType;
-import org.hl7.fhir.instance.model.InstantType;
-import org.hl7.fhir.instance.model.OperationOutcome;
-import org.hl7.fhir.instance.model.Patient;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.rest.annotation.Transaction;
 import ca.uhn.fhir.rest.annotation.TransactionParam;
-import ca.uhn.fhir.rest.client.IGenericClient;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.client.interceptor.LoggingInterceptor;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.test.utilities.HttpTestRequest;
+import ca.uhn.fhir.test.utilities.JettyUtil;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
+import org.eclipse.jetty.ee11.servlet.ServletHolder;
+import org.eclipse.jetty.server.Server;
+import org.hl7.fhir.dstu2.model.Bundle;
+import org.hl7.fhir.dstu2.model.Bundle.BundleEntryComponent;
+import org.hl7.fhir.dstu2.model.Bundle.HTTPVerb;
+import org.hl7.fhir.dstu2.model.Conformance;
+import org.hl7.fhir.dstu2.model.Conformance.SystemInteractionComponent;
+import org.hl7.fhir.dstu2.model.Conformance.SystemRestfulInteraction;
+import org.hl7.fhir.dstu2.model.IdType;
+import org.hl7.fhir.dstu2.model.OperationOutcome;
+import org.hl7.fhir.dstu2.model.Patient;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TransactionWithBundleResourceParamHl7OrgDstu2Test {
 
@@ -52,7 +48,7 @@ public class TransactionWithBundleResourceParamHl7OrgDstu2Test {
 
 	private static Server ourServer;
 
-	@Before
+	@BeforeEach
 	public void before() {
 		ourReturnOperationOutcome = false;
 	}
@@ -70,12 +66,12 @@ public class TransactionWithBundleResourceParamHl7OrgDstu2Test {
 				supportsTransaction = true;
 			}
 		}
-		
+
 		assertTrue(supportsTransaction);
 	}
 	
 	@Test
-	public void testTransactionWithXmlRequest() throws Exception {
+	public void testTransactionWithXmlRequest() {
 		Bundle b = new Bundle();
 		
 		Patient p1 = new Patient();
@@ -97,31 +93,26 @@ public class TransactionWithBundleResourceParamHl7OrgDstu2Test {
 		String bundleString = ourCtx.newXmlParser().setPrettyPrint(true).encodeResourceToString(b);
 		ourLog.info(bundleString);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/");
-		httpPost.setEntity(new StringEntity(bundleString, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		Bundle bundle = fhirRequest("/")
+				.post(bundleString, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(Bundle.class);
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-
-		ourLog.info(responseContent);
-
-		Bundle bundle = ourCtx.newXmlParser().parseResource(Bundle.class, responseContent);
-		assertEquals(3, bundle.getEntry().size());
+		assertThat(bundle.getEntry()).hasSize(3);
 
 		BundleEntryComponent entry0 = bundle.getEntry().get(0);
 		assertEquals("Patient/81/_history/91", entry0.getResponse().getLocation());
 
 		BundleEntryComponent entry1 = bundle.getEntry().get(1);
-		assertEquals( "Patient/82/_history/92", entry1.getResponse().getLocation());
+		assertEquals("Patient/82/_history/92", entry1.getResponse().getLocation());
 
 		BundleEntryComponent entry2 = bundle.getEntry().get(2);
 		assertEquals("Patient/123/_history/93", entry2.getResponse().getLocation());
 	}
 
 	@Test
-	public void testTransactionWithJsonRequest() throws Exception {
+	public void testTransactionWithJsonRequest() {
 		Bundle b = new Bundle();
 
 		Patient p1 = new Patient();
@@ -143,32 +134,27 @@ public class TransactionWithBundleResourceParamHl7OrgDstu2Test {
 		String bundleString = ourCtx.newJsonParser().setPrettyPrint(true).encodeResourceToString(b);
 		ourLog.info(bundleString);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/");
 //		httpPost.addHeader("Accept", Constants.CT_ATOM_XML + "; pretty=true");
-		httpPost.setEntity(new StringEntity(bundleString, ContentType.create(Constants.CT_FHIR_JSON, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		Bundle bundle = fhirRequest("/")
+				.post(bundleString, Constants.CT_FHIR_JSON)
+				.assertStatus(200)
+				.assertMimeType(Constants.CT_FHIR_JSON)
+				.getBodyAsResource(Bundle.class);
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-
-		ourLog.info(responseContent);
-
-		Bundle bundle = ourCtx.newJsonParser().parseResource(Bundle.class, responseContent);
-		assertEquals(3, bundle.getEntry().size());
+		assertThat(bundle.getEntry()).hasSize(3);
 
 		BundleEntryComponent entry0 = bundle.getEntry().get(0);
 		assertEquals("Patient/81/_history/91", entry0.getResponse().getLocation());
 
 		BundleEntryComponent entry1 = bundle.getEntry().get(1);
-		assertEquals( "Patient/82/_history/92", entry1.getResponse().getLocation());
+		assertEquals("Patient/82/_history/92", entry1.getResponse().getLocation());
 
 		BundleEntryComponent entry2 = bundle.getEntry().get(2);
 		assertEquals("Patient/123/_history/93", entry2.getResponse().getLocation());
 	}
 
 	@Test
-	public void testTransactionWithOperationOutcome() throws Exception {
+	public void testTransactionWithOperationOutcome() {
 		ourReturnOperationOutcome = true;
 
 		Bundle b = new Bundle();
@@ -192,20 +178,14 @@ public class TransactionWithBundleResourceParamHl7OrgDstu2Test {
 		String bundleString = ourCtx.newXmlParser().setPrettyPrint(true).encodeResourceToString(b);
 		ourLog.info(bundleString);
 
-		String base = "http://localhost:" + ourPort + "/";
-		HttpPost httpPost = new HttpPost(base);
-		httpPost.addHeader("Accept", Constants.CT_ATOM_XML + "; pretty=true");
-		httpPost.setEntity(new StringEntity(bundleString, ContentType.create(Constants.CT_ATOM_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		Bundle bundle = fhirRequest("/")
+				.withHeader(Constants.HEADER_ACCEPT, Constants.CT_FHIR_XML + "; pretty=true")
+				.post(bundleString, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(Bundle.class);
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-
-		ourLog.info(responseContent);
-
-		Bundle bundle = ourCtx.newXmlParser().parseResource(Bundle.class, responseContent);
-		assertEquals(4, bundle.getEntry().size());
+		assertThat(bundle.getEntry()).hasSize(4);
 
 		assertEquals(OperationOutcome.class, bundle.getEntry().get(0).getResource().getClass());
 
@@ -216,24 +196,27 @@ public class TransactionWithBundleResourceParamHl7OrgDstu2Test {
 		assertEquals("Patient/82/_history/92", entry1.getResponse().getLocation());
 
 		BundleEntryComponent entry2 = bundle.getEntry().get(3);
-		assertEquals( "Patient/3/_history/93", entry2.getResponse().getLocation());
+		assertEquals("Patient/3/_history/93", entry2.getResponse().getLocation());
 	}
 
-	@AfterClass
+	private HttpTestRequest fhirRequest(String thePath) {
+		return HttpTestRequest.to(ourClient, ourCtx, "http://localhost:" + ourPort + thePath);
+	}
+
+	@AfterAll
 	public static void afterClass() throws Exception {
-		ourServer.stop();
+		JettyUtil.closeServer(ourServer);
 	}
 
-	@BeforeClass
+	@BeforeAll
 	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
+		ourServer = new Server(0);
 
 		DummyProvider patientProvider = new DummyProvider();
 		RestfulServer server = new RestfulServer(ourCtx);
 		server.setProviders(patientProvider);
 
-		org.eclipse.jetty.servlet.ServletContextHandler proxyHandler = new org.eclipse.jetty.servlet.ServletContextHandler();
+		org.eclipse.jetty.ee11.servlet.ServletContextHandler proxyHandler = new org.eclipse.jetty.ee11.servlet.ServletContextHandler();
 		proxyHandler.setContextPath("/");
 
 		ServletHolder handler = new ServletHolder();
@@ -241,7 +224,8 @@ public class TransactionWithBundleResourceParamHl7OrgDstu2Test {
 		proxyHandler.addServlet(handler, "/*");
 
 		ourServer.setHandler(proxyHandler);
-		ourServer.start();
+		JettyUtil.startServer(ourServer);
+        ourPort = JettyUtil.getPortForStartedServer(ourServer);
 
 		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(500000, TimeUnit.MILLISECONDS);
 		HttpClientBuilder builder = HttpClientBuilder.create();

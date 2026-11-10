@@ -1,0 +1,218 @@
+/*-
+ * #%L
+ * HAPI FHIR - Core Library
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.util;
+
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.api.IModelJson;
+import ca.uhn.fhir.model.api.annotation.SensitiveNoDisplay;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import jakarta.annotation.Nonnull;
+import org.apache.commons.lang3.Validate;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.SerializationFeature;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.ser.FilterProvider;
+import tools.jackson.databind.ser.PropertyWriter;
+import tools.jackson.databind.ser.std.SimpleBeanPropertyFilter;
+import tools.jackson.databind.ser.std.SimpleFilterProvider;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.StringWriter;
+import java.io.Writer;
+import java.util.List;
+
+public class JsonUtil {
+
+	private static final JsonMapper ourMapperPrettyPrint;
+	private static final JsonMapper ourMapperNonPrettyPrint;
+	private static final JsonMapper ourMapperIncludeSensitive;
+
+	public static final SimpleBeanPropertyFilter SIMPLE_BEAN_PROPERTY_FILTER = new SensitiveDataFilter();
+
+	public static final SimpleFilterProvider SENSITIVE_DATA_FILTER_PROVIDER =
+			new SimpleFilterProvider().addFilter(IModelJson.SENSITIVE_DATA_FILTER_NAME, SIMPLE_BEAN_PROPERTY_FILTER);
+	public static final SimpleFilterProvider SHOW_ALL_DATA_FILTER_PROVIDER = new SimpleFilterProvider()
+			.addFilter(IModelJson.SENSITIVE_DATA_FILTER_NAME, SimpleBeanPropertyFilter.serializeAll());
+
+	/*
+	 * These mappers use Jackson 2 defaults rather than Jackson 3 defaults for now.
+	 *
+	 * JsonUtil is used very widely, including by downstream products that embed HAPI FHIR.
+	 * Jackson 3 ignores JSON properties that the target class does not declare, instead of
+	 * throwing. A document with a misspelled or renamed field now deserializes successfully
+	 * with that value silently missing, and some callers rely on the failure to detect bad
+	 * input. Other defaults differ too, and they may not all be covered by tests.
+	 * See the "Config default changes" sections of
+	 * https://github.com/FasterXML/jackson/wiki/Jackson-Release-3.0 for the full list.
+	 *
+	 * As a precaution for this first stage of the Jackson 2 to Jackson 3 migration we keep the
+	 * previous behaviour here. This can be revisited later, once each use case has been
+	 * analysed in more depth.
+	 */
+	static {
+		ourMapperPrettyPrint = JsonMapper.builderWithJackson2Defaults()
+				.changeDefaultPropertyInclusion(incl -> incl.withValueInclusion(JsonInclude.Include.NON_NULL)
+						.withContentInclusion(JsonInclude.Include.NON_NULL))
+				.changeDefaultVisibility(vc -> vc.withFieldVisibility(JsonAutoDetect.Visibility.PUBLIC_ONLY))
+				.filterProvider(SENSITIVE_DATA_FILTER_PROVIDER)
+				.enable(SerializationFeature.FAIL_ON_EMPTY_BEANS)
+				.enable(SerializationFeature.INDENT_OUTPUT)
+				.build();
+
+		ourMapperNonPrettyPrint = JsonMapper.builderWithJackson2Defaults()
+				.changeDefaultPropertyInclusion(incl -> incl.withValueInclusion(JsonInclude.Include.NON_NULL)
+						.withContentInclusion(JsonInclude.Include.NON_NULL))
+				.changeDefaultVisibility(vc -> vc.withFieldVisibility(JsonAutoDetect.Visibility.PUBLIC_ONLY))
+				.filterProvider(SENSITIVE_DATA_FILTER_PROVIDER)
+				.enable(SerializationFeature.FAIL_ON_EMPTY_BEANS)
+				.disable(SerializationFeature.INDENT_OUTPUT)
+				.build();
+
+		ourMapperIncludeSensitive = JsonMapper.builderWithJackson2Defaults()
+				.filterProvider(SHOW_ALL_DATA_FILTER_PROVIDER)
+				.changeDefaultPropertyInclusion(incl -> incl.withValueInclusion(JsonInclude.Include.NON_NULL)
+						.withContentInclusion(JsonInclude.Include.NON_NULL))
+				.changeDefaultVisibility(vc -> vc.withFieldVisibility(JsonAutoDetect.Visibility.PUBLIC_ONLY))
+				.enable(SerializationFeature.FAIL_ON_EMPTY_BEANS)
+				.disable(SerializationFeature.INDENT_OUTPUT)
+				.build();
+	}
+
+	/**
+	 * Parse JSON
+	 */
+	public static <T> T deserialize(@Nonnull String theInput, @Nonnull Class<T> theType) {
+		Validate.notBlank(theInput, "theInput must not be blank or null");
+		try {
+			return ourMapperPrettyPrint.readerFor(theType).readValue(theInput);
+		} catch (JacksonException e) {
+			// Should not happen
+			throw new InternalErrorException(Msg.code(2060) + e);
+		}
+	}
+
+	/**
+	 * Parse JSON
+	 */
+	public static <T> List<T> deserializeList(@Nonnull String theInput, @Nonnull Class<T> theType)
+			throws JacksonException {
+		return ourMapperPrettyPrint.readerForListOf(theType).readValue(theInput);
+	}
+
+	/**
+	 * Parse JSON
+	 */
+	public static <T> T deserialize(@Nonnull InputStream theInput, @Nonnull Class<T> theType) throws JacksonException {
+		return ourMapperPrettyPrint.readerFor(theType).readValue(theInput);
+	}
+
+	/**
+	 * Includes fields which are annotated with {@link SensitiveNoDisplay}. Currently only meant to be used for serialization
+	 * for batch job parameters.
+	 */
+	public static String serializeWithSensitiveData(@Nonnull IModelJson theInput) {
+		try {
+			return ourMapperIncludeSensitive.writeValueAsString(theInput);
+		} catch (JacksonException e) {
+			throw new InvalidRequestException(Msg.code(2487) + "Failed to encode " + theInput.getClass(), e);
+		}
+	}
+
+	/**
+	 * Encode JSON
+	 */
+	public static String serialize(@Nonnull Object theInput) {
+		return serialize(theInput, true);
+	}
+
+	/**
+	 * Encode JSON
+	 */
+	public static String serialize(@Nonnull Object theInput, boolean thePrettyPrint) {
+		try {
+			StringWriter sw = new StringWriter();
+			if (thePrettyPrint) {
+				ourMapperPrettyPrint.writeValue(sw, theInput);
+			} else {
+				ourMapperNonPrettyPrint.writeValue(sw, theInput);
+			}
+			return sw.toString();
+		} catch (JacksonException e) {
+			// Should not happen
+			throw new InternalErrorException(Msg.code(2061) + e);
+		}
+	}
+
+	public FilterProvider getSensitiveDataFilterProvider() {
+		return SENSITIVE_DATA_FILTER_PROVIDER;
+	}
+
+	/**
+	 * Encode JSON
+	 */
+	public static void serialize(@Nonnull Object theInput, @Nonnull Writer theWriter) throws IOException {
+		// Note: We append a string here rather than just having ourMapper write directly
+		// to the Writer because ourMapper seems to close the writer for some stupid
+		// reason.. There's probably a way of preventing that bit I'm not sure what that
+		// is and it's not a big deal here.
+		theWriter.append(serialize(theInput));
+	}
+
+	public static String serializeOrInvalidRequest(IModelJson theJson) {
+		try {
+			return ourMapperNonPrettyPrint.writeValueAsString(theJson);
+		} catch (JacksonException e) {
+			throw newInvalidRequestException(theJson, e);
+		}
+	}
+
+	public static String serializeOrInvalidRequest(Object theObject) {
+		return serializeOrInvalidRequest(theObject, true);
+	}
+
+	public static String serializeOrInvalidRequest(Object theObject, boolean thePrettyPrint) {
+		try {
+			return serialize(theObject, thePrettyPrint);
+		} catch (InternalErrorException e) {
+			throw newInvalidRequestException(theObject, e);
+		}
+	}
+
+	private static InvalidRequestException newInvalidRequestException(Object theObject, Exception theCause)
+			throws InvalidRequestException {
+		return new InvalidRequestException(Msg.code(1741) + "Failed to encode " + theObject.getClass(), theCause);
+	}
+
+	private static class SensitiveDataFilter extends SimpleBeanPropertyFilter {
+
+		@Override
+		protected boolean include(PropertyWriter writer) {
+			return !isFieldSensitive(writer);
+		}
+
+		private boolean isFieldSensitive(PropertyWriter writer) {
+			return writer.findAnnotation(SensitiveNoDisplay.class) != null;
+		}
+	}
+}

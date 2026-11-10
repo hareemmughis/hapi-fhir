@@ -1,22 +1,22 @@
 package ca.uhn.fhir.model;
 
-import static org.junit.Assert.*;
+import org.hl7.fhir.dstu2.model.Narrative;
+import org.hl7.fhir.utilities.xhtml.XhtmlNode;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 
-import org.hl7.fhir.instance.model.Narrative;
-import org.hl7.fhir.instance.utilities.xhtml.XhtmlNode;
-import org.junit.Ignore;
-import org.junit.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class XhtmlNodeTest {
 
 	@Test
-	@Ignore
+	@Disabled
 	public void testNamespaces() {
 		
 		Narrative type = new Narrative();
 		XhtmlNode div = type.getDiv();
 		div.setValue("<xhtml:div xmlns:xhtml=\"http://www.w3.org/1999/xhtml\">hello</xhtml:div>");
-		
+
 		assertEquals("<xhtml:div xmlns:xhtml=\"http://www.w3.org/1999/xhtml\">hello</xhtml:div>", div.getValue());
 
 	}

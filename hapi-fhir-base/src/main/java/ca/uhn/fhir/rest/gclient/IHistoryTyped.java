@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.gclient;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,17 +17,25 @@ package ca.uhn.fhir.rest.gclient;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.gclient;
+
+import ca.uhn.fhir.rest.param.DateRangeParam;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
 
 import java.util.Date;
 
-import org.hl7.fhir.instance.model.api.IPrimitiveType;
-
-public interface IHistoryTyped<T> extends IClientExecutable<IHistoryTyped<T>, T>  {
+public interface IHistoryTyped<T> extends IClientExecutable<IHistoryTyped<T>, T> {
 
 	/**
-	 * Request that the server return only resource versions that were created at or after the given time (inclusive)
+	 * Request that the server return only the history elements between the
+	 * specific range
 	 */
-	IHistoryTyped<T> since(Date theCutoff);
+	IHistoryTyped<T> at(DateRangeParam theDateRangeParam);
+
+	/**
+	 * Request that the server return only up to <code>theCount</code> number of resources
+	 */
+	IHistoryTyped<T> count(Integer theCount);
 
 	/**
 	 * Request that the server return only resource versions that were created at or after the given time (inclusive)
@@ -41,9 +47,13 @@ public interface IHistoryTyped<T> extends IClientExecutable<IHistoryTyped<T>, T>
 	IHistoryTyped<T> since(IPrimitiveType<Date> theCutoff);
 
 	/**
-	 * Request that the server return only up to <code>theCount</code> number of resources
+	 * Request that the server return only resource versions that were created at or after the given time (inclusive)
 	 */
-	IHistoryTyped<T> count(Integer theCount);
-	
-	
+	IHistoryTyped<T> since(Date theCutoff);
+
+	/**
+	 * Requests that the server skips a number of resources and start at the specified element. Use
+	 * with {@link #count(Integer)}.
+	 */
+	IHistoryTyped<T> offset(Integer theOffset);
 }

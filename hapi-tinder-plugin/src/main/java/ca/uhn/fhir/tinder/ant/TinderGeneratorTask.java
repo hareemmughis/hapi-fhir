@@ -1,4 +1,3 @@
-package ca.uhn.fhir.tinder.ant;
 /*
  * #%L
  * HAPI Tinder Plugin
@@ -8,9 +7,9 @@ package ca.uhn.fhir.tinder.ant;
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,6 +17,28 @@ package ca.uhn.fhir.tinder.ant;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.tinder.ant;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.tinder.AbstractGenerator;
+import ca.uhn.fhir.tinder.AbstractGenerator.FailureException;
+import ca.uhn.fhir.tinder.GeneratorContext;
+import ca.uhn.fhir.tinder.GeneratorContext.ResourceSource;
+import ca.uhn.fhir.tinder.TinderResourceGeneratorMojo;
+import ca.uhn.fhir.tinder.TinderStructuresMojo.ValueSetFileDefinition;
+import ca.uhn.fhir.tinder.ValueSetGenerator;
+import ca.uhn.fhir.tinder.VelocityHelper;
+import ca.uhn.fhir.tinder.parser.BaseStructureParser;
+import ca.uhn.fhir.tinder.parser.BaseStructureSpreadsheetParser;
+import ca.uhn.fhir.tinder.parser.DatatypeGeneratorUsingSpreadsheet;
+import ca.uhn.fhir.tinder.parser.TargetType;
+import org.apache.commons.text.WordUtils;
+import org.apache.maven.plugin.MojoFailureException;
+import org.apache.tools.ant.BuildException;
+import org.apache.tools.ant.Task;
+import org.apache.velocity.VelocityContext;
+import org.apache.velocity.app.VelocityEngine;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -29,87 +50,76 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.StringTokenizer;
 
-import org.apache.commons.lang.WordUtils;
-import org.apache.tools.ant.BuildException;
-import org.apache.tools.ant.Task;
-import org.apache.velocity.VelocityContext;
-import org.apache.velocity.app.VelocityEngine;
-import org.apache.velocity.tools.generic.EscapeTool;
-
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.tinder.AbstractGenerator;
-import ca.uhn.fhir.tinder.AbstractGenerator.ExecutionException;
-import ca.uhn.fhir.tinder.AbstractGenerator.FailureException;
-import ca.uhn.fhir.tinder.GeneratorContext;
-import ca.uhn.fhir.tinder.GeneratorContext.ProfileFileDefinition;
-import ca.uhn.fhir.tinder.TinderStructuresMojo.ValueSetFileDefinition;
-import ca.uhn.fhir.tinder.ValueSetGenerator;
-import ca.uhn.fhir.tinder.VelocityHelper;
-import ca.uhn.fhir.tinder.parser.BaseStructureSpreadsheetParser;
-import ca.uhn.fhir.tinder.parser.DatatypeGeneratorUsingSpreadsheet;
-import ca.uhn.fhir.tinder.parser.ProfileParser;
-import ca.uhn.fhir.tinder.parser.ResourceGeneratorUsingSpreadsheet;
-import ca.uhn.fhir.tinder.parser.TargetType;
-
 /**
-/**
+ * /**
  * Generate files from FHIR resource/composite metadata using Velocity templates.
  * <p>
  * Generates either source or resource files for each selected resource or
  * composite data type. One file is generated for each selected entity. The
  * files are generated using a Velocity template that can be taken from
  * inside the hapi-timder-plugin project or can be located in other projects
+ * </p>
  * <p>
- * The following Ant task properties are used 
- * <p>
- * <table border="1" cellpadding="2" cellspacing="0">
+ * The following Ant task properties are used
+ * </p>
+ * <table border="1">
+ *   <caption>Ant Properties</caption>
  *   <tr>
- *     <td valign="top"><b>Attribute</b></td>
- *     <td valign="top"><b>Description</b></td>
- *     <td align="center" valign="top"><b>Required</b></td>
+ *     <td><b>Attribute</b></td>
+ *     <td><b>Description</b></td>
+ *     <td><b>Required</b></td>
  *   </tr>
  *   <tr>
- *     <td valign="top">version</td>
- *     <td valign="top">The FHIR version whose resource metadata
+ *     <td>version</td>
+ *     <td>The FHIR version whose resource metadata
  *     is to be used to generate the files<br>
- *     Valid values:&nbsp;<code><b>dstu</b></code>&nbsp;|&nbsp;<code><b>dstu2</b></code>&nbsp;|&nbsp;<code><b>dstu3</b></code></td>
- *     <td valign="top" align="center">Yes</td>
+ *     Valid values:&nbsp;<code><b>dstu2</b></code>&nbsp;|&nbsp;<code><b>dstu3</b></code>&nbsp;|&nbsp;<code><b>r4</b></code>&nbsp;|&nbsp;<code><b>r5</b></code></td>
+ *     <td>Yes</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">projectHome</td>
- *     <td valign="top">The project's base directory. This is used to 
+ *     <td>projectHome</td>
+ *     <td>The project's base directory. This is used to
  *     possibly locate other assets within the project used in file generation.</td>
- *     <td valign="top" align="center">No. Defaults to: <code>${basedir}/..</code></td>
+ *     <td>No. Defaults to: <code>${basedir}/..</code></td>
  *   </tr>
  *   <tr>
- *     <td valign="top">generateResources</td>
- *     <td valign="top">Should files be generated from FHIR resource metadata?<br>
- *     Valid values:&nbsp;<code><b>true</b></code>&nbsp;|&nbsp;<code><b>false</b></code></td> 
- *     <td valign="top" align="center" rowspan="4">At least one of these four options must be specified</td>
+ *     <td>generateResources</td>
+ *     <td>Should files be generated from FHIR resource metadata?<br>
+ *     Valid values:&nbsp;<code><b>true</b></code>&nbsp;|&nbsp;<code><b>false</b></code></td>
+ *     <td rowspan="4">At least one of these four options must be specified as <code><b>true</b></code></td>
  *   </tr>
  *   <tr>
- *     <td valign="top">generateDataTypes</td>
- *     <td valign="top">Should files be generated from FHIR composite data type metadata?<br>
- *     Valid values:&nbsp;<code><b>true</b></code>&nbsp;|&nbsp;<code><b>false</b></code></td> 
+ *     <td>generateDataTypes</td>
+ *     <td>Should files be generated from FHIR composite data type metadata?<br>
+ *     Valid values:&nbsp;<code><b>true</b></code>&nbsp;|&nbsp;<code><b>false</b></code></td>
  *   </tr>
  *   <tr>
- *     <td valign="top">generateValueSets</td>
- *     <td valign="top">Should files be generated from FHIR value set metadata?<br>
+ *     <td>generateValueSets</td>
+ *     <td>Should files be generated from FHIR value set metadata?<br>
  *     This option can only be used if generating multiple files (one file per value-set.)<br>
- *     Valid values:&nbsp;<code><b>true</b></code>&nbsp;|&nbsp;<code><b>false</b></code></td> 
+ *     Valid values:&nbsp;<code><b>true</b></code>&nbsp;|&nbsp;<code><b>false</b></code></td>
  *   </tr>
  *   <tr>
- *     <td valign="top">generateProfiles</td>
- *     <td valign="top">Should files be generated from FHIR profile metadata?<br>
+ *     <td>generateProfiles</td>
+ *     <td>Should files be generated from FHIR profile metadata?<br>
  *     This option can only be used if generating multiple files (one file per profile.)<br>
- *     Valid values:&nbsp;<code><b>true</b></code>&nbsp;|&nbsp;<code><b>false</b></code></td> 
+ *     Valid values:&nbsp;<code><b>true</b></code>&nbsp;|&nbsp;<code><b>false</b></code></td>
  *   </tr>
  *   <tr>
- *     <td colspan="3" />
+ *     <td>resourceSource</td>
+ *     <td>Which source of resource definitions should be processed? Valid values are:<br>
+ *     <ul>
+ *     <li><code><b>spreadsheet</b></code>&nbsp;&nbsp;to cause resources to be generated based on the FHIR spreadsheets</li>
+ *     <li><code><b>model</b></code>&nbsp;&nbsp;to cause resources to be generated based on the model structure classes. Note that
+ *     <code>generateResources</code> is the only one of the above options that can be used when <code>model</code> is specified.</li></ul></td>
+ *     <td>No. Defaults to: <code><b>spreadsheet</b></code></td>
  *   </tr>
  *   <tr>
- *     <td valign="top" colspan="3">Java source files can be generated
- *     for FHIR resources or composite data types. Source files can be  
+ *     <td colspan="3"></td>
+ *   </tr>
+ *   <tr>
+ *     <td colspan="3">Java source files can be generated
+ *     for FHIR resources or composite data types. Source files can be
  *     generated for each selected entity or a single source file can
  *     be generated containing all of the selected entity. The following configuration
  *     properties control the naming of the generated source files:
@@ -124,46 +134,46 @@ import ca.uhn.fhir.tinder.parser.TargetType;
  *     </td>
  *   </tr>
  *   <tr>
- *     <td valign="top">targetSourceDirectory</td>
- *     <td valign="top">The source directory to contain the generated Java packages and classes.</td>
- *     <td valign="top" align="center">Yes when Java source files are to be generated</td>
+ *     <td>targetSourceDirectory</td>
+ *     <td>The source directory to contain the generated Java packages and classes.</td>
+ *     <td>Yes when Java source files are to be generated</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">targetPackage</td>
- *     <td valign="top">The Java package that will contain the generated classes.
+ *     <td>targetPackage</td>
+ *     <td>The Java package that will contain the generated classes.
  *     This package is generated in the &lt;targetSourceDirectory&gt; if needed.</td>
- *     <td valign="top" align="center">Yes when <i>targetSourceDirectory</i> is specified</td>
+ *     <td>Yes when <i>targetSourceDirectory</i> is specified</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">packageBase</td>
- *     <td valign="top">The base Java package for related classes. This property
+ *     <td>packageBase</td>
+ *     <td>The base Java package for related classes. This property
  *     can be used to reference class in other places in a folder structure.</td>
- *     <td valign="top" align="center">No</td>
+ *     <td>No</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">targetFile</td>
- *     <td valign="top">The name of the file to be generated</td>
- *     <td valign="top" align="center">Yes when generating a single file containing all selected elements</td>
+ *     <td>targetFile</td>
+ *     <td>The name of the file to be generated</td>
+ *     <td>Yes when generating a single file containing all selected elements</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">filenamePrefix</td>
- *     <td valign="top">The prefix string that is to be added onto the
- *     beginning of the resource or composite data type name to become 
+ *     <td>filenamePrefix</td>
+ *     <td>The prefix string that is to be added onto the
+ *     beginning of the resource or composite data type name to become
  *     the Java class name or resource file name.</td>
- *     <td valign="top" align="center">No</td>
+ *     <td>No</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">filenameSuffix</td>
- *     <td valign="top">Suffix that will be added onto the end of the resource 
+ *     <td>filenameSuffix</td>
+ *     <td>Suffix that will be added onto the end of the resource
  *     or composite data type name to become the Java class name or resource file name.</td>
- *     <td valign="top" align="center">No.</code></td>
+ *     <td>No</td>
  *   </tr>
  *   <tr>
- *     <td colspan="3" />
+ *     <td colspan="3"></td>
  *   </tr>
  *   <tr>
- *     <td valign="top" colspan="3">Resource (non-Java) files can also be generated
- *     for FHIR resources or composite data types. a file can be  
+ *     <td colspan="3">Resource (non-Java) files can also be generated
+ *     for FHIR resources or composite data types. a file can be
  *     generated for each selected entity or a single file can
  *     be generated containing all of the selected entity. The following configuration
  *     properties control the naming of the generated files:
@@ -175,77 +185,77 @@ import ca.uhn.fhir.tinder.parser.TargetType;
  *     </td>
  *   </tr>
  *   <tr>
- *     <td valign="top">targetResourceDirectory</td>
- *     <td valign="top">The resource directory to contain the generated files.</td>
- *     <td valign="top" align="center">Yes when resource files are to be generated</td>
+ *     <td>targetResourceDirectory</td>
+ *     <td>The resource directory to contain the generated files.</td>
+ *     <td>Yes when resource files are to be generated</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">targetFolder</td>
- *     <td valign="top">The folder within the targetResourceDirectory where the generated files will be placed.
+ *     <td>targetFolder</td>
+ *     <td>The folder within the targetResourceDirectory where the generated files will be placed.
  *     This folder is generated in the &lt;targetResourceDirectory&gt; if needed.</td>
- *     <td valign="top" align="center">No</td>
+ *     <td>No</td>
  *   </tr>
  *   <tr>
- *     <td colspan="3" />
+ *     <td colspan="3"></td>
  *   </tr>
  *   <tr>
- *     <td valign="top">template</td>
- *     <td valign="top">The path of one of the <i>Velocity</i> templates
+ *     <td>template</td>
+ *     <td>The path of one of the <i>Velocity</i> templates
  *     contained within the <code>hapi-tinder-plugin</code> Maven plug-in
  *     classpath that will be used to generate the files.</td>
- *     <td valign="top" align="center" rowspan="2">One of these two options must be configured</td>
+ *     <td rowspan="2">One of these two options must be configured</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">templateFile</td>
- *     <td valign="top">The full path to the <i>Velocity</i> template that is
- *     to be used to generate the files.</td> 
+ *     <td>templateFile</td>
+ *     <td>The full path to the <i>Velocity</i> template that is
+ *     to be used to generate the files.</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">velocityPath</td>
- *     <td valign="top">When using the <code>templateFile</code> option, this property
+ *     <td>velocityPath</td>
+ *     <td>When using the <code>templateFile</code> option, this property
  *     can be used to specify where Velocity macros and other resources are located.</td>
- *     <td valign="top" align="center">No. Defaults to same directory as the template file.</td>
+ *     <td>No. Defaults to same directory as the template file.</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">velocityProperties</td>
- *     <td valign="top">Specifies the full path to a java properties file
+ *     <td>velocityProperties</td>
+ *     <td>Specifies the full path to a java properties file
  *     containing Velocity configuration properties</td>
- *     <td valign="top" align="center">No.</td>
+ *     <td>No.</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">includeResources</td>
- *     <td valign="top">A list of the names of the resources or composite data types that should
+ *     <td>includeResources</td>
+ *     <td>A list of the names of the resources or composite data types that should
  *     be used in the file generation</td>
- *     <td valign="top" align="center">No. Defaults to all defined resources except for DSTU2, 
+ *     <td>No. Defaults to all defined resources except for DSTU2,
  *     the <code>Binary</code> resource is excluded and
  *     for DSTU3, the <code>Conformance</code> resource is excluded.</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">excludeResources</td>
- *     <td valign="top">A list of the names of the resources or composite data types that should
+ *     <td>excludeResources</td>
+ *     <td>A list of the names of the resources or composite data types that should
  *     excluded from the file generation</td>
- *     <td valign="top" align="center">No.</td>
+ *     <td>No.</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">valueSetFiles</td>
- *     <td valign="top">A list of files containing value-set resource definitions
+ *     <td>valueSetFiles</td>
+ *     <td>A list of files containing value-set resource definitions
  *     to be used.</td>
- *     <td valign="top" align="center">No. Defaults to all defined value-sets that 
+ *     <td>No. Defaults to all defined value-sets that
  *     are referenced from the selected resources.</td>
  *   </tr>
  *   <tr>
- *     <td valign="top">profileFiles</td>
- *     <td valign="top">A list of files containing profile definitions
+ *     <td>profileFiles</td>
+ *     <td>A list of files containing profile definitions
  *     to be used.</td>
- *     <td valign="top" align="center">No. Defaults to the default profile
+ *     <td>No. Defaults to the default profile
  *     for each selected resource</td>
  *   </tr>
  * </table>
- * 
- * 
- * 
+ *
+ *
+ *
  * @author Bill Denton
- * 
+ *
  */
 public class TinderGeneratorTask extends Task {
 
@@ -260,7 +270,7 @@ public class TinderGeneratorTask extends Task {
 	private boolean generateValueSets;
 
 	private boolean generateProfiles;
-	
+
 	private File targetSourceDirectory;
 
 	private String targetPackage;
@@ -270,13 +280,13 @@ public class TinderGeneratorTask extends Task {
 	private String targetFile;
 
 	private String filenamePrefix;
-	
+
 	private String filenameSuffix;
-	
+
 	private File targetResourceDirectory;
 
 	private String targetFolder;
-	
+
 	// one of these two is required
 	private String template;
 	private File templateFile;
@@ -289,43 +299,52 @@ public class TinderGeneratorTask extends Task {
 
 	private List<String> excludeResources;
 
+	private String resourceSource;
+
 	private List<ValueSetFileDefinition> valueSetFiles;
 
-	private List<ProfileFileDefinition> profileFiles;
-	
 	private boolean verbose;
 
 	private FhirContext fhirContext; // set from version in validateAttributes
-    
+
 	/**
-	 * 
+	 *
 	 */
-	public TinderGeneratorTask () {
+	public TinderGeneratorTask() {
 		super();
 	}
-	
+
+	protected void cleanup() {}
+
 	@Override
-	public void execute () throws BuildException {
+	public void execute() throws BuildException {
 		validateAttributes();
 
-		
 		GeneratorContext context = new GeneratorContext();
-		context.setVersion(version);
-		context.setBaseDir(projectHome);
-		context.setIncludeResources(includeResources);
-		context.setExcludeResources(excludeResources);
-		context.setValueSetFiles(valueSetFiles);
-		context.setProfileFiles(profileFiles);
-		
 		Generator generator = new Generator();
 		try {
+			context.setVersion(version);
+			context.setBaseDir(projectHome);
+			context.setIncludeResources(includeResources);
+			context.setExcludeResources(excludeResources);
+			context.setResourceSource(resourceSource);
+			context.setValueSetFiles(valueSetFiles);
+			if (ResourceSource.MODEL.equals(context.getResourceSource())) {
+				if (generateDatatypes) {
+					throw new BuildException(
+							Msg.code(135) + "Cannot use \"generateDatatypes\" when resourceSource=model");
+				}
+				if (generateValueSets) {
+					throw new BuildException(
+							Msg.code(136) + "Cannot use \"generateValueSets\" when resourceSource=model");
+				}
+			}
+
 			generator.prepare(context);
-		} catch (ExecutionException e) {
-			throw new BuildException(e.getMessage(), e.getCause());
-		} catch (FailureException e) {
-			throw new BuildException(e.getMessage(), e.getCause());
+		} catch (MojoFailureException | FailureException e) {
+			throw new BuildException(Msg.code(137) + e.getMessage(), e.getCause());
 		}
-		
+
 		/*
 		 * Deal with the generation target
 		 */
@@ -333,17 +352,21 @@ public class TinderGeneratorTask extends Task {
 		File targetDirectory = null;
 		if (targetSourceDirectory != null) {
 			if (targetResourceDirectory != null) {
-				throw new BuildException("Both [targetSourceDirectory] and [targetResourceDirectory] are specified. Please choose just one.");
+				throw new BuildException(
+						Msg.code(138)
+								+ "Both [targetSourceDirectory] and [targetResourceDirectory] are specified. Please choose just one.");
 			}
 			targetType = TargetType.SOURCE;
 			if (null == targetPackage) {
-				throw new BuildException("The [targetPackage] property must be specified when generating Java source code.");
+				throw new BuildException(Msg.code(139)
+						+ "The [targetPackage] property must be specified when generating Java source code.");
 			}
 			targetDirectory = new File(targetSourceDirectory, targetPackage.replace('.', File.separatorChar));
-		} else
-		if (targetResourceDirectory != null) {
+		} else if (targetResourceDirectory != null) {
 			if (targetSourceDirectory != null) {
-				throw new BuildException("Both [targetSourceDirectory] and [targetResourceDirectory] are specified. Please choose just one.");
+				throw new BuildException(
+						Msg.code(140)
+								+ "Both [targetSourceDirectory] and [targetResourceDirectory] are specified. Please choose just one.");
 			}
 			targetType = TargetType.RESOURCE;
 			if (targetFolder != null) {
@@ -355,11 +378,12 @@ public class TinderGeneratorTask extends Task {
 				targetPackage = "";
 			}
 		} else {
-			throw new BuildException("Either [targetSourceDirectory] or [targetResourceDirectory] must be specified.");
+			throw new BuildException(
+					Msg.code(141) + "Either [targetSourceDirectory] or [targetResourceDirectory] must be specified.");
 		}
 		targetDirectory.mkdirs();
-		log(" * Output ["+targetType.toString()+"] Directory: " + targetDirectory.getAbsolutePath());
-		
+		log(" * Output [" + targetType.toString() + "] Directory: " + targetDirectory.getAbsolutePath());
+
 		try {
 			/*
 			 * Single file with all elements
@@ -376,7 +400,8 @@ public class TinderGeneratorTask extends Task {
 				/*
 				 * Next, deal with the template and initialize velocity
 				 */
-				VelocityEngine v = VelocityHelper.configureVelocityEngine(templateFile, velocityPath, velocityProperties);
+				VelocityEngine v =
+						VelocityHelper.configureVelocityEngine(templateFile, velocityPath, velocityProperties);
 				InputStream templateIs = null;
 				if (templateFile != null) {
 					templateIs = new FileInputStream(templateFile);
@@ -384,15 +409,14 @@ public class TinderGeneratorTask extends Task {
 					templateIs = this.getClass().getResourceAsStream(template);
 				}
 				InputStreamReader templateReader = new InputStreamReader(templateIs);
-		
+
 				/*
 				 * build new Velocity Context
 				 */
 				VelocityContext ctx = new VelocityContext();
 				if (packageBase != null) {
 					ctx.put("packageBase", packageBase);
-				} else
-				if (targetPackage != null) {
+				} else if (targetPackage != null) {
 					int ix = targetPackage.lastIndexOf('.');
 					if (ix > 0) {
 						ctx.put("packageBase", targetPackage.subSequence(0, ix));
@@ -403,25 +427,28 @@ public class TinderGeneratorTask extends Task {
 				ctx.put("targetPackage", targetPackage);
 				ctx.put("targetFolder", targetFolder);
 				ctx.put("version", version);
-				ctx.put("isRi", BaseStructureSpreadsheetParser.determineVersionEnum(version).isRi());
+				ctx.put(
+						"isRi",
+						BaseStructureSpreadsheetParser.determineVersionEnum(version)
+								.isRi());
 				ctx.put("hash", "#");
-				ctx.put("esc", new EscapeTool());
+				ctx.put("esc", new TinderResourceGeneratorMojo.EscapeTool());
 				if (BaseStructureSpreadsheetParser.determineVersionEnum(version).isRi()) {
 					ctx.put("resourcePackage", "org.hl7.fhir." + version + ".model");
 				} else {
 					ctx.put("resourcePackage", "ca.uhn.fhir.model." + version + ".resource");
 				}
-				
+
 				String capitalize = WordUtils.capitalize(version);
-				if ("Dstu".equals(capitalize)) {
-					capitalize="Dstu1";
+				if ("R4b".equals(capitalize)) {
+					capitalize = "R4B";
 				}
 				ctx.put("versionCapitalized", capitalize);
-				
+
 				/*
 				 * Write resources if selected
 				 */
-				ResourceGeneratorUsingSpreadsheet rp = context.getResourceGenerator();
+				BaseStructureParser rp = context.getResourceGenerator();
 				if (generateResources && rp != null) {
 					log("Writing Resources...");
 					ctx.put("resources", rp.getResources());
@@ -437,14 +464,14 @@ public class TinderGeneratorTask extends Task {
 					}
 				}
 
-			/*
-			 * Multiple files.. one for each element
-			 */
+				/*
+				 * Multiple files.. one for each element
+				 */
 			} else {
 				/*
 				 * Write resources if selected
 				 */
-				ResourceGeneratorUsingSpreadsheet rp = context.getResourceGenerator();
+				BaseStructureParser rp = context.getResourceGenerator();
 				if (generateResources && rp != null) {
 					log("Writing Resources...");
 					rp.setFilenamePrefix(filenamePrefix);
@@ -485,145 +512,17 @@ public class TinderGeneratorTask extends Task {
 					vsp.setVelocityProperties(velocityProperties);
 					vsp.writeMarkedValueSets(targetType, targetDirectory, targetPackage);
 				}
-				
-				/*
-				 * Write profiles
-				 */
-				ProfileParser pp = context.getProfileParser();
-				if (generateProfiles && pp != null) {
-					log("Writing Profiles...");
-					pp.setFilenamePrefix(filenamePrefix);
-					pp.setFilenameSuffix(filenameSuffix);
-					pp.setTemplate(template);
-					pp.setTemplateFile(templateFile);
-					pp.setVelocityPath(velocityPath);
-					pp.setVelocityProperties(velocityProperties);
-					pp.writeAll(targetType, targetDirectory, null, targetPackage);
-				}
 			}
 
 		} catch (Exception e) {
 			if (e instanceof BuildException) {
-				throw (BuildException)e;
+				throw (BuildException) e;
 			}
-			log("Caught exception: "+e.getClass().getName()+" ["+e.getMessage()+"]", 1);
+			log("Caught exception: " + e.getClass().getName() + " [" + e.getMessage() + "]", 1);
 			e.printStackTrace();
-			throw new BuildException("Error processing "+getTaskName()+" task.", e);
+			throw new BuildException(Msg.code(142) + "Error processing " + getTaskName() + " task.", e);
 		} finally {
 			cleanup();
-		}	
-	}
-
-	protected void validateAttributes () throws BuildException {
-		if (null == version) {
-			throw new BuildException("The "+this.getTaskName()+" task requires \"version\" attribute.");
-		}
-		if (null == template) {
-			if (null == templateFile) {
-				throw new BuildException("The "+this.getTaskName()+" task requires \"template\" or \"templateFile\" attribute.");
-			}
-			if (!templateFile.exists()) {
-				throw new BuildException("The Velocity template file  ["+templateFile.getAbsolutePath()+"] does not exist.");
-			}
-			if (!templateFile.canRead()) {
-				throw new BuildException("The Velocity template file ["+templateFile.getAbsolutePath()+"] cannot be read.");
-			}
-			if (!templateFile.isFile()) {
-				throw new BuildException("The Velocity template file ["+templateFile.getAbsolutePath()+"] is not a file.");
-			}
-		}
-
-		if (null == projectHome) {
-			throw new BuildException("The "+this.getTaskName()+" task requires \"projectHome\" attribute.");
-		}
-	}
-
-	protected void cleanup () {
-	}
-
-	
-	public void setVersion(String version) {
-		this.version = version;
-	}
-
-	public void setProjectHome(String projectHome) {
-		this.projectHome = projectHome;
-	}
-
-	public void setGenerateResources(boolean generateResources) {
-		this.generateResources = generateResources;
-	}
-
-	public void setGenerateDatatypes(boolean generateDatatypes) {
-		this.generateDatatypes = generateDatatypes;
-	}
-
-	public void setGenerateValueSets(boolean generateValueSets) {
-		this.generateValueSets = generateValueSets;
-	}
-
-	public void setGenerateProfiles(boolean generateProfiles) {
-		this.generateProfiles = generateProfiles;
-	}
-
-	public void setTargetSourceDirectory(File targetSourceDirectory) {
-		this.targetSourceDirectory = targetSourceDirectory;
-	}
-
-	public void setTargetPackage(String targetPackage) {
-		this.targetPackage = targetPackage;
-	}
-
-	public void setPackageBase(String packageBase) {
-		this.packageBase = packageBase;
-	}
-
-	public void setTargetFile(String targetFile) {
-		this.targetFile = targetFile;
-	}
-
-	public void setFilenamePrefix(String filenamePrefix) {
-		this.filenamePrefix = filenamePrefix;
-	}
-
-	public void setFilenameSuffix(String filenameSuffix) {
-		this.filenameSuffix = filenameSuffix;
-	}
-
-	public void setTargetResourceDirectory(File targetResourceDirectory) {
-		this.targetResourceDirectory = targetResourceDirectory;
-	}
-
-	public void setTargetFolder(String targetFolder) {
-		this.targetFolder = targetFolder;
-	}
-
-	public void setTemplate(String template) {
-		this.template = template;
-	}
-
-	public void setTemplateFile(File templateFile) {
-		this.templateFile = templateFile;
-	}
-
-	public void setVelocityPath(String velocityPath) {
-		this.velocityPath = velocityPath;
-	}
-
-	public void setVelocityProperties(String velocityProperties) {
-		this.velocityProperties = velocityProperties;
-	}
-
-	public void setIncludeResources(String names) {
-		if (null == this.includeResources) {
-			this.includeResources = new ArrayList<String>();
-		}
-		if (names != null) {
-			StringTokenizer tokens = new StringTokenizer(names, ", \t\r\n");
-			while (tokens.hasMoreTokens()) {
-				String token = tokens.nextToken();
-				this.includeResources.add(token.trim());
-			}
 		}
 	}
 
@@ -639,7 +538,88 @@ public class TinderGeneratorTask extends Task {
 			}
 		}
 	}
-	
+
+	public void setFilenamePrefix(String filenamePrefix) {
+		this.filenamePrefix = filenamePrefix;
+	}
+
+	public void setFilenameSuffix(String filenameSuffix) {
+		this.filenameSuffix = filenameSuffix;
+	}
+
+	public void setGenerateDatatypes(boolean generateDatatypes) {
+		this.generateDatatypes = generateDatatypes;
+	}
+
+	public void setGenerateProfiles(boolean generateProfiles) {
+		this.generateProfiles = generateProfiles;
+	}
+
+	public void setGenerateResources(boolean generateResources) {
+		this.generateResources = generateResources;
+	}
+
+	public void setGenerateValueSets(boolean generateValueSets) {
+		this.generateValueSets = generateValueSets;
+	}
+
+	public void setIncludeResources(String names) {
+		if (null == this.includeResources) {
+			this.includeResources = new ArrayList<String>();
+		}
+		if (names != null) {
+			StringTokenizer tokens = new StringTokenizer(names, ", \t\r\n");
+			while (tokens.hasMoreTokens()) {
+				String token = tokens.nextToken();
+				this.includeResources.add(token.trim());
+			}
+		}
+	}
+
+	public void setPackageBase(String packageBase) {
+		this.packageBase = packageBase;
+	}
+
+	public void setProjectHome(String projectHome) {
+		this.projectHome = projectHome;
+	}
+
+	public String getResourceSource() {
+		return resourceSource;
+	}
+
+	public void setResourceSource(String resourceSource) {
+		this.resourceSource = resourceSource;
+	}
+
+	public void setTargetFile(String targetFile) {
+		this.targetFile = targetFile;
+	}
+
+	public void setTargetFolder(String targetFolder) {
+		this.targetFolder = targetFolder;
+	}
+
+	public void setTargetPackage(String targetPackage) {
+		this.targetPackage = targetPackage;
+	}
+
+	public void setTargetResourceDirectory(File targetResourceDirectory) {
+		this.targetResourceDirectory = targetResourceDirectory;
+	}
+
+	public void setTargetSourceDirectory(File targetSourceDirectory) {
+		this.targetSourceDirectory = targetSourceDirectory;
+	}
+
+	public void setTemplate(String template) {
+		this.template = template;
+	}
+
+	public void setTemplateFile(File templateFile) {
+		this.templateFile = templateFile;
+	}
+
 	public void setValueSetFiles(String names) {
 		if (null == this.valueSetFiles) {
 			this.valueSetFiles = new ArrayList<ValueSetFileDefinition>();
@@ -655,43 +635,63 @@ public class TinderGeneratorTask extends Task {
 		}
 	}
 
-	public void setProfileFiles(String names) {
-		if (null == this.profileFiles) {
-			this.profileFiles = new ArrayList<ProfileFileDefinition>();
-		}
-		if (names != null) {
-			StringTokenizer tokens = new StringTokenizer(names, ", \t\r\n");
-			while (tokens.hasMoreTokens()) {
-				String token = tokens.nextToken();
-				ProfileFileDefinition def = new ProfileFileDefinition();
-				int ix = token.indexOf('{');
-				if (ix >= 0) {
-					int end = token.indexOf('}');
-					String url = token.substring(ix+1, end);
-					token = token.substring(end+1);
-					def.setProfileSourceUrl(url);
-				}
-				def.setProfileFile(token.trim());
-				this.profileFiles.add(def);
-			}
-		}
+	public void setVelocityPath(String velocityPath) {
+		this.velocityPath = velocityPath;
+	}
+
+	public void setVelocityProperties(String velocityProperties) {
+		this.velocityProperties = velocityProperties;
 	}
 
 	public void setVerbose(boolean verbose) {
 		this.verbose = verbose;
 	}
 
-	class Generator extends AbstractGenerator {
-		@Override
-		protected void logInfo(String message) {
-			log(message);
+	public void setVersion(String version) {
+		this.version = version;
+	}
+
+	protected void validateAttributes() throws BuildException {
+		if (null == version) {
+			throw new BuildException(
+					Msg.code(143) + "The " + this.getTaskName() + " task requires \"version\" attribute.");
 		}
+		if (null == template) {
+			if (null == templateFile) {
+				throw new BuildException(Msg.code(144) + "The " + this.getTaskName()
+						+ " task requires \"template\" or \"templateFile\" attribute.");
+			}
+			if (!templateFile.exists()) {
+				throw new BuildException(Msg.code(145) + "The Velocity template file  ["
+						+ templateFile.getAbsolutePath() + "] does not exist.");
+			}
+			if (!templateFile.canRead()) {
+				throw new BuildException(Msg.code(146) + "The Velocity template file [" + templateFile.getAbsolutePath()
+						+ "] cannot be read.");
+			}
+			if (!templateFile.isFile()) {
+				throw new BuildException(Msg.code(147) + "The Velocity template file [" + templateFile.getAbsolutePath()
+						+ "] is not a file.");
+			}
+		}
+
+		if (null == projectHome) {
+			throw new BuildException(
+					Msg.code(148) + "The " + this.getTaskName() + " task requires \"projectHome\" attribute.");
+		}
+	}
+
+	class Generator extends AbstractGenerator {
 		@Override
 		protected void logDebug(String message) {
 			if (verbose) {
 				log(message);
 			}
 		}
+
+		@Override
+		protected void logInfo(String message) {
+			log(message);
+		}
 	}
-	
 }

@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.param;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,25 +17,33 @@ package ca.uhn.fhir.rest.param;
  * limitations under the License.
  * #L%
  */
-import static org.apache.commons.lang3.StringUtils.isBlank;
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
+package ca.uhn.fhir.rest.param;
 
-import java.math.BigDecimal;
-
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.model.primitive.IdDt;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.util.CoverageIgnore;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
 import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
 
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.model.api.IQueryParameterType;
-import ca.uhn.fhir.model.primitive.IdDt;
-import ca.uhn.fhir.util.CoverageIgnore;
+import java.math.BigDecimal;
+import java.util.Objects;
 
-public class ReferenceParam extends BaseParam implements IQueryParameterType {
+import static ca.uhn.fhir.model.primitive.IdDt.isValidLong;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+public class ReferenceParam extends BaseParam /*implements IQueryParameterType*/ {
 
 	private String myChain;
+	private String myResourceType;
+	private String myBaseUrl;
+	private String myValue;
+	private String myIdPart;
+	private Boolean myMdmExpand;
 
-	private final IdDt myId = new IdDt();
 	/**
 	 * Constructor
 	 */
@@ -56,103 +62,170 @@ public class ReferenceParam extends BaseParam implements IQueryParameterType {
 	 * Constructor
 	 */
 	public ReferenceParam(String theChain, String theValue) {
-		setValueAsQueryToken(null, null, null, theValue);
-		setChain(theChain);
+		setValueAsQueryToken(null, null, '.' + theChain, theValue);
 	}
 
 	/**
 	 * Constructor
 	 */
 	public ReferenceParam(String theResourceType, String theChain, String theValue) {
+		String qualifier = "";
 		if (isNotBlank(theResourceType)) {
-			setValue(theResourceType + "/" + theValue);
-		} else {
-			setValue(theValue);
+			qualifier = ":" + theResourceType;
 		}
-		setChain(theChain);
+		if (isNotBlank(theChain)) {
+			qualifier = qualifier + "." + theChain;
+		}
+
+		setValueAsQueryToken(null, null, qualifier, theValue);
 	}
 
-	@Override
-	String doGetQueryParameterQualifier() {
-		StringBuilder b = new StringBuilder();
-		if (isNotBlank(getResourceType())) {
-			b.append(':');
-			b.append(getResourceType());
+	/**
+	 * Constructor
+	 *
+	 * @since 5.0.0
+	 */
+	public ReferenceParam(IIdType theValue) {
+		if (theValue != null) {
+			setValueAsQueryToken(null, null, null, theValue.getValue());
 		}
+	}
+
+	@SuppressWarnings("SizeReplaceableByIsEmpty")
+	private String defaultGetQueryParameterQualifier() {
+		StringBuilder b = new StringBuilder();
 		if (isNotBlank(myChain)) {
+			if (isNotBlank(getResourceType())) {
+				b.append(':');
+				b.append(getResourceType());
+			}
 			b.append('.');
 			b.append(myChain);
 		}
-		if (b.length() != 0) {
+		if (b.length() > 0) {
 			return b.toString();
 		}
 		return null;
 	}
 
 	@Override
-	String doGetValueAsQueryToken(FhirContext theContext) {
-		if (isBlank(myId.getResourceType())) {
-			return myId.getValue(); // e.g. urn:asdjd or 123 or cid:wieiuru or #1
+	String doGetQueryParameterQualifier() {
+		return this.myMdmExpand != null ? ":mdm" : defaultGetQueryParameterQualifier();
+	}
+
+	@Override
+	String doGetValueAsQueryToken() {
+		if (isBlank(getResourceType())) {
+			return myValue; // e.g. urn:asdjd or 123 or cid:wieiuru or #1
 		} else {
-			return myId.getIdPart();
+			if (isBlank(getChain()) && isNotBlank(getResourceType())) {
+				return getResourceType() + "/" + getIdPart();
+			}
+			return myValue;
 		}
 	}
 
 	@Override
 	void doSetValueAsQueryToken(FhirContext theContext, String theParamName, String theQualifier, String theValue) {
 		String q = theQualifier;
-		String resourceType = null;
+		if (q != null && q.endsWith(Constants.PARAMQUALIFIER_MDM)) {
+			myMdmExpand = true;
+			q = q.substring(0, q.length() - Constants.PARAMQUALIFIER_MDM.length());
+		}
+
 		if (isNotBlank(q)) {
 			if (q.startsWith(":")) {
 				int nextIdx = q.indexOf('.');
 				if (nextIdx != -1) {
-					resourceType = q.substring(1, nextIdx);
 					myChain = q.substring(nextIdx + 1);
+					myResourceType = q.substring(1, nextIdx);
 				} else {
-					resourceType = q.substring(1);
+					myChain = null;
+					myResourceType = q.substring(1);
 				}
+
+				myValue = theValue;
+				myIdPart = theValue;
+
+				IdDt id = new IdDt(theValue);
+				if (!id.hasBaseUrl() && id.hasIdPart() && id.hasResourceType()) {
+					if (id.getResourceType().equals(myResourceType)) {
+						myIdPart = id.getIdPart();
+					}
+				}
+
 			} else if (q.startsWith(".")) {
 				myChain = q.substring(1);
+				myResourceType = null;
+				myValue = theValue;
+				myIdPart = theValue;
 			}
-		}
-
-		setValue(theValue);
-
-		if (isNotBlank(resourceType) && isBlank(getResourceType())) {
-			setValue(resourceType + '/' + theValue);
+			myBaseUrl = null;
+		} else {
+			myChain = null;
+			myValue = theValue;
+			IdDt id = new IdDt(theValue);
+			myResourceType = id.getResourceType();
+			myIdPart = id.getIdPart();
+			myBaseUrl = id.getBaseUrl();
 		}
 	}
-
-
 
 	@CoverageIgnore
 	public String getBaseUrl() {
-		return myId.getBaseUrl();
+		return myBaseUrl;
 	}
 
+	public boolean isMdmExpand() {
+		return myMdmExpand != null && myMdmExpand;
+	}
+
+	public ReferenceParam setMdmExpand(boolean theMdmExpand) {
+		myMdmExpand = theMdmExpand;
+		return this;
+	}
+
+	/**
+	 * Returns <code>true</code> if this parameter has a chain value (i.e. {@link #getChain()} will not return null or an empty string)
+	 *
+	 * @since 8.6.0
+	 */
+	public boolean hasChain() {
+		return isNotBlank(myChain);
+	}
 
 	public String getChain() {
 		return myChain;
 	}
 
+	public ReferenceParam setChain(String theChain) {
+		myChain = theChain;
+		return this;
+	}
 
 	@CoverageIgnore
 	public String getIdPart() {
-		return myId.getIdPart();
+		return myIdPart;
 	}
 
 	@CoverageIgnore
 	public BigDecimal getIdPartAsBigDecimal() {
-		return myId.getIdPartAsBigDecimal();
+		return new IdDt(myValue).getIdPartAsBigDecimal();
 	}
-	
+
 	@CoverageIgnore
 	public Long getIdPartAsLong() {
-		return myId.getIdPartAsLong();
+		return new IdDt(myValue).getIdPartAsLong();
 	}
 
 	public String getResourceType() {
-		return myId.getResourceType();
+		if (isNotBlank(myResourceType)) {
+			return myResourceType;
+		}
+		if (isBlank(myChain)) {
+			return new IdDt(myValue).getResourceType();
+		}
+		return null;
 	}
 
 	public Class<? extends IBaseResource> getResourceType(FhirContext theCtx) {
@@ -163,11 +236,28 @@ public class ReferenceParam extends BaseParam implements IQueryParameterType {
 	}
 
 	public String getValue() {
-		return myId.getValue();
+		return myValue;
+	}
+
+	/**
+	 * Note that the parameter to this method <b>must</b> be a resource reference, e.g
+	 * <code>123</code> or <code>Patient/123</code> or <code>http://example.com/fhir/Patient/123</code>
+	 * or something like this. This is not appropriate for cases where a chain is being used and
+	 * the value is for a different type of parameter (e.g. a token). In that case, use one of the
+	 * setter constructors.
+	 */
+	public ReferenceParam setValue(String theValue) {
+		IdDt id = new IdDt(theValue);
+		String qualifier = null;
+		if (id.hasResourceType()) {
+			qualifier = ":" + id.getResourceType();
+		}
+		setValueAsQueryToken(null, null, qualifier, id.getIdPart());
+		return this;
 	}
 
 	public boolean hasResourceType() {
-		return myId.hasResourceType();
+		return isNotBlank(myResourceType);
 	}
 
 	@Override
@@ -175,26 +265,18 @@ public class ReferenceParam extends BaseParam implements IQueryParameterType {
 		return true;
 	}
 
-	public void setChain(String theChain) {
-		myChain = theChain;
-	}
-
-	public void setValue(String theValue) {
-		myId.setValue(theValue);
-	}
-
 	/**
 	 * Returns a new param containing the same value as this param, but with the type copnverted
 	 * to {@link DateParam}. This is useful if you are using reference parameters and want to handle
 	 * chained parameters of different types in a single method.
 	 * <p>
-	 * See <a href="http://jamesagnew.github.io/hapi-fhir/doc_rest_operations.html#dynamic_chains">Dynamic Chains</a>
+	 * See <a href="https://hapifhir.io/hapi-fhir/docs/server_plain/rest_operations_search.html#chained-resource-references">Dynamic Chains</a>
 	 * in the HAPI FHIR documentation for an example of how to use this method.
 	 * </p>
 	 */
 	public DateParam toDateParam(FhirContext theContext) {
 		DateParam retVal = new DateParam();
-		retVal.setValueAsQueryToken(theContext, null, null, getValueAsQueryToken(theContext));
+		retVal.setValueAsQueryToken(theContext, null, null, getValueAsQueryToken());
 		return retVal;
 	}
 
@@ -203,13 +285,13 @@ public class ReferenceParam extends BaseParam implements IQueryParameterType {
 	 * to {@link NumberParam}. This is useful if you are using reference parameters and want to handle
 	 * chained parameters of different types in a single method.
 	 * <p>
-	 * See <a href="http://jamesagnew.github.io/hapi-fhir/doc_rest_operations.html#dynamic_chains">Dynamic Chains</a>
+	 * See <a href="https://hapifhir.io/hapi-fhir/docs/server_plain/rest_operations_search.html#chained-resource-references">Dynamic Chains</a>
 	 * in the HAPI FHIR documentation for an example of how to use this method.
 	 * </p>
 	 */
 	public NumberParam toNumberParam(FhirContext theContext) {
 		NumberParam retVal = new NumberParam();
-		retVal.setValueAsQueryToken(theContext, null, null, getValueAsQueryToken(theContext));
+		retVal.setValueAsQueryToken(theContext, null, null, getValueAsQueryToken());
 		return retVal;
 	}
 
@@ -218,13 +300,13 @@ public class ReferenceParam extends BaseParam implements IQueryParameterType {
 	 * to {@link QuantityParam}. This is useful if you are using reference parameters and want to handle
 	 * chained parameters of different types in a single method.
 	 * <p>
-	 * See <a href="http://jamesagnew.github.io/hapi-fhir/doc_rest_operations.html#dynamic_chains">Dynamic Chains</a>
+	 * See <a href="https://hapifhir.io/hapi-fhir/docs/server_plain/rest_operations_search.html#chained-resource-references">Dynamic Chains</a>
 	 * in the HAPI FHIR documentation for an example of how to use this method.
 	 * </p>
 	 */
 	public QuantityParam toQuantityParam(FhirContext theContext) {
 		QuantityParam retVal = new QuantityParam();
-		retVal.setValueAsQueryToken(theContext, null, null, getValueAsQueryToken(theContext));
+		retVal.setValueAsQueryToken(theContext, null, null, getValueAsQueryToken());
 		return retVal;
 	}
 
@@ -243,13 +325,13 @@ public class ReferenceParam extends BaseParam implements IQueryParameterType {
 	 * to {@link StringParam}. This is useful if you are using reference parameters and want to handle
 	 * chained parameters of different types in a single method.
 	 * <p>
-	 * See <a href="http://jamesagnew.github.io/hapi-fhir/doc_rest_operations.html#dynamic_chains">Dynamic Chains</a>
+	 * See <a href="https://hapifhir.io/hapi-fhir/docs/server_plain/rest_operations_search.html#chained-resource-references">Dynamic Chains</a>
 	 * in the HAPI FHIR documentation for an example of how to use this method.
 	 * </p>
 	 */
 	public StringParam toStringParam(FhirContext theContext) {
 		StringParam retVal = new StringParam();
-		retVal.setValueAsQueryToken(theContext, null, null, getValueAsQueryToken(theContext));
+		retVal.setValueAsQueryToken(theContext, null, null, getValueAsQueryToken());
 		return retVal;
 	}
 
@@ -258,13 +340,38 @@ public class ReferenceParam extends BaseParam implements IQueryParameterType {
 	 * to {@link TokenParam}. This is useful if you are using reference parameters and want to handle
 	 * chained parameters of different types in a single method.
 	 * <p>
-	 * See <a href="http://jamesagnew.github.io/hapi-fhir/doc_rest_operations.html#dynamic_chains">Dynamic Chains</a>
+	 * See <a href="https://hapifhir.io/hapi-fhir/docs/server_plain/rest_operations_search.html#chained-resource-references">Dynamic Chains</a>
 	 * in the HAPI FHIR documentation for an example of how to use this method.
 	 * </p>
 	 */
 	public TokenParam toTokenParam(FhirContext theContext) {
 		TokenParam retVal = new TokenParam();
-		retVal.setValueAsQueryToken(theContext, null, null, getValueAsQueryToken(theContext));
+		retVal.setValueAsQueryToken(theContext, null, null, getValueAsQueryToken());
 		return retVal;
+	}
+
+	public boolean isIdPartValidLong() {
+		return isValidLong(getIdPart());
+	}
+
+	@Override
+	public boolean equals(Object theO) {
+		if (!(theO instanceof ReferenceParam that)) {
+			return false;
+		}
+		if (!super.equals(theO)) {
+			return false;
+		}
+		return Objects.equals(myChain, that.myChain)
+				&& Objects.equals(myResourceType, that.myResourceType)
+				&& Objects.equals(myBaseUrl, that.myBaseUrl)
+				&& Objects.equals(myValue, that.myValue)
+				&& Objects.equals(myIdPart, that.myIdPart)
+				&& Objects.equals(myMdmExpand, that.myMdmExpand);
+	}
+
+	@Override
+	public int hashCode() {
+		return Objects.hash(super.hashCode(), myChain, myResourceType, myBaseUrl, myValue, myIdPart, myMdmExpand);
 	}
 }

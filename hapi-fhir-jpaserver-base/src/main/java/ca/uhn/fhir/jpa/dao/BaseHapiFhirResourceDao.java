@@ -1,17 +1,15 @@
-package ca.uhn.fhir.jpa.dao;
-
 /*
  * #%L
  * HAPI FHIR JPA Server
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,420 +17,1363 @@ package ca.uhn.fhir.jpa.dao;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.jpa.dao;
 
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
-
-import java.util.*;
-import java.util.Map.Entry;
-
-import javax.annotation.PostConstruct;
-import javax.persistence.NoResultException;
-import javax.persistence.TypedQuery;
-
-import org.hl7.fhir.dstu3.model.IdType;
-import org.hl7.fhir.instance.model.api.*;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Required;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
-
-import ca.uhn.fhir.context.ConfigurationException;
+import ca.uhn.fhir.batch2.api.IJobCoordinator;
+import ca.uhn.fhir.batch2.api.IJobPartitionProvider;
+import ca.uhn.fhir.batch2.jobs.reindex.ReindexJobParameters;
+import ca.uhn.fhir.batch2.model.JobInstanceStartRequest;
 import ca.uhn.fhir.context.FhirVersionEnum;
 import ca.uhn.fhir.context.RuntimeResourceDefinition;
-import ca.uhn.fhir.context.RuntimeSearchParam;
-import ca.uhn.fhir.jpa.dao.data.IResourceHistoryTableDao;
-import ca.uhn.fhir.jpa.dao.data.IResourceIndexedSearchParamUriDao;
-import ca.uhn.fhir.jpa.dao.data.ISearchResultDao;
-import ca.uhn.fhir.jpa.entity.*;
-import ca.uhn.fhir.jpa.interceptor.IJpaServerInterceptor;
-import ca.uhn.fhir.jpa.term.IHapiTerminologySvc;
-import ca.uhn.fhir.jpa.util.DeleteConflict;
-import ca.uhn.fhir.jpa.util.StopWatch;
-import ca.uhn.fhir.jpa.util.jsonpatch.JsonPatchUtils;
-import ca.uhn.fhir.jpa.util.xmlpatch.XmlPatchUtils;
-import ca.uhn.fhir.model.api.*;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.interceptor.api.HookParams;
+import ca.uhn.fhir.interceptor.api.IInterceptorBroadcaster;
+import ca.uhn.fhir.interceptor.api.Pointcut;
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.api.config.JpaStorageSettings;
+import ca.uhn.fhir.jpa.api.dao.DaoRegistrationService;
+import ca.uhn.fhir.jpa.api.dao.DaoRegistry;
+import ca.uhn.fhir.jpa.api.dao.IFhirResourceDao;
+import ca.uhn.fhir.jpa.api.dao.ReindexOutcome;
+import ca.uhn.fhir.jpa.api.dao.ReindexParameters;
+import ca.uhn.fhir.jpa.api.model.DaoMethodOutcome;
+import ca.uhn.fhir.jpa.api.model.DeleteConflictList;
+import ca.uhn.fhir.jpa.api.model.DeleteMethodOutcome;
+import ca.uhn.fhir.jpa.api.model.ExpungeOptions;
+import ca.uhn.fhir.jpa.api.model.ExpungeOutcome;
+import ca.uhn.fhir.jpa.api.model.LazyDaoMethodOutcome;
+import ca.uhn.fhir.jpa.api.svc.IIdHelperService;
+import ca.uhn.fhir.jpa.api.svc.ResolveIdentityMode;
+import ca.uhn.fhir.jpa.dao.data.IResourceHistoryProvenanceDao;
+import ca.uhn.fhir.jpa.dao.tx.HapiTransactionService;
+import ca.uhn.fhir.jpa.delete.DeleteConflictUtil;
+import ca.uhn.fhir.jpa.model.cross.IBasePersistedResource;
+import ca.uhn.fhir.jpa.model.dao.JpaPid;
+import ca.uhn.fhir.jpa.model.dao.JpaPidFk;
+import ca.uhn.fhir.jpa.model.entity.BaseHasResource;
+import ca.uhn.fhir.jpa.model.entity.BaseTag;
+import ca.uhn.fhir.jpa.model.entity.EntityIndexStatusEnum;
+import ca.uhn.fhir.jpa.model.entity.IdAndPartitionId;
+import ca.uhn.fhir.jpa.model.entity.PartitionablePartitionId;
+import ca.uhn.fhir.jpa.model.entity.ResourceEncodingEnum;
+import ca.uhn.fhir.jpa.model.entity.ResourceHistoryProvenanceEntity;
+import ca.uhn.fhir.jpa.model.entity.ResourceHistoryTable;
+import ca.uhn.fhir.jpa.model.entity.ResourceTable;
+import ca.uhn.fhir.jpa.model.entity.StorageSettings;
+import ca.uhn.fhir.jpa.model.entity.TagDefinition;
+import ca.uhn.fhir.jpa.model.entity.TagTypeEnum;
+import ca.uhn.fhir.jpa.model.search.SearchRuntimeDetails;
+import ca.uhn.fhir.jpa.model.util.JpaConstants;
+import ca.uhn.fhir.jpa.partition.IRequestPartitionHelperSvc;
+import ca.uhn.fhir.jpa.search.PersistedJpaHistoryBundleProviderFactory;
+import ca.uhn.fhir.jpa.search.ResourceSearchUrlSvc;
+import ca.uhn.fhir.jpa.search.builder.SearchBuilder;
+import ca.uhn.fhir.jpa.search.builder.StorageInterceptorHooksFacade;
+import ca.uhn.fhir.jpa.searchparam.MatchUrlService;
+import ca.uhn.fhir.jpa.searchparam.ResourceSearch;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
+import ca.uhn.fhir.jpa.update.UpdateParameters;
+import ca.uhn.fhir.jpa.util.MemoryCacheService;
+import ca.uhn.fhir.jpa.util.QueryChunker;
+import ca.uhn.fhir.model.api.IQueryParameterType;
+import ca.uhn.fhir.model.api.StorageResponseCodeEnum;
+import ca.uhn.fhir.model.dstu2.resource.BaseResource;
+import ca.uhn.fhir.model.dstu2.resource.ListResource;
 import ca.uhn.fhir.model.primitive.IdDt;
-import ca.uhn.fhir.rest.api.PatchTypeEnum;
+import ca.uhn.fhir.rest.api.CacheControlDirective;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.api.InterceptorInvocationTimingEnum;
+import ca.uhn.fhir.rest.api.MethodOutcome;
 import ca.uhn.fhir.rest.api.RestOperationTypeEnum;
-import ca.uhn.fhir.rest.method.RequestDetails;
-import ca.uhn.fhir.rest.method.RestSearchParameterTypeEnum;
-import ca.uhn.fhir.rest.server.IBundleProvider;
-import ca.uhn.fhir.rest.server.exceptions.*;
-import ca.uhn.fhir.rest.server.interceptor.IServerInterceptor;
-import ca.uhn.fhir.rest.server.interceptor.IServerInterceptor.ActionRequestDetails;
-import ca.uhn.fhir.util.FhirTerser;
-import ca.uhn.fhir.util.ObjectUtil;
-import ca.uhn.fhir.util.OperationOutcomeUtil;
-import ca.uhn.fhir.util.ResourceReferenceInfo;
+import ca.uhn.fhir.rest.api.SearchContainedModeEnum;
+import ca.uhn.fhir.rest.api.ValidationModeEnum;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.api.server.IPreResourceAccessDetails;
+import ca.uhn.fhir.rest.api.server.IPreResourceShowDetails;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.api.server.SimplePreResourceAccessDetails;
+import ca.uhn.fhir.rest.api.server.SimplePreResourceShowDetails;
+import ca.uhn.fhir.rest.api.server.SystemRequestDetails;
+import ca.uhn.fhir.rest.api.server.storage.IDeleteExpungeJobSubmitter;
+import ca.uhn.fhir.rest.api.server.storage.IResourcePersistentId;
+import ca.uhn.fhir.rest.api.server.storage.TransactionDetails;
+import ca.uhn.fhir.rest.param.HasParam;
+import ca.uhn.fhir.rest.param.HistorySearchDateRangeParam;
+import ca.uhn.fhir.rest.server.IPagingProvider;
+import ca.uhn.fhir.rest.server.IRestfulServerDefaults;
+import ca.uhn.fhir.rest.server.RestfulServerUtils;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import ca.uhn.fhir.rest.server.exceptions.MethodNotAllowedException;
+import ca.uhn.fhir.rest.server.exceptions.PreconditionFailedException;
+import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException;
+import ca.uhn.fhir.rest.server.exceptions.ResourceVersionConflictException;
+import ca.uhn.fhir.rest.server.exceptions.UnprocessableEntityException;
+import ca.uhn.fhir.rest.server.servlet.ServletRequestDetails;
+import ca.uhn.fhir.rest.server.util.CompositeInterceptorBroadcaster;
+import ca.uhn.fhir.util.ParametersUtil;
+import ca.uhn.fhir.util.ReflectionUtil;
+import ca.uhn.fhir.util.SearchParameterUtil;
+import ca.uhn.fhir.util.StopWatch;
+import ca.uhn.fhir.util.UrlUtil;
+import ca.uhn.fhir.validation.FhirValidator;
+import ca.uhn.fhir.validation.IInstanceValidatorModule;
+import ca.uhn.fhir.validation.IValidationContext;
+import ca.uhn.fhir.validation.IValidatorModule;
+import ca.uhn.fhir.validation.ResultSeverityEnum;
+import ca.uhn.fhir.validation.ValidationOptions;
+import ca.uhn.fhir.validation.ValidationResult;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Multimap;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import jakarta.annotation.PostConstruct;
+import jakarta.persistence.LockModeType;
+import jakarta.persistence.NoResultException;
+import jakarta.persistence.Tuple;
+import jakarta.persistence.TypedQuery;
+import jakarta.persistence.criteria.CriteriaBuilder;
+import jakarta.persistence.criteria.CriteriaQuery;
+import jakarta.persistence.criteria.JoinType;
+import jakarta.persistence.criteria.Predicate;
+import jakarta.persistence.criteria.Root;
+import jakarta.servlet.http.HttpServletResponse;
+import org.apache.commons.lang3.Validate;
+import org.apache.commons.lang3.function.TriFunction;
+import org.hl7.fhir.instance.model.api.IBaseCoding;
+import org.hl7.fhir.instance.model.api.IBaseMetaType;
+import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Parameters;
+import org.hl7.fhir.r4.model.Parameters.ParametersParameterComponent;
+import org.hl7.fhir.utilities.i18n.I18nConstants;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Slice;
+import org.springframework.data.domain.Sort;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
-@Transactional(propagation = Propagation.REQUIRED)
-public abstract class BaseHapiFhirResourceDao<T extends IBaseResource> extends BaseHapiFhirDao<T> implements IFhirResourceDao<T> {
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static ca.uhn.fhir.batch2.jobs.reindex.ReindexUtils.JOB_REINDEX;
+import static ca.uhn.fhir.jpa.dao.index.IdHelperService.EMPTY_PREDICATE_ARRAY;
+import static ca.uhn.fhir.jpa.model.util.JpaConstants.SINGLE_RESULT;
+import static ca.uhn.fhir.jpa.search.builder.SearchBuilder.splitPidListByPartitionId;
+import static ca.uhn.fhir.jpa.util.InClauseNormalizer.normalizeIdListForInClause;
+import static java.util.Objects.isNull;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+public abstract class BaseHapiFhirResourceDao<T extends IBaseResource> extends BaseHapiFhirDao<T>
+		implements IFhirResourceDao<T> {
 
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BaseHapiFhirResourceDao.class);
 
 	@Autowired
-	private DaoConfig myDaoConfig;
+	protected IInterceptorBroadcaster myInterceptorBroadcaster;
+
 	@Autowired
 	protected PlatformTransactionManager myPlatformTransactionManager;
-	@Autowired
-	private IResourceHistoryTableDao myResourceHistoryTableDao;
-	@Autowired()
-	protected IResourceIndexedSearchParamUriDao myResourceIndexedSearchParamUriDao;
-	private String myResourceName;
-	private Class<T> myResourceType;
+
 	@Autowired(required = false)
 	protected IFulltextSearchSvc mySearchDao;
-	@Autowired()
-	protected ISearchResultDao mySearchResultDao;
-	private String mySecondaryPrimaryKeyParamName;
-	@Autowired()
-	protected IHapiTerminologySvc myTerminologySvc;
 
-	@Override
-	public void addTag(IIdType theId, TagTypeEnum theTagType, String theScheme, String theTerm, String theLabel) {
-		StopWatch w = new StopWatch();
-		BaseHasResource entity = readEntity(theId);
-		if (entity == null) {
-			throw new ResourceNotFoundException(theId);
+	@Autowired
+	protected HapiTransactionService myTransactionService;
+
+	@Autowired
+	private MatchResourceUrlService<JpaPid> myMatchResourceUrlService;
+
+	@Autowired
+	private SearchBuilderFactory<JpaPid> mySearchBuilderFactory;
+
+	@Autowired
+	private DaoRegistry myDaoRegistry;
+
+	@Autowired
+	private DaoRegistrationService myDaoRegistrationService;
+
+	@Autowired
+	private IRequestPartitionHelperSvc myRequestPartitionHelperService;
+
+	@Autowired
+	private IJobPartitionProvider myJobPartitionProvider;
+
+	@Autowired
+	private MatchUrlService myMatchUrlService;
+
+	@Autowired
+	private IDeleteExpungeJobSubmitter myDeleteExpungeJobSubmitter;
+
+	@Autowired
+	private IJobCoordinator myJobCoordinator;
+
+	@Autowired
+	private IResourceHistoryProvenanceDao myResourceHistoryProvenanceDao;
+
+	private IInstanceValidatorModule myInstanceValidator;
+	private String myResourceName;
+	private Class<T> myResourceType;
+
+	@Autowired
+	private PersistedJpaHistoryBundleProviderFactory myPersistedJpaHistoryBundleProviderFactory;
+
+	@Autowired
+	private MemoryCacheService myMemoryCacheService;
+
+	private TransactionTemplate myTxTemplate;
+
+	@Autowired
+	private ResourceSearchUrlSvc myResourceSearchUrlSvc;
+
+	private StorageInterceptorHooksFacade myStorageInterceptorHooks;
+
+	@VisibleForTesting
+	public void setDaoRegistryForUnitTest(DaoRegistry theDaoRegistry) {
+		myDaoRegistry = theDaoRegistry;
+		if (myDaoRegistrationService == null) {
+			myDaoRegistrationService = new DaoRegistrationService(theDaoRegistry);
 		}
+	}
 
-		//@formatter:off
-		for (BaseTag next : new ArrayList<BaseTag>(entity.getTags())) {
-			if (ObjectUtil.equals(next.getTag().getTagType(), theTagType) && 
-					ObjectUtil.equals(next.getTag().getSystem(), theScheme) && 
-					ObjectUtil.equals(next.getTag().getCode(), theTerm)) {
-				return;
+	@Nullable
+	public static <T extends IBaseResource> T invokeStoragePreShowResources(
+			IInterceptorBroadcaster theInterceptorBroadcaster, RequestDetails theRequest, T retVal) {
+		IInterceptorBroadcaster compositeBroadcaster =
+				CompositeInterceptorBroadcaster.newCompositeBroadcaster(theInterceptorBroadcaster, theRequest);
+		if (compositeBroadcaster.hasHooks(Pointcut.STORAGE_PRESHOW_RESOURCES)) {
+			SimplePreResourceShowDetails showDetails = new SimplePreResourceShowDetails(retVal);
+			HookParams params = new HookParams()
+					.add(IPreResourceShowDetails.class, showDetails)
+					.add(RequestDetails.class, theRequest)
+					.addIfMatchesType(ServletRequestDetails.class, theRequest);
+			compositeBroadcaster.callHooks(Pointcut.STORAGE_PRESHOW_RESOURCES, params);
+			//noinspection unchecked
+			retVal = (T) showDetails.getResource(
+					0); // TODO GGG/JA : getting resource 0 is interesting. We apparently allow null values in the list.
+			// Should we?
+			return retVal;
+		} else {
+			return retVal;
+		}
+	}
+
+	public static void invokeStoragePreAccessResources(
+			IInterceptorBroadcaster theInterceptorBroadcaster,
+			RequestDetails theRequest,
+			IIdType theId,
+			IBaseResource theResource) {
+		IInterceptorBroadcaster compositeBroadcaster =
+				CompositeInterceptorBroadcaster.newCompositeBroadcaster(theInterceptorBroadcaster, theRequest);
+		if (compositeBroadcaster.hasHooks(Pointcut.STORAGE_PREACCESS_RESOURCES)) {
+			SimplePreResourceAccessDetails accessDetails = new SimplePreResourceAccessDetails(theResource);
+			HookParams params = new HookParams()
+					.add(IPreResourceAccessDetails.class, accessDetails)
+					.add(RequestDetails.class, theRequest)
+					.addIfMatchesType(ServletRequestDetails.class, theRequest);
+			compositeBroadcaster.callHooks(Pointcut.STORAGE_PREACCESS_RESOURCES, params);
+			if (accessDetails.isDontReturnResourceAtIndex(0)) {
+				throw new ResourceNotFoundException(Msg.code(1995) + "Resource " + theId + " is not known");
 			}
 		}
-		//@formatter:on
-
-		entity.setHasTags(true);
-
-		TagDefinition def = getTag(TagTypeEnum.TAG, theScheme, theTerm, theLabel);
-		BaseTag newEntity = entity.addTag(def);
-
-		myEntityManager.persist(newEntity);
-		myEntityManager.merge(entity);
-
-		ourLog.info("Processed addTag {}/{} on {} in {}ms", new Object[] { theScheme, theTerm, theId, w.getMillisAndRestart() });
 	}
-	
+
+	@Override
+	protected HapiTransactionService getTransactionService() {
+		return myTransactionService;
+	}
+
+	@VisibleForTesting
+	public void setTransactionService(HapiTransactionService theTransactionService) {
+		myTransactionService = theTransactionService;
+	}
+
+	@Override
+	protected MatchResourceUrlService getMatchResourceUrlService() {
+		return myMatchResourceUrlService;
+	}
+
+	@Override
+	protected IStorageResourceParser getStorageResourceParser() {
+		return myJpaStorageResourceParser;
+	}
+
+	@Override
+	protected IDeleteExpungeJobSubmitter getDeleteExpungeJobSubmitter() {
+		return myDeleteExpungeJobSubmitter;
+	}
+
+	@Override
+	protected IRequestPartitionHelperSvc getRequestPartitionHelperService() {
+		return myRequestPartitionHelperService;
+	}
+
+	@Override
+	protected MatchUrlService getMatchUrlService() {
+		return myMatchUrlService;
+	}
+
+	/**
+	 * @deprecated Use {@link #create(T, RequestDetails)} instead
+	 */
 	@Override
 	public DaoMethodOutcome create(final T theResource) {
-		return create(theResource, null, true, null);
+		return create(theResource, null, true, null, new TransactionDetails());
 	}
 
 	@Override
 	public DaoMethodOutcome create(final T theResource, RequestDetails theRequestDetails) {
-		return create(theResource, null, true, theRequestDetails);
+		return create(theResource, null, true, theRequestDetails, new TransactionDetails());
 	}
 
+	/**
+	 * @deprecated Use {@link #create(T, String, RequestDetails)} instead
+	 */
 	@Override
 	public DaoMethodOutcome create(final T theResource, String theIfNoneExist) {
 		return create(theResource, theIfNoneExist, null);
 	}
 
 	@Override
-	public DaoMethodOutcome create(T theResource, String theIfNoneExist, boolean thePerformIndexing, RequestDetails theRequestDetails) {
-		if (isNotBlank(theResource.getIdElement().getIdPart())) {
-			if (getContext().getVersion().getVersion().equals(FhirVersionEnum.DSTU1)) {
-				if (theResource.getIdElement().isIdPartValidLong()) {
-					String message = getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "failedToCreateWithClientAssignedNumericId", theResource.getIdElement().getIdPart());
-					throw new InvalidRequestException(message, createErrorOperationOutcome(message, "processing"));
-				}
-			} else if (getContext().getVersion().getVersion().isOlderThan(FhirVersionEnum.DSTU3)) {
-				String message = getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "failedToCreateWithClientAssignedId", theResource.getIdElement().getIdPart());
-				throw new InvalidRequestException(message, createErrorOperationOutcome(message, "processing"));
+	public DaoMethodOutcome create(final T theResource, String theIfNoneExist, RequestDetails theRequestDetails) {
+		return create(theResource, theIfNoneExist, true, theRequestDetails, new TransactionDetails());
+	}
+
+	@Override
+	public DaoMethodOutcome create(
+			T theResource,
+			String theIfNoneExist,
+			boolean thePerformIndexing,
+			RequestDetails theRequestDetails,
+			@Nonnull TransactionDetails theTransactionDetails) {
+
+		validateResourceIsNotNullForClientRequest(theResource);
+
+		assignServerAssignedIdFromUserDataIfRequired(theResource);
+		assignServerAssignedUuidIfRequired(theResource);
+
+		RequestPartitionId requestPartitionId = myRequestPartitionHelperService.determineCreatePartitionForRequest(
+				theRequestDetails, theResource, getResourceName());
+
+		return myTransactionService
+				.withRequest(theRequestDetails)
+				.withTransactionDetails(theTransactionDetails)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(tx -> doCreateForPost(
+						theResource,
+						theIfNoneExist,
+						thePerformIndexing,
+						theTransactionDetails,
+						theRequestDetails,
+						requestPartitionId));
+	}
+
+	@VisibleForTesting
+	public void setRequestPartitionHelperService(IRequestPartitionHelperSvc theRequestPartitionHelperService) {
+		myRequestPartitionHelperService = theRequestPartitionHelperService;
+	}
+
+	/**
+	 * Called for FHIR create (POST) operations
+	 */
+	protected DaoMethodOutcome doCreateForPost(
+			T theResource,
+			String theIfNoneExist,
+			boolean thePerformIndexing,
+			TransactionDetails theTransactionDetails,
+			RequestDetails theRequestDetails,
+			RequestPartitionId theRequestPartitionId) {
+		validateResourceIsNotNullForClientRequest(theResource);
+
+		if (isNotBlank(theResource.getIdElement().getIdPart()) && !isResourceIdServerAssigned(theResource)) {
+			if (getContext().getVersion().getVersion().isOlderThan(FhirVersionEnum.DSTU3)) {
+				String message = getMessageSanitized(
+						"failedToCreateWithClientAssignedId",
+						theResource.getIdElement().getIdPart());
+				throw new InvalidRequestException(
+						Msg.code(957) + message, createErrorOperationOutcome(message, "processing"));
 			} else {
 				// As of DSTU3, ID and version in the body should be ignored for a create/update
 				theResource.setId("");
 			}
 		}
 
-		return doCreate(theResource, theIfNoneExist, thePerformIndexing, new Date(), theRequestDetails);
+		assignServerAssignedUuidIfRequired(theResource);
+
+		return doCreateForPostOrPut(
+				theRequestDetails,
+				theResource,
+				theIfNoneExist,
+				true,
+				thePerformIndexing,
+				theRequestPartitionId,
+				RestOperationTypeEnum.CREATE,
+				theTransactionDetails);
 	}
 
-	@Override
-	public DaoMethodOutcome create(final T theResource, String theIfNoneExist, RequestDetails theRequestDetails) {
-		return create(theResource, theIfNoneExist, true, theRequestDetails);
+	/**
+	 * Tests whether a resource is non-null, and throws a {@link InvalidRequestException}
+	 * with a message explaining that the body must not be missing on a create/update
+	 * request.
+	 */
+	private void validateResourceIsNotNullForClientRequest(T theResource) {
+		if (theResource == null) {
+			String msg = getContext().getLocalizer().getMessage(BaseStorageDao.class, "missingBody");
+			throw new InvalidRequestException(Msg.code(956) + msg);
+		}
 	}
 
-	public IBaseOperationOutcome createErrorOperationOutcome(String theMessage, String theCode) {
-		return createOperationOutcome(OO_SEVERITY_ERROR, theMessage, theCode);
+	/**
+	 * If the resource being created has a UserData value with key
+	 * {@link JpaConstants#RESOURCE_ID_SERVER_ASSIGNED_VALUE}, this value will be
+	 * used as the resource's server-assigned FHIR ID. No duplication checking is
+	 * performed on the ID, so this feature should only be used if you are certain
+	 * that the ID is unique and not previously used for any other resource.
+	 * This feature is not exposed to the FHIR REST client API at all, and is
+	 * only intended for interceptor code that carefully considers the implications
+	 * of its use.
+	 *
+	 * @since 8.6.0
+	 */
+	private void assignServerAssignedIdFromUserDataIfRequired(T theResource) {
+		String serverAssignedIdFromMetadata =
+				(String) theResource.getUserData(JpaConstants.RESOURCE_ID_SERVER_ASSIGNED_VALUE);
+		if (serverAssignedIdFromMetadata != null) {
+			theResource.setUserData(JpaConstants.RESOURCE_ID_SERVER_ASSIGNED, Boolean.TRUE);
+			theResource.setId(serverAssignedIdFromMetadata);
+			verifyResourceIdIsValid(theResource);
+		}
 	}
 
-	public IBaseOperationOutcome createInfoOperationOutcome(String theMessage) {
-		return createOperationOutcome(OO_SEVERITY_INFO, theMessage, "informational");
+	private void assignServerAssignedUuidIfRequired(T theResource) {
+		if (getStorageSettings().getResourceServerIdStrategy() == JpaStorageSettings.IdStrategyEnum.UUID) {
+			if (!isResourceIdServerAssigned(theResource)) {
+				theResource.setId(UUID.randomUUID().toString());
+				theResource.setUserData(JpaConstants.RESOURCE_ID_SERVER_ASSIGNED, Boolean.TRUE);
+			}
+		}
 	}
 
-	protected abstract IBaseOperationOutcome createOperationOutcome(String theSeverity, String theMessage, String theCode);
+	/**
+	 * Called both for FHIR create (POST) operations (via {@link #doCreateForPost(IBaseResource, String, boolean, TransactionDetails, RequestDetails, RequestPartitionId)}
+	 * as well as for FHIR update (PUT) where we're doing a create-with-client-assigned-ID (via {@link #doUpdate(IBaseResource, String, boolean, boolean, RequestDetails, TransactionDetails, RequestPartitionId)}.
+	 */
+	private DaoMethodOutcome doCreateForPostOrPut(
+			RequestDetails theRequest,
+			T theResource,
+			String theMatchUrl,
+			boolean theProcessMatchUrl,
+			boolean thePerformIndexing,
+			RequestPartitionId theRequestPartitionId,
+			RestOperationTypeEnum theOperationType,
+			TransactionDetails theTransactionDetails) {
+		StopWatch w = new StopWatch();
 
+		preProcessResourceForStorage(theResource, theRequest, theTransactionDetails, thePerformIndexing);
+
+		ResourceTable entity = new ResourceTable();
+		entity.setResourceType(toResourceName(theResource));
+		entity.setResourceTypeId(myResourceTypeCacheSvc.getResourceTypeId(toResourceName(theResource)));
+
+		RequestPartitionId targetWritePartitionId = myRequestPartitionHelperService.determineCreatePartitionForRequest(
+				theRequest, theResource, entity.getResourceType());
+		if (!theRequestPartitionId.contains(targetWritePartitionId)) {
+			throw new InternalErrorException(Msg.code(2636) + "Active partition " + theRequestPartitionId
+					+ " does not contain target write partition " + targetWritePartitionId);
+		}
+
+		entity.setPartitionId(PartitionablePartitionId.toStoragePartition(targetWritePartitionId, myPartitionSettings));
+		entity.setCreatedByMatchUrl(theMatchUrl);
+		entity.initializeVersion();
+
+		if (isNotBlank(theMatchUrl) && theProcessMatchUrl) {
+			Set<JpaPid> match = myMatchResourceUrlService.processMatchUrl(
+					theMatchUrl, myResourceType, theTransactionDetails, theRequest, theRequestPartitionId);
+			ourLog.trace("Resolving match URL {} found: {}", theMatchUrl, match);
+			if (match.size() > 1) {
+				String msg = getContext()
+						.getLocalizer()
+						.getMessageSanitized(
+								BaseStorageDao.class,
+								"transactionOperationWithMultipleMatchFailure",
+								"CREATE",
+								myResourceName,
+								theMatchUrl,
+								match.size());
+				throw new PreconditionFailedException(Msg.code(958) + msg);
+			} else if (match.size() == 1) {
+
+				/*
+				 * Ok, so we've found a single PID that matches the conditional URL.
+				 * That's good, there are two possibilities below.
+				 */
+
+				JpaPid pid = match.iterator().next();
+				if (theTransactionDetails.getDeletedResourceIds().contains(pid)) {
+
+					/*
+					 * If the resource matching the given match URL has already been
+					 * deleted within this transaction. This is a really rare case, since
+					 * it means the client has performed a FHIR transaction with both
+					 * a delete and a create on the same conditional URL. This is rare
+					 * but allowed, and means that it's now ok to create a new one resource
+					 * matching the conditional URL since we'll be deleting any existing
+					 * index rows on the existing resource as a part of this transaction.
+					 * We can also un-resolve the previous match URL in the TransactionDetails
+					 * since we'll resolve it to the new resource ID below
+					 */
+
+					myMatchResourceUrlService.unresolveMatchUrl(theTransactionDetails, getResourceName(), theMatchUrl);
+
+				} else {
+
+					/*
+					 * This is the normal path where the conditional URL matched exactly
+					 * one resource, so we won't be creating anything but instead
+					 * just returning the existing ID. We now have a PID for the matching
+					 * resource, but we haven't loaded anything else (e.g. the forced ID
+					 * or the resource body aren't yet loaded from the DB). We're going to
+					 * return a LazyDaoOutcome with two lazy loaded providers for loading the
+					 * entity and the forced ID since we can avoid these extra SQL loads
+					 * unless we know we're actually going to use them. For example, if
+					 * the client has specified "Prefer: return=minimal" then we won't be
+					 * needing the load the body.
+					 */
+
+					Supplier<LazyDaoMethodOutcome.EntityAndResource> entitySupplier = () -> myTxTemplate.execute(tx -> {
+						ResourceTable foundEntity = myEntityManager.find(ResourceTable.class, pid);
+						IBaseResource resource = myJpaStorageResourceParser.toResource(foundEntity, false);
+						theResource.setId(resource.getIdElement().getValue());
+						return new LazyDaoMethodOutcome.EntityAndResource(foundEntity, resource);
+					});
+					Supplier<IIdType> idSupplier = () -> myTxTemplate.execute(tx -> {
+						IIdType retVal = myIdHelperService.translatePidIdToForcedId(myFhirContext, myResourceName, pid);
+						if (!retVal.hasVersionIdPart()) {
+							Long version = pid.getVersion();
+							if (version == null) {
+								version = myMemoryCacheService.getIfPresent(
+										MemoryCacheService.CacheEnum.RESOURCE_CONDITIONAL_CREATE_VERSION, pid);
+							}
+							if (version == null) {
+								version = myResourceTableDao.findCurrentVersionByPid(pid);
+								if (version != null) {
+									myMemoryCacheService.putAfterCommit(
+											MemoryCacheService.CacheEnum.RESOURCE_CONDITIONAL_CREATE_VERSION,
+											pid,
+											version);
+								}
+							}
+							if (version != null) {
+								retVal = myFhirContext
+										.getVersion()
+										.newIdType()
+										.setParts(
+												retVal.getBaseUrl(),
+												retVal.getResourceType(),
+												retVal.getIdPart(),
+												Long.toString(version));
+							}
+						}
+						return retVal;
+					});
+
+					DaoMethodOutcome outcome = toMethodOutcomeLazy(theRequest, pid, entitySupplier, idSupplier)
+							.setCreated(false)
+							.setNop(true);
+					StorageResponseCodeEnum responseCode =
+							StorageResponseCodeEnum.SUCCESSFUL_CREATE_WITH_CONDITIONAL_MATCH;
+					String msg = getContext()
+							.getLocalizer()
+							.getMessageSanitized(
+									BaseStorageDao.class,
+									"successfulCreateConditionalWithMatch",
+									outcome.getId(),
+									UrlUtil.sanitizeUrlPart(theMatchUrl));
+					outcome.setOperationOutcome(createInfoOperationOutcome(msg, responseCode));
+					return outcome;
+				}
+			}
+		}
+
+		boolean isClientAssignedId = storeNonPidResourceId(theResource, entity);
+
+		HookParams hookParams;
+
+		// Notify interceptor for accepting/rejecting client assigned ids
+		if (isClientAssignedId) {
+			hookParams = new HookParams().add(IBaseResource.class, theResource).add(RequestDetails.class, theRequest);
+			doCallHooks(theTransactionDetails, theRequest, Pointcut.STORAGE_PRESTORAGE_CLIENT_ASSIGNED_ID, hookParams);
+		}
+
+		// Interceptor call: STORAGE_PRESTORAGE_RESOURCE_CREATED
+		hookParams = new HookParams()
+				.add(IBaseResource.class, theResource)
+				.add(RequestDetails.class, theRequest)
+				.addIfMatchesType(ServletRequestDetails.class, theRequest)
+				.add(RequestPartitionId.class, theRequestPartitionId)
+				.add(TransactionDetails.class, theTransactionDetails);
+		doCallHooks(theTransactionDetails, theRequest, Pointcut.STORAGE_PRESTORAGE_RESOURCE_CREATED, hookParams);
+
+		if (isClientAssignedId) {
+			validateResourceIdCreation(theResource, theRequest);
+		}
+
+		String searchUrlToRegister = theMatchUrl;
+		if (searchUrlToRegister == null) {
+			// Auto-created placeholder reference targets which were created to satisfy
+			// a conditional reference pass their identifier-based match URL along via
+			// userdata so that they get a search URL entry just like conditional creates do
+			searchUrlToRegister = (String) theResource.getUserData(JpaConstants.PLACEHOLDER_RESOURCE_SEARCH_URL);
+			if (searchUrlToRegister != null) {
+				theResource.setUserData(JpaConstants.PLACEHOLDER_RESOURCE_SEARCH_URL, null);
+			}
+		}
+		if (searchUrlToRegister != null) {
+			// Note: We actually create the search URL below by calling enforceMatchUrlResourceUniqueness
+			// since we can't do that until we know the assigned PID, but we set this flag up here
+			// because we need to set it before we persist the ResourceTable entity in order to
+			// avoid triggering an extra DB update
+			entity.setSearchUrlPresent(true);
+		}
+
+		// Perform actual DB update
+		// this call will also update the metadata
+		ResourceTable updatedEntity = updateEntity(
+				theRequest,
+				theResource,
+				entity,
+				null,
+				thePerformIndexing,
+				false,
+				theTransactionDetails,
+				false,
+				thePerformIndexing);
+
+		// Store the resource forced ID if necessary
+		JpaPid jpaPid = updatedEntity.getPersistentId();
+
+		// Populate the resource with its actual final stored ID from the entity
+		theResource.setId(entity.getIdDt());
+
+		// Pre-cache the resource ID
+		jpaPid.setAssociatedResourceId(entity.getIdType(myFhirContext));
+		String fhirId = entity.getFhirId();
+		assert fhirId != null;
+		myIdHelperService.addResolvedPidToFhirIdAfterCommit(
+				jpaPid, theRequestPartitionId, getResourceName(), fhirId, null);
+		theTransactionDetails.addResolvedResourceId(jpaPid.getAssociatedResourceId(), jpaPid);
+		theTransactionDetails.addResolvedResource(jpaPid.getAssociatedResourceId(), theResource);
+
+		// Create an entry in the HFJ_RES_SEARCH_URL table to protect against
+		// concurrent writes to the same conditional URL
+		if (searchUrlToRegister != null) {
+			myResourceSearchUrlSvc.enforceMatchUrlResourceUniqueness(
+					getResourceName(), searchUrlToRegister, updatedEntity);
+		}
+
+		// Pre-cache the match URL
+		if (theMatchUrl != null) {
+			myMatchResourceUrlService.matchUrlResolved(theTransactionDetails, getResourceName(), theMatchUrl, jpaPid);
+		}
+
+		// Update the version/last updated in the resource so that interceptors get
+		// the correct version
+		// TODO - the above updateEntity calls updateResourceMetadata
+		// 		Maybe we don't need this call here?
+		myJpaStorageResourceParser.updateResourceMetadata(entity, theResource);
+
+		// Populate the PID in the resource so it is available to hooks
+		addPidToResource(entity, theResource);
+
+		// Notify JPA interceptors
+		if (!updatedEntity.isUnchangedInCurrentOperation()) {
+			hookParams = new HookParams()
+					.add(IBaseResource.class, theResource)
+					.add(RequestDetails.class, theRequest)
+					.addIfMatchesType(ServletRequestDetails.class, theRequest)
+					.add(TransactionDetails.class, theTransactionDetails)
+					.add(
+							InterceptorInvocationTimingEnum.class,
+							theTransactionDetails.getInvocationTiming(Pointcut.STORAGE_PRECOMMIT_RESOURCE_CREATED));
+			doCallHooks(theTransactionDetails, theRequest, Pointcut.STORAGE_PRECOMMIT_RESOURCE_CREATED, hookParams);
+		}
+
+		DaoMethodOutcome outcome = toMethodOutcome(theRequest, entity, theResource, theMatchUrl, theOperationType)
+				.setCreated(true);
+		outcome.setResponseStatusCode(Constants.STATUS_HTTP_201_CREATED);
+
+		if (!thePerformIndexing) {
+			outcome.setId(theResource.getIdElement());
+		}
+
+		populateOperationOutcomeForUpdate(w, outcome, theMatchUrl, theOperationType, theTransactionDetails);
+
+		return outcome;
+	}
+
+	/**
+	 * Check for an id on the resource and if so,
+	 * store it in ResourceTable.
+	 *
+	 * The fhirId property is either set here with the resource id
+	 * OR by hibernate once the PK is generated for a server-assigned id.
+	 *
+	 * Used for both client-assigned id and for server-assigned UUIDs.
+	 *
+	 * @return true if this is a client-assigned id
+	 *
+	 * @see ca.uhn.fhir.jpa.model.entity.ResourceTable.FhirIdGenerator
+	 */
+	private boolean storeNonPidResourceId(T theResource, ResourceTable entity) {
+		String resourceIdBeforeStorage = theResource.getIdElement().getIdPart();
+		boolean resourceHadIdBeforeStorage = isNotBlank(resourceIdBeforeStorage);
+		boolean resourceIdWasServerAssigned =
+				theResource.getUserData(JpaConstants.RESOURCE_ID_SERVER_ASSIGNED) == Boolean.TRUE;
+
+		// We distinguish actual client-assigned ids from UUIDs which the server assigned.
+		boolean isClientAssigned = resourceHadIdBeforeStorage && !resourceIdWasServerAssigned;
+
+		// But both need to be set on the entity fhirId field.
+		if (resourceHadIdBeforeStorage) {
+			entity.setFhirId(resourceIdBeforeStorage);
+		}
+
+		return isClientAssigned;
+	}
+
+	void validateResourceIdCreation(T theResource, RequestDetails theRequest) {
+		JpaStorageSettings.ClientIdStrategyEnum strategy = getStorageSettings().getResourceClientIdStrategy();
+
+		if (strategy == JpaStorageSettings.ClientIdStrategyEnum.NOT_ALLOWED) {
+			if (!isSystemRequest(theRequest)) {
+				throw new ResourceNotFoundException(Msg.code(959)
+						+ getMessageSanitized(
+								"failedToCreateWithClientAssignedIdNotAllowed",
+								theResource.getIdElement().getIdPart()));
+			}
+		}
+
+		if (strategy == JpaStorageSettings.ClientIdStrategyEnum.ALPHANUMERIC) {
+			if (theResource.getIdElement().isIdPartValidLong()) {
+				throw new InvalidRequestException(Msg.code(960)
+						+ getMessageSanitized(
+								"failedToCreateWithClientAssignedNumericId",
+								theResource.getIdElement().getIdPart()));
+			}
+		}
+	}
+
+	protected String getMessageSanitized(String theKey, String theIdPart) {
+		return getContext().getLocalizer().getMessageSanitized(BaseStorageDao.class, theKey, theIdPart);
+	}
+
+	private boolean isSystemRequest(RequestDetails theRequest) {
+		return theRequest instanceof SystemRequestDetails;
+	}
+
+	private IInstanceValidatorModule getInstanceValidator() {
+		return myInstanceValidator;
+	}
+
+	/**
+	 * @deprecated Use {@link #delete(IIdType, RequestDetails)} instead
+	 */
 	@Override
 	public DaoMethodOutcome delete(IIdType theId) {
 		return delete(theId, null);
 	}
 
 	@Override
-	public ResourceTable delete(IIdType theId, List<DeleteConflict> deleteConflicts, RequestDetails theRequestDetails) {
-		if (theId == null || !theId.hasIdPart()) {
-			throw new InvalidRequestException("Can not perform delete, no ID provided");
+	public DaoMethodOutcome delete(IIdType theId, RequestDetails theRequestDetails) {
+		TransactionDetails transactionDetails = new TransactionDetails();
+
+		validateIdPresentForDelete(theId);
+		validateDeleteEnabled();
+
+		RequestPartitionId requestPartitionId = myRequestPartitionHelperService.determineReadPartitionForRequestForRead(
+				theRequestDetails, getResourceName(), theId);
+
+		return myTransactionService
+				.withRequest(theRequestDetails)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(tx -> {
+					DeleteConflictList deleteConflicts = new DeleteConflictList();
+					if (isNotBlank(theId.getValue())) {
+						deleteConflicts.setResourceIdMarkedForDeletion(theId);
+					}
+
+					StopWatch w = new StopWatch();
+
+					DaoMethodOutcome retVal = delete(theId, deleteConflicts, theRequestDetails, transactionDetails);
+
+					DeleteConflictUtil.validateDeleteConflictsEmptyOrThrowException(getContext(), deleteConflicts);
+
+					ourLog.debug("Processed delete on {} in {}ms", theId.getValue(), w.getMillisAndRestart());
+					return retVal;
+				});
+	}
+
+	@Override
+	public DaoMethodOutcome delete(
+			IIdType theId,
+			DeleteConflictList theDeleteConflicts,
+			RequestDetails theRequestDetails,
+			@Nonnull TransactionDetails theTransactionDetails) {
+		validateIdPresentForDelete(theId);
+		validateDeleteEnabled();
+
+		RequestPartitionId requestPartitionId = myRequestPartitionHelperService.determineReadPartitionForRequestForRead(
+				theRequestDetails, getResourceName(), theId);
+
+		final ResourceTable entity;
+		try {
+			entity = readEntityLatestVersion(theRequestDetails, theId, requestPartitionId, theTransactionDetails);
+		} catch (ResourceNotFoundException ex) {
+			// we don't want to throw 404s.
+			// if not found, return an outcome anyway.
+			// Because no object actually existed, we'll
+			// just set the id and nothing else
+			return createMethodOutcomeForResourceId(
+					theId.getValue(),
+					MESSAGE_KEY_DELETE_RESOURCE_NOT_EXISTING,
+					StorageResponseCodeEnum.SUCCESSFUL_DELETE_NOT_FOUND);
 		}
-		final ResourceTable entity = readEntityLatestVersion(theId);
-		if (theId.hasVersionIdPart() && Long.parseLong(theId.getVersionIdPart()) != entity.getVersion()) {
-			throw new ResourceVersionConflictException("Trying to delete " + theId + " but this is not the current version");
+
+		if (theId.hasVersionIdPart()) {
+			boolean versionMatches =
+					theId.isVersionIdPartValidLong() && Long.parseLong(theId.getVersionIdPart()) == entity.getVersion();
+			if (!versionMatches) {
+				throw new ResourceVersionConflictException(
+						Msg.code(961) + "Trying to delete " + theId + " but this is not the current version");
+			}
 		}
 
-		T resourceToDelete = toResource(myResourceType, entity, false);
+		JpaPid persistentId = entity.getId();
+		theTransactionDetails.addDeletedResourceId(persistentId);
 
-		validateOkToDelete(deleteConflicts, entity);
+		// Don't delete again if it's already deleted
+		if (isDeleted(entity)) {
+			DaoMethodOutcome outcome = createMethodOutcomeForResourceId(
+					entity.getIdDt().getValue(),
+					MESSAGE_KEY_DELETE_RESOURCE_ALREADY_DELETED,
+					StorageResponseCodeEnum.SUCCESSFUL_DELETE_ALREADY_DELETED);
 
-		// Notify interceptors
-		if (theRequestDetails != null) {
-			ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getContext(), theId.getResourceType(), theId);
-			notifyInterceptors(RestOperationTypeEnum.DELETE, requestDetails);
+			// used to exist, so we'll set the persistent id
+			outcome.setPersistentId(persistentId);
+			outcome.setEntity(entity);
+
+			return outcome;
 		}
 
-		Date updateTime = new Date();
-		ResourceTable savedEntity = updateEntity(null, entity, updateTime, updateTime);
+		StopWatch w = new StopWatch();
+
+		T resourceToDelete =
+				myJpaStorageResourceParser.toResource(theRequestDetails, myResourceType, entity, null, false);
+		theDeleteConflicts.setResourceIdMarkedForDeletion(theId);
+
+		// Notify IServerOperationInterceptors about pre-action call
+		HookParams hook = new HookParams()
+				.add(IBaseResource.class, resourceToDelete)
+				.add(RequestDetails.class, theRequestDetails)
+				.addIfMatchesType(ServletRequestDetails.class, theRequestDetails)
+				.add(TransactionDetails.class, theTransactionDetails);
+		doCallHooks(theTransactionDetails, theRequestDetails, Pointcut.STORAGE_PRESTORAGE_RESOURCE_DELETED, hook);
+
+		myDeleteConflictService.validateOkToDelete(
+				theDeleteConflicts, entity, false, theRequestDetails, theTransactionDetails);
+
+		preDelete(resourceToDelete, entity, theRequestDetails);
+
+		ResourceTable savedEntity = updateEntityForDelete(theRequestDetails, theTransactionDetails, entity);
+		IIdType idBeforeDelete = new IdDt(resourceToDelete.getIdElement());
+		resourceToDelete.setId(entity.getIdDt());
+		resourceToDelete.getMeta().setLastUpdated(savedEntity.getUpdatedDate());
+		resourceToDelete.getMeta().setVersionId(savedEntity.getIdDt().getVersionIdPart());
 
 		// Notify JPA interceptors
-		if (theRequestDetails != null) {
-			ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getContext(), theId.getResourceType(), theId);
-			theRequestDetails.getRequestOperationCallback().resourceDeleted(resourceToDelete);
-			for (IServerInterceptor next : getConfig().getInterceptors()) {
-				if (next instanceof IJpaServerInterceptor) {
-					((IJpaServerInterceptor) next).resourceDeleted(requestDetails, entity);
-				}
-			}
-		}
+		HookParams hookParams = new HookParams()
+				.add(IBaseResource.class, resourceToDelete)
+				.add(IIdType.class, idBeforeDelete)
+				.add(RequestDetails.class, theRequestDetails)
+				.addIfMatchesType(ServletRequestDetails.class, theRequestDetails)
+				.add(TransactionDetails.class, theTransactionDetails)
+				.add(
+						InterceptorInvocationTimingEnum.class,
+						theTransactionDetails.getInvocationTiming(Pointcut.STORAGE_PRECOMMIT_RESOURCE_DELETED));
 
-		return savedEntity;
+		doCallHooks(theTransactionDetails, theRequestDetails, Pointcut.STORAGE_PRECOMMIT_RESOURCE_DELETED, hookParams);
+
+		DaoMethodOutcome outcome = toMethodOutcome(
+						theRequestDetails, savedEntity, resourceToDelete, null, RestOperationTypeEnum.DELETE)
+				.setCreated(true);
+
+		String msg = getContext().getLocalizer().getMessageSanitized(BaseStorageDao.class, "successfulDeletes", 1);
+		msg += " "
+				+ getContext()
+						.getLocalizer()
+						.getMessageSanitized(BaseStorageDao.class, "successfulTimingSuffix", w.getMillis());
+		outcome.setOperationOutcome(createInfoOperationOutcome(msg, StorageResponseCodeEnum.SUCCESSFUL_DELETE));
+
+		myIdHelperService.addResolvedPidToFhirIdAfterCommit(
+				entity.getPersistentId(),
+				requestPartitionId,
+				entity.getResourceType(),
+				entity.getFhirId(),
+				entity.getDeleted());
+
+		return outcome;
 	}
 
 	@Override
-	public DaoMethodOutcome delete(IIdType theId, RequestDetails theRequestDetails) {
-		List<DeleteConflict> deleteConflicts = new ArrayList<DeleteConflict>();
+	public DeleteMethodOutcome deleteByUrl(String theUrl, RequestDetails theRequest) {
+		validateDeleteEnabled();
+
+		TransactionDetails transactionDetails = new TransactionDetails();
+		ResourceSearch resourceSearch = myMatchUrlService.getResourceSearch(theUrl);
+
+		if (resourceSearch.isDeleteExpunge()) {
+			return deleteExpunge(theUrl, theRequest);
+		}
+
+		return myTransactionService
+				.withRequest(theRequest)
+				.withTransactionDetails(transactionDetails)
+				.execute(tx -> {
+					DeleteConflictList deleteConflicts = new DeleteConflictList();
+					DeleteMethodOutcome outcome = deleteByUrl(theUrl, deleteConflicts, theRequest, transactionDetails);
+					DeleteConflictUtil.validateDeleteConflictsEmptyOrThrowException(getContext(), deleteConflicts);
+					return outcome;
+				});
+	}
+
+	/**
+	 * This method gets called by {@link #deleteByUrl(String, RequestDetails)} as well as by
+	 * transaction processors
+	 */
+	@Override
+	public DeleteMethodOutcome deleteByUrl(
+			String theUrl,
+			DeleteConflictList deleteConflicts,
+			RequestDetails theRequestDetails,
+			@Nonnull TransactionDetails theTransactionDetails) {
+		validateDeleteEnabled();
+
+		ResourceSearch resourceSearch = myMatchUrlService.getResourceSearch(theUrl);
+		SearchParameterMap paramMap = resourceSearch.getSearchParameterMap();
+
+		RequestPartitionId requestPartitionId =
+				myRequestPartitionHelperService.determineReadPartitionForRequestForSearchType(
+						theRequestDetails, myResourceName, paramMap);
+
+		return myTransactionService
+				.withRequest(theRequestDetails)
+				.withRequestPartitionId(requestPartitionId)
+				.withTransactionDetails(theTransactionDetails)
+				.execute(tx ->
+						doDeleteByUrl(theUrl, paramMap, deleteConflicts, theTransactionDetails, theRequestDetails));
+	}
+
+	@Nonnull
+	private DeleteMethodOutcome doDeleteByUrl(
+			String theUrl,
+			SearchParameterMap theParamMap,
+			DeleteConflictList deleteConflicts,
+			TransactionDetails theTransactionDetails,
+			RequestDetails theRequestDetails) {
+
+		theParamMap.setLoadSynchronous(true);
+		Set<JpaPid> resourceIds =
+				myMatchResourceUrlService.search(theParamMap, myResourceType, theRequestDetails, null);
+
+		if (resourceIds.size() > 1) {
+			if (!getStorageSettings().isAllowMultipleDelete()) {
+				throw new PreconditionFailedException(Msg.code(962)
+						+ getContext()
+								.getLocalizer()
+								.getMessageSanitized(
+										BaseStorageDao.class,
+										"transactionOperationWithMultipleMatchFailure",
+										"DELETE",
+										myResourceName,
+										theUrl,
+										resourceIds.size()));
+			}
+			// TODO: LD: There is a still a bug on slow deletes:  https://github.com/hapifhir/hapi-fhir/issues/5675
+			final long threshold = getStorageSettings().getRestDeleteByUrlResourceIdThreshold();
+			if (resourceIds.size() > threshold) {
+				throw new PreconditionFailedException(Msg.code(2496)
+						+ getContext()
+								.getLocalizer()
+								.getMessageSanitized(
+										BaseStorageDao.class,
+										"deleteByUrlThresholdExceeded",
+										theUrl,
+										resourceIds.size(),
+										threshold));
+			}
+		}
+
+		return deletePidList(theUrl, resourceIds, deleteConflicts, theRequestDetails, theTransactionDetails);
+	}
+
+	@Override
+	public <P extends IResourcePersistentId> void expunge(Collection<P> theResourceIds, RequestDetails theRequest) {
+		ExpungeOptions options = new ExpungeOptions();
+		options.setExpungeDeletedResources(true);
+		for (P pid : theResourceIds) {
+			if (pid instanceof JpaPid) {
+				ResourceTable entity = myEntityManager.find(ResourceTable.class, pid.getId());
+
+				forceExpungeInExistingTransaction(entity.getIdDt().toVersionless(), options, theRequest);
+			} else {
+				ourLog.warn("Unable to process expunge on resource {}", pid);
+				return;
+			}
+		}
+	}
+
+	@Nonnull
+	@Override
+	public <P extends IResourcePersistentId> DeleteMethodOutcome deletePidList(
+			String theUrl,
+			Collection<P> theResourceIds,
+			DeleteConflictList theDeleteConflicts,
+			RequestDetails theRequestDetails,
+			TransactionDetails theTransactionDetails) {
 		StopWatch w = new StopWatch();
+		TransactionDetails transactionDetails =
+				theTransactionDetails != null ? theTransactionDetails : new TransactionDetails();
+		List<ResourceTable> deletedResources = new ArrayList<>();
 
-		ResourceTable savedEntity = delete(theId, deleteConflicts, theRequestDetails);
+		List<IResourcePersistentId<?>> resolvedIds =
+				theResourceIds.stream().map(t -> (IResourcePersistentId<?>) t).collect(Collectors.toList());
+		myDaoRegistry.getSystemDao().preFetchResources(resolvedIds, false);
 
-		validateDeleteConflictsEmptyOrThrowException(deleteConflicts);
+		for (P pid : theResourceIds) {
+			JpaPid jpaPid = (JpaPid) pid;
 
-		ourLog.info("Processed delete on {} in {}ms", theId.getValue(), w.getMillisAndRestart());
-		return toMethodOutcome(savedEntity, null);
-	}
-	
-	@Override
-	public List<ResourceTable> deleteByUrl(String theUrl, List<DeleteConflict> deleteConflicts, RequestDetails theRequestDetails) {
-		Set<Long> resource = processMatchUrl(theUrl, myResourceType);
-		if (resource.size() > 1) {
-			if (myDaoConfig.isAllowMultipleDelete() == false) {
-				throw new PreconditionFailedException(getContext().getLocalizer().getMessage(BaseHapiFhirDao.class, "transactionOperationWithMultipleMatchFailure", "DELETE", theUrl, resource.size()));
-			}
-		}
+			// This shouldn't actually need to hit the DB because we pre-fetch above
+			ResourceTable entity = myEntityManager.find(ResourceTable.class, jpaPid);
+			deletedResources.add(entity);
 
-		List<ResourceTable> retVal = new ArrayList<ResourceTable>();
-		for (Long pid : resource) {
-			ResourceTable entity = myEntityManager.find(ResourceTable.class, pid);
-			retVal.add(entity);
+			T resourceToDelete =
+					myJpaStorageResourceParser.toResource(theRequestDetails, myResourceType, entity, null, false);
 
-			validateOkToDelete(deleteConflicts, entity);
+			transactionDetails.addDeletedResourceId(pid);
 
-			// Notify interceptors
-			IdDt idToDelete = entity.getIdDt();
-			ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, idToDelete.getResourceType(), idToDelete);
-			notifyInterceptors(RestOperationTypeEnum.DELETE, requestDetails);
+			// Notify IServerOperationInterceptors about pre-action call
+			HookParams hooks = new HookParams()
+					.add(IBaseResource.class, resourceToDelete)
+					.add(RequestDetails.class, theRequestDetails)
+					.addIfMatchesType(ServletRequestDetails.class, theRequestDetails)
+					.add(TransactionDetails.class, transactionDetails);
+			doCallHooks(transactionDetails, theRequestDetails, Pointcut.STORAGE_PRESTORAGE_RESOURCE_DELETED, hooks);
+
+			myDeleteConflictService.validateOkToDelete(
+					theDeleteConflicts, entity, false, theRequestDetails, transactionDetails);
 
 			// Perform delete
-			Date updateTime = new Date();
-			updateEntity(null, entity, updateTime, updateTime);
+
+			preDelete(resourceToDelete, entity, theRequestDetails);
+
+			updateEntityForDelete(theRequestDetails, transactionDetails, entity);
+			IdType oldVersionId = new IdType(entity.getIdDt().getValue());
+			resourceToDelete.setId(entity.getIdDt());
+			resourceToDelete.getMeta().setLastUpdated(entity.getUpdatedDate());
+			resourceToDelete.getMeta().setVersionId(entity.getIdDt().getVersionIdPart());
 
 			// Notify JPA interceptors
-			T resourceToDelete = toResource(myResourceType, entity, false);
-			theRequestDetails.getRequestOperationCallback().resourceDeleted(resourceToDelete);
-			for (IServerInterceptor next : getConfig().getInterceptors()) {
-				if (next instanceof IJpaServerInterceptor) {
-					((IJpaServerInterceptor) next).resourceDeleted(requestDetails, entity);
+			TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+				@Override
+				public void beforeCommit(boolean readOnly) {
+					HookParams hookParams = new HookParams()
+							.add(IBaseResource.class, resourceToDelete)
+							.add(IIdType.class, oldVersionId)
+							.add(RequestDetails.class, theRequestDetails)
+							.addIfMatchesType(ServletRequestDetails.class, theRequestDetails)
+							.add(TransactionDetails.class, transactionDetails)
+							.add(
+									InterceptorInvocationTimingEnum.class,
+									transactionDetails.getInvocationTiming(
+											Pointcut.STORAGE_PRECOMMIT_RESOURCE_DELETED));
+					doCallHooks(
+							transactionDetails,
+							theRequestDetails,
+							Pointcut.STORAGE_PRECOMMIT_RESOURCE_DELETED,
+							hookParams);
 				}
-			}
-
+			});
 		}
 
-		return retVal;
-	}
-
-	@Override
-	public DaoMethodOutcome deleteByUrl(String theUrl, RequestDetails theRequestDetails) {
-		StopWatch w = new StopWatch();
-		List<DeleteConflict> deleteConflicts = new ArrayList<DeleteConflict>();
-
-		List<ResourceTable> deletedResources = deleteByUrl(theUrl, deleteConflicts, theRequestDetails);
-
-		validateDeleteConflictsEmptyOrThrowException(deleteConflicts);
-		
 		IBaseOperationOutcome oo;
 		if (deletedResources.isEmpty()) {
-			oo = OperationOutcomeUtil.newInstance(getContext());
-			String message = getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "unableToDeleteNotFound", theUrl);
-			String severity = "warning";
-			String code = "not-found";
-			OperationOutcomeUtil.addIssue(getContext(), oo, severity, message, null, code);
+			String msg = getContext()
+					.getLocalizer()
+					.getMessageSanitized(BaseStorageDao.class, "unableToDeleteNotFound", theUrl);
+			oo = createWarnOperationOutcome(msg, "not-found", StorageResponseCodeEnum.SUCCESSFUL_DELETE_NOT_FOUND);
 		} else {
-			oo = OperationOutcomeUtil.newInstance(getContext());
-			String message = getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "successfulDeletes", theUrl, deletedResources.size(), w.getMillis());
-			String severity = "information";
-			String code = "informational";
-			OperationOutcomeUtil.addIssue(getContext(), oo, severity, message, null, code);
+			String msg = getContext()
+					.getLocalizer()
+					.getMessageSanitized(BaseStorageDao.class, "successfulDeletes", deletedResources.size());
+			msg += " "
+					+ getContext()
+							.getLocalizer()
+							.getMessageSanitized(BaseStorageDao.class, "successfulTimingSuffix", w.getMillis());
+			oo = createInfoOperationOutcome(msg, StorageResponseCodeEnum.SUCCESSFUL_DELETE);
 		}
 
-		ourLog.info("Processed delete on {} (matched {} resource(s)) in {}ms", new Object[] { theUrl, deletedResources.size(), w.getMillis() });
-		DaoMethodOutcome retVal = new DaoMethodOutcome();
+		ourLog.debug(
+				"Processed delete on {} (matched {} resource(s)) in {}ms",
+				theUrl,
+				deletedResources.size(),
+				w.getMillis());
+
+		DeleteMethodOutcome retVal = new DeleteMethodOutcome();
+		retVal.setDeletedEntities(deletedResources);
 		retVal.setOperationOutcome(oo);
 		return retVal;
 	}
 
-	@PostConstruct
-	public void detectSearchDaoDisabled() {
-		if (mySearchDao != null && mySearchDao.isDisabled()) {
-			mySearchDao = null;
+	protected ResourceTable updateEntityForDelete(
+			RequestDetails theRequest, TransactionDetails theTransactionDetails, ResourceTable theEntity) {
+		myResourceSearchUrlSvc.deleteByResId(theEntity.getPersistentId());
+		Date updateTime = new Date();
+		return updateEntity(theRequest, null, theEntity, updateTime, true, true, theTransactionDetails, false, true);
+	}
+
+	private void validateDeleteEnabled() {
+		if (!getStorageSettings().isDeleteEnabled()) {
+			String msg = getContext().getLocalizer().getMessage(BaseStorageDao.class, "deleteBlockedBecauseDisabled");
+			throw new PreconditionFailedException(Msg.code(966) + msg);
 		}
 	}
 
-	private DaoMethodOutcome doCreate(T theResource, String theIfNoneExist, boolean thePerformIndexing, Date theUpdateTime, RequestDetails theRequestDetails) {
-		StopWatch w = new StopWatch();
-
-		preProcessResourceForStorage(theResource);
-
-		ResourceTable entity = new ResourceTable();
-		entity.setResourceType(toResourceName(theResource));
-
-		if (isNotBlank(theIfNoneExist)) {
-			Set<Long> match = processMatchUrl(theIfNoneExist, myResourceType);
-			if (match.size() > 1) {
-				String msg = getContext().getLocalizer().getMessage(BaseHapiFhirDao.class, "transactionOperationWithMultipleMatchFailure", "CREATE", theIfNoneExist, match.size());
-				throw new PreconditionFailedException(msg);
-			} else if (match.size() == 1) {
-				Long pid = match.iterator().next();
-				entity = myEntityManager.find(ResourceTable.class, pid);
-				return toMethodOutcome(entity, theResource).setCreated(false);
-			}
+	private void validateIdPresentForDelete(IIdType theId) {
+		if (theId == null || !theId.hasIdPart()) {
+			throw new InvalidRequestException(Msg.code(967) + "Can not perform delete, no ID provided");
 		}
-
-		if (isNotBlank(theResource.getIdElement().getIdPart())) {
-			if (isValidPid(theResource.getIdElement())) {
-				throw new UnprocessableEntityException(
-						"This server cannot create an entity with a user-specified numeric ID - Client should not specify an ID when creating a new resource, or should include at least one letter in the ID to force a client-defined ID");
-			}
-			createForcedIdIfNeeded(entity, theResource.getIdElement());
-
-			if (entity.getForcedId() != null) {
-				try {
-					translateForcedIdToPid(getResourceName(), theResource.getIdElement().getIdPart());
-					throw new UnprocessableEntityException(getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "duplicateCreateForcedId", theResource.getIdElement().getIdPart()));
-				} catch (ResourceNotFoundException e) {
-					// good, this ID doesn't exist so we can create it
-				}
-			}
-
-		}
-
-		// Notify interceptors
-		if (theRequestDetails != null) {
-			ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getContext(), theResource);
-			notifyInterceptors(RestOperationTypeEnum.CREATE, requestDetails);
-		}
-
-		// Perform actual DB update
-		updateEntity(theResource, entity, null, thePerformIndexing, thePerformIndexing, theUpdateTime);
-		theResource.setId(entity.getIdDt());
-
-		// Notify JPA interceptors
-		if (theRequestDetails != null) {
-			ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getContext(), theResource);
-			theRequestDetails.getRequestOperationCallback().resourceCreated(theResource);
-			for (IServerInterceptor next : getConfig().getInterceptors()) {
-				if (next instanceof IJpaServerInterceptor) {
-					((IJpaServerInterceptor) next).resourceCreated(requestDetails, entity);
-				}
-			}
-		}
-
-		DaoMethodOutcome outcome = toMethodOutcome(entity, theResource).setCreated(true);
-
-		String msg = getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "successfulCreate", outcome.getId(), w.getMillisAndRestart());
-		outcome.setOperationOutcome(createInfoOperationOutcome(msg));
-
-		ourLog.info(msg);
-		return outcome;
 	}
 
-	private <MT extends IBaseMetaType> void doMetaAdd(MT theMetaAdd, BaseHasResource entity) {
+	private <MT extends IBaseMetaType> int doMetaAdd(
+			MT theMetaAdd,
+			BaseHasResource<?> theEntity,
+			RequestDetails theRequestDetails,
+			TransactionDetails theTransactionDetails) {
+		IBaseResource oldVersion = myJpaStorageResourceParser.toResource(theEntity, false);
+
+		int addedTags = 0;
 		List<TagDefinition> tags = toTagList(theMetaAdd);
-
-		//@formatter:off
 		for (TagDefinition nextDef : tags) {
-			
-			boolean hasTag = false;
-			for (BaseTag next : new ArrayList<BaseTag>(entity.getTags())) {
-				if (ObjectUtil.equals(next.getTag().getTagType(), nextDef.getTagType()) && 
-						ObjectUtil.equals(next.getTag().getSystem(), nextDef.getSystem()) && 
-						ObjectUtil.equals(next.getTag().getCode(), nextDef.getCode())) {
-					hasTag = true;
+
+			boolean entityHasTag = false;
+			for (BaseTag next : theEntity.getTags()) {
+				if (Objects.equals(next.getTag().getTagType(), nextDef.getTagType())
+						&& Objects.equals(next.getTag().getSystem(), nextDef.getSystem())
+						&& Objects.equals(next.getTag().getCode(), nextDef.getCode())
+						&& Objects.equals(next.getTag().getVersion(), nextDef.getVersion())
+						&& Objects.equals(next.getTag().getUserSelected(), nextDef.getUserSelected())) {
+					entityHasTag = true;
 					break;
 				}
 			}
 
-			if (!hasTag) {
-				entity.setHasTags(true);
-				
-				TagDefinition def = getTag(nextDef.getTagType(), nextDef.getSystem(), nextDef.getCode(), nextDef.getDisplay());
-				BaseTag newEntity = entity.addTag(def);
-				myEntityManager.persist(newEntity);
-			}
-		}
-		//@formatter:on
+			if (!entityHasTag) {
+				addedTags++;
+				theEntity.setHasTags(true);
 
-		myEntityManager.merge(entity);
-	}
-
-	private <MT extends IBaseMetaType> void doMetaDelete(MT theMetaDel, BaseHasResource entity) {
-		List<TagDefinition> tags = toTagList(theMetaDel);
-
-		//@formatter:off
-		for (TagDefinition nextDef : tags) {
-			for (BaseTag next : new ArrayList<BaseTag>(entity.getTags())) {
-				if (ObjectUtil.equals(next.getTag().getTagType(), nextDef.getTagType()) && 
-						ObjectUtil.equals(next.getTag().getSystem(), nextDef.getSystem()) && 
-						ObjectUtil.equals(next.getTag().getCode(), nextDef.getCode())) {
-					myEntityManager.remove(next);
-					entity.getTags().remove(next);
+				TagDefinition def = cacheTagDefinitionDao.getTagOrNull(
+						theTransactionDetails,
+						nextDef.getTagType(),
+						nextDef.getSystem(),
+						nextDef.getCode(),
+						nextDef.getDisplay(),
+						nextDef.getVersion(),
+						nextDef.getUserSelected());
+				if (def != null) {
+					BaseTag newEntity = theEntity.addTag(def);
+					if (newEntity.getTagId() == null) {
+						myEntityManager.persist(newEntity);
+					}
 				}
 			}
 		}
-		//@formatter:on
 
-		if (entity.getTags().isEmpty()) {
-			entity.setHasTags(false);
+		validateMetaCount(theEntity.getTags().size());
+
+		if (addedTags > 0) {
+			myEntityManager.merge(theEntity);
+
+			callResourceUpdatedHooks(oldVersion, theEntity, theRequestDetails, theTransactionDetails);
 		}
 
-		myEntityManager.merge(entity);
+		return addedTags;
+	}
+
+	private <MT extends IBaseMetaType> int doMetaDelete(
+			MT theMetaDel,
+			BaseHasResource theEntity,
+			RequestDetails theRequestDetails,
+			TransactionDetails theTransactionDetails) {
+
+		int deleted = 0;
+
+		// todo mb update hibernate search index if we are storing resources - it assumes inline tags.
+		IBaseResource oldVersion = myJpaStorageResourceParser.toResource(theEntity, false);
+
+		List<TagDefinition> tags = toTagList(theMetaDel);
+
+		for (TagDefinition nextDef : tags) {
+			for (BaseTag next : new ArrayList<BaseTag>(theEntity.getTags())) {
+				if (Objects.equals(next.getTag().getTagType(), nextDef.getTagType())
+						&& Objects.equals(next.getTag().getSystem(), nextDef.getSystem())
+						&& Objects.equals(next.getTag().getCode(), nextDef.getCode())) {
+					myEntityManager.remove(next);
+					theEntity.getTags().remove(next);
+					deleted++;
+				}
+			}
+		}
+
+		if (deleted > 0) {
+
+			if (theEntity.getTags().isEmpty()) {
+				theEntity.setHasTags(false);
+			}
+
+			theEntity = myEntityManager.merge(theEntity);
+
+			callResourceUpdatedHooks(oldVersion, theEntity, theRequestDetails, theTransactionDetails);
+		}
+
+		return deleted;
+	}
+
+	private void callResourceUpdatedHooks(
+			IBaseResource theOldVersion,
+			BaseHasResource theEntity,
+			RequestDetails theRequestDetails,
+			TransactionDetails theTransactionDetails) {
+		IBaseResource newVersion = myJpaStorageResourceParser.toResource(theEntity, false);
+
+		// Interceptor call: STORAGE_PRESTORAGE_RESOURCE_UPDATED
+		HookParams preStorageParams = new HookParams()
+				.add(IBaseResource.class, theOldVersion)
+				.add(IBaseResource.class, newVersion)
+				.add(RequestDetails.class, theRequestDetails)
+				.addIfMatchesType(ServletRequestDetails.class, theRequestDetails)
+				.add(TransactionDetails.class, theTransactionDetails);
+		doCallHooks(
+				theTransactionDetails,
+				theRequestDetails,
+				Pointcut.STORAGE_PRESTORAGE_RESOURCE_UPDATED,
+				preStorageParams);
+
+		// Interceptor call: STORAGE_PRECOMMIT_RESOURCE_UPDATED
+		HookParams preCommitParams = new HookParams()
+				.add(IBaseResource.class, theOldVersion)
+				.add(IBaseResource.class, newVersion)
+				.add(RequestDetails.class, theRequestDetails)
+				.addIfMatchesType(ServletRequestDetails.class, theRequestDetails)
+				.add(TransactionDetails.class, theTransactionDetails)
+				.add(
+						InterceptorInvocationTimingEnum.class,
+						theTransactionDetails.getInvocationTiming(Pointcut.STORAGE_PRECOMMIT_RESOURCE_UPDATED));
+		doCallHooks(
+				theTransactionDetails, theRequestDetails, Pointcut.STORAGE_PRECOMMIT_RESOURCE_UPDATED, preCommitParams);
 	}
 
 	@Override
-	public TagList getAllResourceTags(RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails);
-		notifyInterceptors(RestOperationTypeEnum.GET_TAGS, requestDetails);
-
-		StopWatch w = new StopWatch();
-		TagList tags = super.getTags(myResourceType, null);
-		ourLog.info("Processed getTags on {} in {}ms", myResourceName, w.getMillisAndRestart());
-		return tags;
+	public ExpungeOutcome expunge(IIdType theId, ExpungeOptions theExpungeOptions, RequestDetails theRequest) {
+		HapiTransactionService.noTransactionAllowed();
+		validateExpungeEnabled();
+		return forceExpungeInExistingTransaction(theId, theExpungeOptions, theRequest);
 	}
 
-	protected abstract List<Object> getIncludeValues(FhirTerser theTerser, Include theInclude, IBaseResource theResource, RuntimeResourceDefinition theResourceDef);
+	@Override
+	public ExpungeOutcome expunge(ExpungeOptions theExpungeOptions, RequestDetails theRequestDetails) {
+		HapiTransactionService.noTransactionAllowed();
+		ourLog.info("Beginning TYPE[{}] expunge operation", getResourceName());
+		validateExpungeEnabled();
+		return myExpungeService.expunge(getResourceName(), null, theExpungeOptions, theRequestDetails);
+	}
 
+	private void validateExpungeEnabled() {
+		if (!getStorageSettings().isExpungeEnabled()) {
+			throw new MethodNotAllowedException(Msg.code(968) + "$expunge is not enabled on this server");
+		}
+	}
+
+	@Override
+	public Stream<IResourcePersistentId> fetchAllVersionsOfResources(
+			RequestDetails theRequestDetails, Collection<IResourcePersistentId> theIds) {
+		HapiTransactionService.requireTransaction();
+
+		List<JpaPidFk> ids = theIds.stream().map(t -> ((JpaPid) t).toFk()).toList();
+
+		return myResourceHistoryTableDao
+				.findVersionPidsForResources(Pageable.unpaged(), ids)
+				.map(t -> (IResourcePersistentId) t);
+	}
+
+	@Override
+	public ExpungeOutcome forceExpungeInExistingTransaction(
+			IIdType theId, ExpungeOptions theExpungeOptions, RequestDetails theRequest) {
+		TransactionTemplate txTemplate = new TransactionTemplate(myPlatformTransactionManager);
+
+		BaseHasResource<?> entity = txTemplate.execute(t -> readEntity(theId, theRequest));
+		Validate.notNull(entity, "Resource with ID %s not found in database", theId);
+
+		if (theId.hasVersionIdPart()) {
+			BaseHasResource<?> currentVersion;
+			currentVersion = txTemplate.execute(t -> readEntity(theId.toVersionless(), theRequest));
+			Validate.notNull(
+					currentVersion,
+					"Current version of resource with ID %s not found in database",
+					theId.toVersionless());
+
+			if (entity.getVersion() == currentVersion.getVersion()) {
+				throw new PreconditionFailedException(
+						Msg.code(969) + "Can not perform version-specific expunge of resource "
+								+ theId.toUnqualified().getValue() + " as this is the current version");
+			}
+
+			return myExpungeService.expunge(getResourceName(), entity.getResourceId(), theExpungeOptions, theRequest);
+		}
+
+		// Downstream code expects the version to be null in the JpaPid if we're not
+		// doing a version specific expunge
+		JpaPid resourceId = entity.getResourceId();
+		resourceId = JpaPid.fromId(resourceId.getId(), resourceId.getPartitionId());
+
+		return myExpungeService.expunge(getResourceName(), resourceId, theExpungeOptions, theRequest);
+	}
+
+	@Override
+	@Nonnull
 	public String getResourceName() {
 		return myResourceName;
 	}
@@ -442,199 +1383,337 @@ public abstract class BaseHapiFhirResourceDao<T extends IBaseResource> extends B
 		return myResourceType;
 	}
 
-	@Override
-	public TagList getTags(IIdType theResourceId, RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, null, theResourceId);
-		notifyInterceptors(RestOperationTypeEnum.GET_TAGS, requestDetails);
+	@SuppressWarnings("unchecked")
+	public void setResourceType(Class<? extends IBaseResource> theTableType) {
+		myResourceType = (Class<T>) theTableType;
+	}
 
+	@Override
+	public IBundleProvider history(Date theSince, Date theUntil, Integer theOffset, RequestDetails theRequestDetails) {
 		StopWatch w = new StopWatch();
-		TagList retVal = super.getTags(myResourceType, theResourceId);
-		ourLog.info("Processed getTags on {} in {}ms", theResourceId, w.getMillisAndRestart());
+		RequestPartitionId requestPartitionId =
+				myRequestPartitionHelperService.determineReadPartitionForRequestForHistory(
+						theRequestDetails, myResourceName, null);
+		IBundleProvider retVal = myTransactionService
+				.withRequest(theRequestDetails)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(() -> myPersistedJpaHistoryBundleProviderFactory.history(
+						theRequestDetails, myResourceName, null, theSince, theUntil, theOffset, requestPartitionId));
+
+		ourLog.debug("Processed history on {} in {}ms", myResourceName, w.getMillisAndRestart());
+		return retVal;
+	}
+
+	/**
+	 * @deprecated Use {@link #history(IIdType, HistorySearchDateRangeParam, RequestDetails)} instead
+	 */
+	@Override
+	public IBundleProvider history(
+			final IIdType theId, final Date theSince, Date theUntil, Integer theOffset, RequestDetails theRequest) {
+		StopWatch w = new StopWatch();
+
+		RequestPartitionId requestPartitionId =
+				myRequestPartitionHelperService.determineReadPartitionForRequestForHistory(
+						theRequest, myResourceName, theId);
+		IBundleProvider retVal = myTransactionService
+				.withRequest(theRequest)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(() -> {
+					JpaPid resourcePid = myIdHelperService.resolveResourceIdentityPid(
+							requestPartitionId,
+							getResourceName(),
+							theId.getIdPart(),
+							ResolveIdentityMode.includeDeleted().cacheOk());
+					return myPersistedJpaHistoryBundleProviderFactory.history(
+							theRequest, myResourceName, resourcePid, theSince, theUntil, theOffset, requestPartitionId);
+				});
+
+		ourLog.debug("Processed history on {} in {}ms", theId, w.getMillisAndRestart());
 		return retVal;
 	}
 
 	@Override
-	public IBundleProvider history(Date theSince, Date theUntil, RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails);
-		notifyInterceptors(RestOperationTypeEnum.HISTORY_TYPE, requestDetails);
-
+	public IBundleProvider history(
+			final IIdType theId,
+			final HistorySearchDateRangeParam theHistorySearchDateRangeParam,
+			RequestDetails theRequest) {
 		StopWatch w = new StopWatch();
-		IBundleProvider retVal = super.history(myResourceName, null, theSince, theUntil);
-		ourLog.info("Processed history on {} in {}ms", myResourceName, w.getMillisAndRestart());
+		RequestPartitionId requestPartitionId =
+				myRequestPartitionHelperService.determineReadPartitionForRequestForHistory(
+						theRequest, myResourceName, theId);
+		IBundleProvider retVal = myTransactionService
+				.withRequest(theRequest)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(() -> {
+					JpaPid resourcePid = myIdHelperService.resolveResourceIdentityPid(
+							requestPartitionId,
+							getResourceName(),
+							theId.getIdPart(),
+							ResolveIdentityMode.includeDeleted().cacheOk());
+					return myPersistedJpaHistoryBundleProviderFactory.history(
+							theRequest,
+							myResourceName,
+							resourcePid,
+							theHistorySearchDateRangeParam.getLowerBoundAsInstant(),
+							theHistorySearchDateRangeParam.getUpperBoundAsInstant(),
+							theHistorySearchDateRangeParam.getOffset(),
+							theHistorySearchDateRangeParam.getHistorySearchType(),
+							requestPartitionId);
+				});
+
+		ourLog.debug("Processed history on {} in {}ms", theId, w.getMillisAndRestart());
 		return retVal;
 	}
 
-	@Override
-	public IBundleProvider history(final IIdType theId, final Date theSince, Date theUntil, RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getResourceName(), theId);
-		notifyInterceptors(RestOperationTypeEnum.HISTORY_INSTANCE, requestDetails);
-
-		StopWatch w = new StopWatch();
-
-		IIdType id = theId.withResourceType(myResourceName).toUnqualifiedVersionless();
-		BaseHasResource entity = readEntity(id);
-
-		IBundleProvider retVal = super.history(myResourceName, entity.getId(), theSince, theUntil);
-
-		ourLog.info("Processed history on {} in {}ms", id, w.getMillisAndRestart());
-		return retVal;
+	protected boolean isPagingProviderDatabaseBacked(RequestDetails theRequestDetails) {
+		if (theRequestDetails == null || theRequestDetails.getServer() == null) {
+			return false;
+		}
+		IRestfulServerDefaults server = theRequestDetails.getServer();
+		IPagingProvider pagingProvider = server.getPagingProvider();
+		return pagingProvider != null;
 	}
 
-	@Override
-	public <MT extends IBaseMetaType> MT metaAddOperation(IIdType theResourceId, MT theMetaAdd, RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getResourceName(), theResourceId);
-		notifyInterceptors(RestOperationTypeEnum.META_ADD, requestDetails);
-
-		StopWatch w = new StopWatch();
-		BaseHasResource entity = readEntity(theResourceId);
-		if (entity == null) {
-			throw new ResourceNotFoundException(theResourceId);
+	protected void requestReindexForRelatedResources(
+			Boolean theCurrentlyReindexing, List<String> theBase, RequestDetails theRequestDetails) {
+		// Avoid endless loops
+		if (Boolean.TRUE.equals(theCurrentlyReindexing) || shouldSkipReindex(theRequestDetails)) {
+			return;
 		}
 
-		ResourceTable latestVersion = readEntityLatestVersion(theResourceId);
-		if (latestVersion.getVersion() != entity.getVersion()) {
-			doMetaAdd(theMetaAdd, entity);
+		if (getStorageSettings().isMarkResourcesForReindexingUponSearchParameterChange()) {
+
+			ReindexJobParameters params = new ReindexJobParameters();
+
+			// abstract types will determine a full reindex
+			// we could change this to expand resource types in the future for consistency
+			boolean baseContainsAbstractResourceType =
+					theBase.stream().anyMatch(SearchParameterUtil::isAbstractResourceBase);
+			if (!baseContainsAbstractResourceType) {
+				List<String> urls = theBase.stream().map(t -> t + "?").toList();
+				myJobPartitionProvider
+						.getPartitionedUrls(theRequestDetails, urls)
+						.forEach(params::addPartitionedUrl);
+			}
+
+			JobInstanceStartRequest request = new JobInstanceStartRequest();
+			request.setJobDefinitionId(JOB_REINDEX);
+			request.setParameters(params);
+			myJobCoordinator.startInstance(theRequestDetails, request);
+
+			ourLog.debug("Started reindex job with parameters {}", params);
+		}
+
+		mySearchParamRegistry.requestRefresh();
+	}
+
+	protected final boolean shouldSkipReindex(RequestDetails theRequestDetails) {
+		if (theRequestDetails == null) {
+			return false;
+		}
+		Object shouldSkip = theRequestDetails.getUserData().getOrDefault(JpaConstants.SKIP_REINDEX_ON_UPDATE, false);
+		return Boolean.parseBoolean(shouldSkip.toString());
+	}
+
+	@Override
+	public <MT extends IBaseMetaType> DaoMethodOutcome metaAddOperation(
+			IIdType theResourceId, MT theMetaAdd, RequestDetails theRequest, TransactionDetails theTransactionDetails) {
+
+		RequestPartitionId requestPartitionId = myRequestPartitionHelperService.determineReadPartitionForRequestForRead(
+				theRequest, myResourceName, theResourceId);
+
+		return myTransactionService
+				.withRequest(theRequest)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(() -> {
+					Function<BaseHasResource<?>, Integer> updateFunction =
+							entity -> doMetaAdd(theMetaAdd, entity, theRequest, theTransactionDetails);
+
+					return doMetaAddOrDeleteOperation(
+							theRequest,
+							theTransactionDetails,
+							updateFunction,
+							theResourceId,
+							theMetaAdd,
+							requestPartitionId,
+							StorageResponseCodeEnum.SUCCESSFUL_META_ADD,
+							"successfulMetaAdd",
+							StorageResponseCodeEnum.SUCCESSFUL_META_ADD_NO_CHANGE,
+							"successfulMetaAddNoChange");
+				});
+	}
+
+	@Override
+	public <MT extends IBaseMetaType> DaoMethodOutcome metaDeleteOperation(
+			IIdType theResourceId, MT theMetaDel, RequestDetails theRequest, TransactionDetails theTransactionDetails) {
+
+		RequestPartitionId requestPartitionId = myRequestPartitionHelperService.determineReadPartitionForRequestForRead(
+				theRequest, myResourceName, theResourceId);
+
+		return myTransactionService
+				.withRequest(theRequest)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(() -> {
+					Function<BaseHasResource<?>, Integer> updateFunction =
+							entity -> doMetaDelete(theMetaDel, entity, theRequest, theTransactionDetails);
+
+					return doMetaAddOrDeleteOperation(
+							theRequest,
+							theTransactionDetails,
+							updateFunction,
+							theResourceId,
+							theMetaDel,
+							requestPartitionId,
+							StorageResponseCodeEnum.SUCCESSFUL_META_DELETE,
+							"successfulMetaDelete",
+							StorageResponseCodeEnum.SUCCESSFUL_META_DELETE_NO_CHANGE,
+							"successfulMetaDeleteNoChange");
+				});
+	}
+
+	@SuppressWarnings("unchecked")
+	protected <MT extends IBaseMetaType> DaoMethodOutcome doMetaAddOrDeleteOperation(
+			RequestDetails theRequestDetails,
+			TransactionDetails theTransactionDetails,
+			Function<BaseHasResource<?>, Integer> theUpdateFunction,
+			IIdType theResourceId,
+			MT theMetaAdd,
+			RequestPartitionId theRequestPartitionId,
+			StorageResponseCodeEnum theResponseCodeSuccess,
+			String theLocalizationKeySuccess,
+			StorageResponseCodeEnum theResponseCodeNoOp,
+			String theLocalizationKeyNoOp) {
+
+		HapiTransactionService.requireTransaction();
+
+		IIdType resourceId = theResourceId;
+		if (theResourceId.hasVersionIdPart()
+				&& myStorageSettings.getTagStorageMode() != StorageSettings.TagStorageModeEnum.VERSIONED) {
+			resourceId = resourceId.withVersion(null);
+		}
+
+		StopWatch w = new StopWatch();
+		BaseHasResource<?> entity;
+
+		entity = readEntity(theTransactionDetails, resourceId, theRequestPartitionId, true, true);
+		int addedTags = theUpdateFunction.apply(entity);
+
+		boolean skipUpdatingEntity = false;
+		if (addedTags > 0 && myStorageSettings.getTagStorageMode() == StorageSettings.TagStorageModeEnum.VERSIONED) {
+			/*
+			 * Whether we have a ResourceHistoryTable or a ResourceTable in hand depends on whether the
+			 * caller suppplied a versioned ID or not. Whichever one we have, we want to update the other one.
+			 */
+			if (entity instanceof ResourceHistoryTable historyTable) {
+				/*
+				 * If we're in VERSIONED tag mode and we were updating a specific version, and that version
+				 * was the latest version, we also need to update the tags associated with the ResourceTable entity.
+				 */
+				ResourceTable resourceTable = historyTable.getResourceTable();
+				if (resourceTable.getVersion() == theResourceId.getVersionIdPartAsLong()) {
+					theUpdateFunction.apply(resourceTable);
+				} else {
+					skipUpdatingEntity = true;
+				}
+			} else {
+				/*
+				 * If we're in VERSIONED tag mode, and we were updating the latest version, we also need
+				 * to update the tags associated with the ResourceHistoryTable entity for the current
+				 * version.
+				 */
+				IIdType versionedId = theResourceId.withVersion(Long.toString(entity.getVersion()));
+				BaseHasResource<?> resourceHistoryTable =
+						readEntity(theTransactionDetails, versionedId, theRequestPartitionId, true, true);
+				theUpdateFunction.apply(resourceHistoryTable);
+				if (resourceHistoryTable.getVersion() != entity.getVersion()) {
+					skipUpdatingEntity = true;
+				}
+			}
+		}
+
+		/*
+		 * In case we have any SearchParameters which index the resource tags, we run a normal update on the
+		 * entity. This is potentially wasteful in cases where no explicit SPs are indexing resource.meta
+		 * elements, but it's safer to assume we might. Might be nice in the future to optimize this.
+		 */
+		if (!skipUpdatingEntity) {
+			T updatedResource =
+					myJpaStorageResourceParser.toResource(theRequestDetails, myResourceType, entity, null, false);
+			updateEntity(
+					theRequestDetails,
+					updatedResource,
+					entity,
+					entity.getDeleted(),
+					true,
+					false,
+					theTransactionDetails,
+					false,
+					false);
+		}
+
+		ourLog.debug("Processed meta operation on {} in {}ms", theResourceId, w.getMillisAndRestart());
+
+		Class<MT> aClass = (Class<MT>) theMetaAdd.getClass();
+		MT metaResponse = toMeta(aClass, entity);
+
+		DaoMethodOutcome outcome = new DaoMethodOutcome();
+		outcome.setCreated(false);
+		outcome.setResource(ParametersUtil.createParametersWithSingleReturn(getContext(), metaResponse));
+		outcome.setId(resourceId);
+
+		StorageResponseCodeEnum responseCode;
+		String msg;
+		if (addedTags > 0) {
+			outcome.setNop(false);
+			msg = getContext()
+					.getLocalizer()
+					.getMessageSanitized(
+							BaseStorageDao.class, theLocalizationKeySuccess, addedTags, resourceId.getValue());
+			responseCode = theResponseCodeSuccess;
 		} else {
-			doMetaAdd(theMetaAdd, latestVersion);
-
-			// Also update history entry
-			ResourceHistoryTable history = myResourceHistoryTableDao.findForIdAndVersion(entity.getId(), entity.getVersion());
-			doMetaAdd(theMetaAdd, history);
+			outcome.setNop(true);
+			msg = getContext()
+					.getLocalizer()
+					.getMessageSanitized(BaseStorageDao.class, theLocalizationKeyNoOp, resourceId.getValue());
+			responseCode = theResponseCodeNoOp;
 		}
 
-		ourLog.info("Processed metaAddOperation on {} in {}ms", new Object[] { theResourceId, w.getMillisAndRestart() });
-
-		@SuppressWarnings("unchecked")
-		MT retVal = (MT) metaGetOperation(theMetaAdd.getClass(), theResourceId, theRequestDetails);
-		return retVal;
+		outcome.setOperationOutcome(createInfoOperationOutcome(msg, responseCode));
+		return outcome;
 	}
 
-	// @Override
-	// public IBundleProvider everything(IIdType theId) {
-	// Search search = new Search();
-	// search.setUuid(UUID.randomUUID().toString());
-	// search.setCreated(new Date());
-	// myEntityManager.persist(search);
-	//
-	// List<SearchResult> results = new ArrayList<SearchResult>();
-	// if (theId != null) {
-	// Long pid = translateForcedIdToPid(theId);
-	// ResourceTable entity = myEntityManager.find(ResourceTable.class, pid);
-	// validateGivenIdIsAppropriateToRetrieveResource(theId, entity);
-	// SearchResult res = new SearchResult(search);
-	// res.setResourcePid(pid);
-	// results.add(res);
-	// } else {
-	// TypedQuery<Tuple> query = createSearchAllByTypeQuery();
-	// for (Tuple next : query.getResultList()) {
-	// SearchResult res = new SearchResult(search);
-	// res.setResourcePid(next.get(0, Long.class));
-	// results.add(res);
-	// }
-	// }
-	//
-	// int totalCount = results.size();
-	// mySearchResultDao.save(results);
-	// mySearchResultDao.flush();
-	//
-	// CriteriaBuilder builder = myEntityManager.getCriteriaBuilder();
-	//
-	// // Load _revincludes
-	// CriteriaQuery<Long> cq = builder.createQuery(Long.class);
-	// Root<ResourceLink> from = cq.from(ResourceLink.class);
-	// cq.select(from.get("mySourceResourcePid").as(Long.class));
-	//
-	// Subquery<Long> pidsSubquery = cq.subquery(Long.class);
-	// Root<SearchResult> pidsSubqueryFrom = pidsSubquery.from(SearchResult.class);
-	// pidsSubquery.select(pidsSubqueryFrom.get("myResourcePid").as(Long.class));
-	// pidsSubquery.where(pidsSubqueryFrom.get("mySearch").in(search));
-	//
-	// cq.where(from.get("myTargetResourceId").in(pidsSubquery));
-	// TypedQuery<Long> query = myEntityManager.createQuery(cq);
-	//
-	// results = new ArrayList<SearchResult>();
-	// for (Long next : query.getResultList()) {
-	// SearchResult res = new SearchResult(search);
-	// res.setResourcePid(next);
-	// results.add(res);
-	// }
-	//
-	// // Save _revincludes
-	// totalCount += results.size();
-	// mySearchResultDao.save(results);
-	// mySearchResultDao.flush();
-	//
-	// final int finalTotalCount = totalCount;
-	// return new IBundleProvider() {
-	//
-	// @Override
-	// public int size() {
-	// return finalTotalCount;
-	// }
-	//
-	// @Override
-	// public Integer preferredPageSize() {
-	// return null;
-	// }
-	//
-	// @Override
-	// public List<IBaseResource> getResources(int theFromIndex, int theToIndex) {
-	// // TODO Auto-generated method stub
-	// return null;
-	// }
-	//
-	// @Override
-	// public InstantDt getPublished() {
-	// // TODO Auto-generated method stub
-	// return null;
-	// }
-	// };
-	// }
-
 	@Override
-	public <MT extends IBaseMetaType> MT metaDeleteOperation(IIdType theResourceId, MT theMetaDel, RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getResourceName(), theResourceId);
-		notifyInterceptors(RestOperationTypeEnum.META_DELETE, requestDetails);
-
-		StopWatch w = new StopWatch();
-		BaseHasResource entity = readEntity(theResourceId);
-		if (entity == null) {
-			throw new ResourceNotFoundException(theResourceId);
-		}
-
-		ResourceTable latestVersion = readEntityLatestVersion(theResourceId);
-		if (latestVersion.getVersion() != entity.getVersion()) {
-			doMetaDelete(theMetaDel, entity);
+	public <MT extends IBaseMetaType> MT metaGetOperation(Class<MT> theType, IIdType theId, RequestDetails theRequest) {
+		TransactionDetails transactionDetails = new TransactionDetails();
+		IIdType id;
+		if (theId.hasVersionIdPart()
+				&& myStorageSettings.getTagStorageMode() == StorageSettings.TagStorageModeEnum.NON_VERSIONED) {
+			id = theId.toVersionless();
 		} else {
-			doMetaDelete(theMetaDel, latestVersion);
-
-			// Also update history entry
-			ResourceHistoryTable history = myResourceHistoryTableDao.findForIdAndVersion(entity.getId(), entity.getVersion());
-			doMetaDelete(theMetaDel, history);
+			id = theId;
 		}
 
-		myEntityManager.flush();
+		RequestPartitionId requestPartitionId =
+				myRequestPartitionHelperService.determineReadPartitionForRequestForRead(theRequest, myResourceName, id);
 
-		ourLog.info("Processed metaDeleteOperation on {} in {}ms", new Object[] { theResourceId.getValue(), w.getMillisAndRestart() });
+		MT retVal = myTransactionService
+				.withRequest(theRequest)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(() -> {
+					BaseHasResource<?> entity = readEntity(transactionDetails, id, requestPartitionId, true, true);
+					return toMeta(theType, entity);
+				});
 
-		@SuppressWarnings("unchecked")
-		MT retVal = (MT) metaGetOperation(theMetaDel.getClass(), theResourceId, theRequestDetails);
+		if (theId.hasVersionIdPart()) {
+			retVal.setVersionId(theId.getVersionIdPart());
+		}
+
 		return retVal;
 	}
 
-	@Override
-	public <MT extends IBaseMetaType> MT metaGetOperation(Class<MT> theType, IIdType theId, RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getResourceName(), theId);
-		notifyInterceptors(RestOperationTypeEnum.META, requestDetails);
-
-		Set<TagDefinition> tagDefs = new HashSet<TagDefinition>();
-		BaseHasResource entity = readEntity(theId);
+	@Nonnull
+	private <MT extends IBaseMetaType> MT toMeta(Class<MT> theType, BaseHasResource<?> entity) {
+		Set<TagDefinition> tagDefs = new HashSet<>();
 		for (BaseTag next : entity.getTags()) {
 			tagDefs.add(next.getTag());
 		}
@@ -642,84 +1721,87 @@ public abstract class BaseHapiFhirResourceDao<T extends IBaseResource> extends B
 
 		retVal.setLastUpdated(entity.getUpdatedDate());
 		retVal.setVersionId(Long.toString(entity.getVersion()));
-
 		return retVal;
 	}
 
 	@Override
 	public <MT extends IBaseMetaType> MT metaGetOperation(Class<MT> theType, RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getResourceName(), null);
-		notifyInterceptors(RestOperationTypeEnum.META, requestDetails);
+		return myTxTemplate.execute(tx -> {
+			String sql =
+					"SELECT d FROM TagDefinition d WHERE d.myId IN (SELECT DISTINCT t.myTagId FROM ResourceTag t WHERE t.myResourceType = :res_type)";
+			TypedQuery<TagDefinition> q = myEntityManager.createQuery(sql, TagDefinition.class);
+			q.setParameter("res_type", myResourceName);
+			List<TagDefinition> tagDefinitions = q.getResultList();
 
-		String sql = "SELECT d FROM TagDefinition d WHERE d.myId IN (SELECT DISTINCT t.myTagId FROM ResourceTag t WHERE t.myResourceType = :res_type)";
-		TypedQuery<TagDefinition> q = myEntityManager.createQuery(sql, TagDefinition.class);
-		q.setParameter("res_type", myResourceName);
-		List<TagDefinition> tagDefinitions = q.getResultList();
+			return toMetaDt(theType, tagDefinitions);
+		});
+	}
 
-		MT retVal = toMetaDt(theType, tagDefinitions);
-
-		return retVal;
+	private boolean isDeleted(BaseHasResource<?> entityToUpdate) {
+		return entityToUpdate.getDeleted() != null;
 	}
 
 	@PostConstruct
-	public void postConstruct() {
+	@Override
+	public void start() {
+		assert getStorageSettings() != null;
+
 		RuntimeResourceDefinition def = getContext().getResourceDefinition(myResourceType);
 		myResourceName = def.getName();
 
-		if (mySecondaryPrimaryKeyParamName != null) {
-			RuntimeSearchParam sp = def.getSearchParam(mySecondaryPrimaryKeyParamName);
-			if (sp == null) {
-				throw new ConfigurationException("Unknown search param on resource[" + myResourceName + "] for secondary key[" + mySecondaryPrimaryKeyParamName + "]");
-			}
-			if (sp.getParamType() != RestSearchParameterTypeEnum.TOKEN) {
-				throw new ConfigurationException("Search param on resource[" + myResourceName + "] for secondary key[" + mySecondaryPrimaryKeyParamName + "] is not a token type, only token is supported");
-			}
+		if (mySearchDao != null && mySearchDao.isDisabled()) {
+			mySearchDao = null;
 		}
 
+		ourLog.debug("Starting resource DAO for type: {}", getResourceName());
+		myInstanceValidator = getApplicationContext().getBean(IInstanceValidatorModule.class);
+		myTxTemplate = new TransactionTemplate(myPlatformTransactionManager);
+
+		myStorageInterceptorHooks = new StorageInterceptorHooksFacade(myInterceptorBroadcaster);
+
+		myDaoRegistrationService.registerResourceDao(this);
+
+		super.start();
 	}
 
 	/**
-	 * May be overridden by subclasses to validate resources prior to storage
-	 * 
-	 * @param theResource
-	 *           The resource that is about to be stored
+	 * Subclasses may override to provide behaviour. Invoked within a delete
+	 * transaction with the resource that is about to be deleted.
 	 */
-	protected void preProcessResourceForStorage(T theResource) {
-		String type = getContext().getResourceDefinition(theResource).getName();
-		if (!getResourceName().equals(type)) {
-			throw new InvalidRequestException(getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "incorrectResourceType", type, getResourceName()));
-		}
-
-		if (theResource.getIdElement().hasIdPart()) {
-			if (!theResource.getIdElement().isIdPartValid()) {
-				throw new InvalidRequestException(getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "failedToCreateWithInvalidId", theResource.getIdElement().getIdPart()));
-			}
-		}
-
-		/*
-		 * Replace absolute references with relative ones if configured to do so
-		 */
-		if (getConfig().getTreatBaseUrlsAsLocal().isEmpty() == false) {
-			FhirTerser t = getContext().newTerser();
-			List<ResourceReferenceInfo> refs = t.getAllResourceReferences(theResource);
-			for (ResourceReferenceInfo nextRef : refs) {
-				IIdType refId = nextRef.getResourceReference().getReferenceElement();
-				if (refId != null && refId.hasBaseUrl()) {
-					if (getConfig().getTreatBaseUrlsAsLocal().contains(refId.getBaseUrl())) {
-						IIdType newRefId = refId.toUnqualified();
-						nextRef.getResourceReference().setReference(newRefId.getValue());
-					}
-				}
-			}
-		}
+	protected void preDelete(T theResourceToDelete, ResourceTable theEntityToDelete, RequestDetails theRequestDetails) {
+		// nothing by default
 	}
 
 	@Override
-	public Set<Long> processMatchUrl(String theMatchUrl) {
-		return processMatchUrl(theMatchUrl, getResourceType());
+	public T readByPid(IResourcePersistentId thePid) {
+		return readByPid(thePid, false);
 	}
 
+	@Override
+	public T readByPid(IResourcePersistentId thePid, boolean theDeletedOk) {
+		return myTxTemplate.execute(tx -> {
+			StopWatch w = new StopWatch();
+			JpaPid jpaPid = (JpaPid) thePid;
+
+			Optional<ResourceTable> entity = myResourceTableDao.findById(jpaPid);
+			if (entity.isEmpty()) {
+				throw new ResourceNotFoundException(Msg.code(975) + "No resource found with PID " + jpaPid);
+			}
+			if (isDeleted(entity.get()) && !theDeletedOk) {
+				throw createResourceGoneException(entity.get());
+			}
+
+			T retVal = myJpaStorageResourceParser.toResource(null, myResourceType, entity.get(), null, false);
+
+			ourLog.debug("Processed read by PID on {} in {}ms", jpaPid, w.getMillis());
+			return retVal;
+		});
+	}
+
+	/**
+	 * @deprecated Use {@link #read(IIdType, RequestDetails)} instead
+	 */
+	@Deprecated
 	@Override
 	public T read(IIdType theId) {
 		return read(theId, null);
@@ -727,256 +1809,924 @@ public abstract class BaseHapiFhirResourceDao<T extends IBaseResource> extends B
 
 	@Override
 	public T read(IIdType theId, RequestDetails theRequestDetails) {
-		validateResourceTypeAndThrowIllegalArgumentException(theId);
+		return read(theId, theRequestDetails, false);
+	}
 
-		// Notify interceptors
-		if (theRequestDetails != null) {
-			ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getResourceName(), theId);
-			RestOperationTypeEnum operationType = theId.hasVersionIdPart() ? RestOperationTypeEnum.VREAD : RestOperationTypeEnum.READ;
-			notifyInterceptors(operationType, requestDetails);
-		}
+	@Override
+	public T read(IIdType theId, RequestDetails theRequest, boolean theDeletedOk) {
+		validateResourceTypeAndThrowInvalidRequestException(theId);
+		TransactionDetails transactionDetails = new TransactionDetails();
+
+		RequestPartitionId requestPartitionId = myRequestPartitionHelperService.determineReadPartitionForRequestForRead(
+				theRequest, myResourceName, theId);
+
+		return myTransactionService
+				.withRequest(theRequest)
+				.withTransactionDetails(transactionDetails)
+				.withRequestPartitionId(requestPartitionId)
+				.read(partition -> doReadInTransaction(theId, transactionDetails, theRequest, theDeletedOk, partition));
+	}
+
+	private T doReadInTransaction(
+			IIdType theId,
+			TransactionDetails theTransactionDetails,
+			RequestDetails theRequest,
+			boolean theDeletedOk,
+			RequestPartitionId theRequestPartitionId) {
+		assert TransactionSynchronizationManager.isActualTransactionActive();
 
 		StopWatch w = new StopWatch();
-		BaseHasResource entity = readEntity(theId);
+		BaseHasResource<?> entity = readEntity(theTransactionDetails, theId, theRequestPartitionId, false, true);
 		validateResourceType(entity);
 
-		T retVal = toResource(myResourceType, entity, false);
+		T retVal = myJpaStorageResourceParser.toResource(theRequest, myResourceType, entity, null, false);
 
-		IPrimitiveType<Date> deleted;
-		if (retVal instanceof IResource) {
-			deleted = ResourceMetadataKeyEnum.DELETED_AT.get((IResource) retVal);
-		} else {
-			deleted = ResourceMetadataKeyEnum.DELETED_AT.get((IAnyResource) retVal);
-		}
-		if (deleted != null && !deleted.isEmpty()) {
-			throw new ResourceGoneException("Resource was deleted at " + deleted.getValueAsString());
-		}
-
-		ourLog.info("Processed read on {} in {}ms", theId.getValue(), w.getMillisAndRestart());
-		return retVal;
-	}
-
-	@Override
-	public BaseHasResource readEntity(IIdType theId) {
-		boolean checkForForcedId = true;
-
-		BaseHasResource entity = readEntity(theId, checkForForcedId);
-
-		return entity;
-	}
-
-	@Override
-	public BaseHasResource readEntity(IIdType theId, boolean theCheckForForcedId) {
-		validateResourceTypeAndThrowIllegalArgumentException(theId);
-
-		Long pid = translateForcedIdToPid(getResourceName(), theId.getIdPart());
-		BaseHasResource entity = myEntityManager.find(ResourceTable.class, pid);
-
-		if (entity == null) {
-			throw new ResourceNotFoundException(theId);
-		}
-
-		if (theId.hasVersionIdPart()) {
-			if (theId.isVersionIdPartValidLong() == false) {
-				throw new ResourceNotFoundException(getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "invalidVersion", theId.getVersionIdPart(), theId.toUnqualifiedVersionless()));
+		if (!theDeletedOk) {
+			if (isDeleted(entity)) {
+				throw createResourceGoneException(entity);
 			}
-			if (entity.getVersion() != theId.getVersionIdPartAsLong().longValue()) {
-				entity = null;
-			}
-		}
 
-		if (entity == null) {
-			if (theId.hasVersionIdPart()) {
-				TypedQuery<ResourceHistoryTable> q = myEntityManager
-						.createQuery("SELECT t from ResourceHistoryTable t WHERE t.myResourceId = :RID AND t.myResourceType = :RTYP AND t.myResourceVersion = :RVER", ResourceHistoryTable.class);
-				q.setParameter("RID", pid);
-				q.setParameter("RTYP", myResourceName);
-				q.setParameter("RVER", theId.getVersionIdPartAsLong());
-				try {
-					entity = q.getSingleResult();
-				} catch (NoResultException e) {
-					throw new ResourceNotFoundException(getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "invalidVersion", theId.getVersionIdPart(), theId.toUnqualifiedVersionless()));
+			// If the ResourceTable entity has been marked as deleted but the
+			// current ResourceHistoryTable has not, we still want to indicate that
+			// the resource is deleted (this is most likely because someone manually
+			// deleted the resource by manipulating the DB)
+			if (entity instanceof ResourceHistoryTable resourceHistoryTable) {
+				ResourceTable resourceTable = resourceHistoryTable.getResourceTable();
+				if (resourceHistoryTable.getVersion() == resourceTable.getVersion() && isDeleted(resourceTable)) {
+					throw createResourceGoneException(entity);
 				}
 			}
 		}
 
-		validateResourceType(entity);
-
-		if (theCheckForForcedId) {
-			validateGivenIdIsAppropriateToRetrieveResource(theId, entity);
-		}
-		return entity;
-	}
-
-	protected ResourceTable readEntityLatestVersion(IIdType theId) {
-		ResourceTable entity = myEntityManager.find(ResourceTable.class, translateForcedIdToPid(getResourceName(), theId.getIdPart()));
-		if (entity == null) {
-			throw new ResourceNotFoundException(theId);
-		}
-		validateGivenIdIsAppropriateToRetrieveResource(theId, entity);
-		return entity;
-	}
-
-	@Override
-	public void reindex(T theResource, ResourceTable theEntity) {
-		updateEntity(theResource, theEntity, null, true, false, theEntity.getUpdatedDate());
-	}
-
-	@Override
-	public void removeTag(IIdType theId, TagTypeEnum theTagType, String theScheme, String theTerm, RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails, getResourceName(), theId);
-		notifyInterceptors(RestOperationTypeEnum.DELETE_TAGS, requestDetails);
-
-		StopWatch w = new StopWatch();
-		BaseHasResource entity = readEntity(theId);
-		if (entity == null) {
-			throw new ResourceNotFoundException(theId);
+		// If the resolved fhir model is null, we don't need to run pre-access over or pre-show over it.
+		if (retVal != null) {
+			invokeStoragePreAccessResources(theId, theRequest, retVal);
+			retVal = invokeStoragePreShowResources(theRequest, retVal);
 		}
 
-		//@formatter:off
-		for (BaseTag next : new ArrayList<BaseTag>(entity.getTags())) {
-			if (ObjectUtil.equals(next.getTag().getTagType(), theTagType) && 
-					ObjectUtil.equals(next.getTag().getSystem(), theScheme) && 
-					ObjectUtil.equals(next.getTag().getCode(), theTerm)) {
-				myEntityManager.remove(next);
-				entity.getTags().remove(next);
-			}
-		}
-		//@formatter:on
-
-		if (entity.getTags().isEmpty()) {
-			entity.setHasTags(false);
-		}
-
-		myEntityManager.merge(entity);
-
-		ourLog.info("Processed remove tag {}/{} on {} in {}ms", new Object[] { theScheme, theTerm, theId.getValue(), w.getMillisAndRestart() });
-	}
-
-	@Override
-	public IBundleProvider search(Map<String, IQueryParameterType> theParams) {
-		SearchParameterMap map = new SearchParameterMap();
-		for (Entry<String, IQueryParameterType> nextEntry : theParams.entrySet()) {
-			map.add(nextEntry.getKey(), (nextEntry.getValue()));
-		}
-		return search(map);
-	}
-
-	@Override
-	public IBundleProvider search(final SearchParameterMap theParams) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theParams.getRequestDetails(), getContext(), getResourceName(), null);
-		notifyInterceptors(RestOperationTypeEnum.SEARCH_TYPE, requestDetails);
-
-		SearchBuilder builder = new SearchBuilder(getContext(), myEntityManager, myPlatformTransactionManager, mySearchDao, mySearchResultDao, this, myResourceIndexedSearchParamUriDao, myForcedIdDao,
-				myTerminologySvc);
-		builder.setType(getResourceType(), getResourceName());
-		return builder.search(theParams);
-	}
-
-	@Override
-	public IBundleProvider search(String theParameterName, IQueryParameterType theValue) {
-		return search(Collections.singletonMap(theParameterName, theValue));
-	}
-
-	@Override
-	public Set<Long> searchForIds(Map<String, IQueryParameterType> theParams) {
-		SearchParameterMap map = new SearchParameterMap();
-		for (Entry<String, IQueryParameterType> nextEntry : theParams.entrySet()) {
-			map.add(nextEntry.getKey(), (nextEntry.getValue()));
-		}
-		return searchForIdsWithAndOr(map);
-	}
-
-	@Override
-	public Set<Long> searchForIds(String theParameterName, IQueryParameterType theValue) {
-		return searchForIds(Collections.singletonMap(theParameterName, theValue));
-	}
-
-	@Override
-	public Set<Long> searchForIdsWithAndOr(SearchParameterMap theParams) {
-		theParams.setPersistResults(false);
-
-		SearchBuilder builder = new SearchBuilder(getContext(), myEntityManager, myPlatformTransactionManager, mySearchDao, mySearchResultDao, this, myResourceIndexedSearchParamUriDao, myForcedIdDao,
-				myTerminologySvc);
-		builder.setType(getResourceType(), getResourceName());
-		builder.search(theParams);
-		return builder.doGetPids();
-	}
-
-	@SuppressWarnings("unchecked")
-	@Required
-	public void setResourceType(Class<? extends IBaseResource> theTableType) {
-		myResourceType = (Class<T>) theTableType;
-	}
-
-	/**
-	 * If set, the given param will be treated as a secondary primary key, and multiple resources will not be able to share the same value.
-	 */
-	public void setSecondaryPrimaryKeyParamName(String theSecondaryPrimaryKeyParamName) {
-		mySecondaryPrimaryKeyParamName = theSecondaryPrimaryKeyParamName;
-	}
-
-	protected <MT extends IBaseMetaType> MT toMetaDt(Class<MT> theType, Collection<TagDefinition> tagDefinitions) {
-		MT retVal;
-		try {
-			retVal = theType.newInstance();
-		} catch (Exception e) {
-			throw new InternalErrorException("Failed to instantiate " + theType.getName(), e);
-		}
-		for (TagDefinition next : tagDefinitions) {
-			switch (next.getTagType()) {
-			case PROFILE:
-				retVal.addProfile(next.getCode());
-				break;
-			case SECURITY_LABEL:
-				retVal.addSecurity().setSystem(next.getSystem()).setCode(next.getCode()).setDisplay(next.getDisplay());
-				break;
-			case TAG:
-				retVal.addTag().setSystem(next.getSystem()).setCode(next.getCode()).setDisplay(next.getDisplay());
-				break;
-			}
-		}
+		ourLog.debug("Processed read by ID on {} in {}ms", theId.getValue(), w.getMillisAndRestart());
 		return retVal;
 	}
 
-	private DaoMethodOutcome toMethodOutcome(final BaseHasResource theEntity, IBaseResource theResource) {
-		DaoMethodOutcome outcome = new DaoMethodOutcome();
-
-		IIdType id = theEntity.getIdDt();
-		if (getContext().getVersion().getVersion().isRi()) {
-			id = new IdType(id.getValue());
-		}
-
-		outcome.setId(id);
-		outcome.setResource(theResource);
-		if (theResource != null) {
-			theResource.setId(id);
-			if (theResource instanceof IResource) {
-				ResourceMetadataKeyEnum.UPDATED.put((IResource) theResource, theEntity.getUpdated());
-			} else {
-				IBaseMetaType meta = ((IAnyResource) theResource).getMeta();
-				meta.setLastUpdated(theEntity.getUpdatedDate());
-			}
-		}
-		return outcome;
+	@Nullable
+	private T invokeStoragePreShowResources(RequestDetails theRequest, T retVal) {
+		retVal = invokeStoragePreShowResources(myInterceptorBroadcaster, theRequest, retVal);
+		return retVal;
 	}
 
-	private DaoMethodOutcome toMethodOutcome(final ResourceTable theEntity, IBaseResource theResource) {
-		DaoMethodOutcome retVal = toMethodOutcome((BaseHasResource) theEntity, theResource);
-		retVal.setEntity(theEntity);
+	private void invokeStoragePreAccessResources(IIdType theId, RequestDetails theRequest, T theResource) {
+		invokeStoragePreAccessResources(myInterceptorBroadcaster, theRequest, theId, theResource);
+	}
+
+	private Optional<T> invokeStoragePreAccessResources(RequestDetails theRequest, T theResource) {
+		IInterceptorBroadcaster compositeBroadcaster =
+				CompositeInterceptorBroadcaster.newCompositeBroadcaster(myInterceptorBroadcaster, theRequest);
+		if (compositeBroadcaster.hasHooks(Pointcut.STORAGE_PREACCESS_RESOURCES)) {
+			SimplePreResourceAccessDetails accessDetails = new SimplePreResourceAccessDetails(theResource);
+			HookParams params = new HookParams()
+					.add(IPreResourceAccessDetails.class, accessDetails)
+					.add(RequestDetails.class, theRequest)
+					.addIfMatchesType(ServletRequestDetails.class, theRequest);
+			compositeBroadcaster.callHooks(Pointcut.STORAGE_PREACCESS_RESOURCES, params);
+			if (accessDetails.isDontReturnResourceAtIndex(0)) {
+				return Optional.empty();
+			}
+		}
+		return Optional.of(theResource);
+	}
+
+	@Override
+	public BaseHasResource<?> readEntity(IIdType theId, RequestDetails theRequest) {
+		RequestPartitionId requestPartitionId = myRequestPartitionHelperService.determineReadPartitionForRequestForRead(
+				theRequest, myResourceName, theId);
+		return myTransactionService
+				.withRequest(theRequest)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(() -> readEntity(new TransactionDetails(), theId, requestPartitionId, false, false));
+	}
+
+	@Override
+	public ReindexOutcome reindex(
+			IResourcePersistentId thePid,
+			ReindexParameters theReindexParameters,
+			RequestDetails theRequest,
+			TransactionDetails theTransactionDetails) {
+		ReindexOutcome retVal = new ReindexOutcome();
+
+		JpaPid jpaPid = (JpaPid) thePid;
+
+		// Careful!  Reindex only reads ResourceTable, but we tell Hibernate to check version
+		// to ensure Hibernate will catch concurrent updates (PUT/DELETE) elsewhere.
+		// Otherwise, we may index stale data.  See #4584
+		// We use the main entity as the lock object since all the index rows hang off it.
+		ResourceTable entity;
+		if (theReindexParameters.isOptimisticLock()) {
+			entity = myEntityManager.find(ResourceTable.class, jpaPid, LockModeType.OPTIMISTIC);
+		} else {
+			entity = myEntityManager.find(ResourceTable.class, jpaPid);
+		}
+
+		IIdType id = myFhirContext.getVersion().newIdType(entity.getResourceType(), entity.getFhirId());
+		retVal.setResourceId(id);
+
+		boolean reindexSearchParameters =
+				theReindexParameters.getReindexSearchParameters() != ReindexParameters.ReindexSearchParametersEnum.NONE;
+		boolean correctCurrentVersion =
+				theReindexParameters.getCorrectCurrentVersion() != ReindexParameters.CorrectCurrentVersionModeEnum.NONE;
+		boolean optimizeStorage =
+				theReindexParameters.getOptimizeStorage() != ReindexParameters.OptimizeStorageModeEnum.NONE;
+
+		if (correctCurrentVersion) {
+			CorrectCurrentVersionResponse outcome =
+					reindexCorrectCurrentVersion(entity, theReindexParameters.getReindexSearchParameters());
+			if (outcome.forceReindexSps()) {
+				reindexSearchParameters = true;
+			}
+			if (outcome.forceReloadResourceEntity() && (reindexSearchParameters || optimizeStorage)) {
+				entity = myEntityManager.find(ResourceTable.class, jpaPid);
+				if (outcome.currentVersion() != null) {
+					entity.setCurrentVersionEntity(outcome.currentVersion());
+				}
+			}
+		}
+
+		if (reindexSearchParameters) {
+			boolean searchParameterReindexSucceeded = reindexSearchParameters(entity, retVal, theTransactionDetails);
+			if (searchParameterReindexSucceeded) {
+				reindexFullTextIndex(entity, retVal);
+			}
+		}
+
+		if (optimizeStorage) {
+			reindexOptimizeStorage(entity, theReindexParameters.getOptimizeStorage());
+		}
+
+		return retVal;
+	}
+
+	/**
+	 * @return Returns an updated copy of the entity if it was modified (returns null otherwise)
+	 */
+	private CorrectCurrentVersionResponse reindexCorrectCurrentVersion(
+			ResourceTable theEntity, ReindexParameters.ReindexSearchParametersEnum theReindexSearchParameters) {
+		ResourceHistoryTable version = theEntity.getCurrentVersionEntity();
+
+		if (version == null) {
+			Optional<ResourceHistoryTable> currentVersionOpt = myResourceHistoryTableDao
+					.findVersionsForResource(
+							SINGLE_RESULT, theEntity.getResourceId().toFk())
+					.findFirst();
+
+			if (currentVersionOpt.isPresent()) {
+				Long newVersion = currentVersionOpt.get().getVersion();
+				if (newVersion == theEntity.getVersion()) {
+					// Already have the correct version
+					return null;
+				}
+
+				ourLog.info(
+						"Correcting current version for {}/{} (PID {}) from version {} to version {}",
+						theEntity.getResourceType(),
+						theEntity.getFhirId(),
+						theEntity.getResourceId(),
+						theEntity.getVersion(),
+						newVersion);
+
+				/*
+				 * We are going to manually change (i.e. correct) the version number on the HFJ_RESOURCE table. The
+				 * version number is used as the optimistic locking key, so we need to detach the entity first, or
+				 * we'll get an optimistic lock failure later.
+				 */
+				myEntityManager.detach(theEntity);
+
+				myResourceTableDao.updateVersionAndLastUpdated(theEntity.getId(), newVersion, new Date());
+
+				return new CorrectCurrentVersionResponse(false, true, currentVersionOpt.get());
+
+			} else {
+				ourLog.info(
+						"No versions exist for {}/{} (PID {}), marking resource as deleted",
+						theEntity.getResourceType(),
+						theEntity.getFhirId(),
+						theEntity.getResourceId());
+				theEntity.setDeleted(new Date());
+				return new CorrectCurrentVersionResponse(true, false, null);
+			}
+		}
+
+		return new CorrectCurrentVersionResponse(false, false, null);
+	}
+
+	@SuppressWarnings("unchecked")
+	private boolean reindexSearchParameters(
+			ResourceTable entity, ReindexOutcome theReindexOutcome, TransactionDetails theTransactionDetails) {
+		try {
+			T resource = (T) myJpaStorageResourceParser.toResource(entity, false);
+			reindexSearchParameters(resource, entity, theTransactionDetails);
+			return true;
+		} catch (Exception e) {
+			ourLog.warn("Failure during reindex: {}", e.toString());
+			theReindexOutcome.addWarning("Failed to reindex resource " + entity.getIdDt() + ": " + e.getMessage());
+			myResourceTableDao.updateIndexStatus(entity.getId(), EntityIndexStatusEnum.INDEXING_FAILED);
+			return false;
+		}
+	}
+
+	private void reindexFullTextIndex(ResourceTable theEntity, ReindexOutcome theReindexOutcome) {
+		if (mySearchDao == null) {
+			return;
+		}
+
+		try {
+			mySearchDao.reindex(theEntity);
+		} catch (Exception e) {
+			ourLog.warn("Failure during fulltext reindex: {}", e.toString());
+			theReindexOutcome.addWarning(
+					"Failed to reindex fulltext index for resource " + theEntity.getIdDt() + ": " + e);
+			myResourceTableDao.updateIndexStatus(theEntity.getId(), EntityIndexStatusEnum.INDEXING_FAILED);
+		}
+	}
+
+	/**
+	 * @deprecated Use {@link #reindex(IResourcePersistentId, ReindexParameters, RequestDetails, TransactionDetails)}
+	 */
+	@Deprecated
+	@Override
+	public void reindex(T theResource, IBasePersistedResource theEntity) {
+		assert TransactionSynchronizationManager.isActualTransactionActive();
+		ResourceTable entity = (ResourceTable) theEntity;
+		TransactionDetails transactionDetails = new TransactionDetails(entity.getUpdatedDate());
+
+		reindexSearchParameters(theResource, theEntity, transactionDetails);
+	}
+
+	private void reindexSearchParameters(
+			T theResource, IBasePersistedResource theEntity, TransactionDetails transactionDetails) {
+		ourLog.debug("Indexing resource {} - PID {}", theEntity.getIdDt().getValue(), theEntity.getPersistentId());
+		if (theResource != null) {
+			CURRENTLY_REINDEXING.put(theResource, Boolean.TRUE);
+		}
+
+		SystemRequestDetails request = new SystemRequestDetails();
+		request.getUserData().put(JpaConstants.SKIP_REINDEX_ON_UPDATE, Boolean.TRUE);
+
+		updateEntity(
+				request, theResource, theEntity, theEntity.getDeleted(), true, false, transactionDetails, true, false);
+		if (theResource != null) {
+			CURRENTLY_REINDEXING.put(theResource, null);
+		}
+	}
+
+	private void reindexOptimizeStorage(
+			ResourceTable entity, ReindexParameters.OptimizeStorageModeEnum theOptimizeStorageMode) {
+		ResourceHistoryTable historyEntity = entity.getCurrentVersionEntity();
+		if (historyEntity != null) {
+			reindexOptimizeStorageHistoryEntity(entity, historyEntity);
+			if (theOptimizeStorageMode == ReindexParameters.OptimizeStorageModeEnum.ALL_VERSIONS) {
+				int pageSize = 100;
+				for (int page = 0; ((long) page * pageSize) < entity.getVersion(); page++) {
+
+					// We need to sort the pages, because we are updating the same data we are paging through.
+					// If not sorted explicitly, a database like Postgres returns the same data multiple times on
+					// different pages as the underlying data gets updated.
+					PageRequest pageRequest = PageRequest.of(page, pageSize, Sort.by("myId"));
+					Slice<ResourceHistoryTable> historyEntities =
+							myResourceHistoryTableDao.findAllVersionsExceptSpecificForResourcePid(
+									pageRequest, entity.getId().toFk(), historyEntity.getVersion());
+
+					for (ResourceHistoryTable next : historyEntities) {
+						reindexOptimizeStorageHistoryEntity(entity, next);
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 * Note that the entity will be detached after being saved if it has changed
+	 * in order to avoid growing the number of resources in memory to be too big
+	 */
+	private void reindexOptimizeStorageHistoryEntity(ResourceTable entity, ResourceHistoryTable historyEntity) {
+		if (historyEntity.getEncoding() == ResourceEncodingEnum.JSONC
+				|| historyEntity.getEncoding() == ResourceEncodingEnum.JSON) {
+			byte[] resourceBytes = historyEntity.getResource();
+			if (resourceBytes != null) {
+				String resourceText = decodeResource(resourceBytes, historyEntity.getEncoding());
+				myResourceHistoryCalculator.conditionallyAlterHistoryEntity(entity, historyEntity, resourceText);
+			}
+		}
+		if (myStorageSettings.isAccessMetaSourceInformationFromProvenanceTable()) {
+			if (isBlank(historyEntity.getSourceUri()) && isBlank(historyEntity.getRequestId())) {
+				IdAndPartitionId id = historyEntity.getId().asIdAndPartitionId();
+				Optional<ResourceHistoryProvenanceEntity> provenanceEntityOpt =
+						myResourceHistoryProvenanceDao.findById(id);
+				if (provenanceEntityOpt.isPresent()) {
+					ResourceHistoryProvenanceEntity provenanceEntity = provenanceEntityOpt.get();
+					historyEntity.setSourceUri(provenanceEntity.getSourceUri());
+					historyEntity.setRequestId(provenanceEntity.getRequestId());
+					myResourceHistoryProvenanceDao.delete(provenanceEntity);
+				}
+			}
+		}
+	}
+
+	@Nonnull
+	private BaseHasResource<?> readEntity(
+			@Nullable TransactionDetails theTransactionDetails,
+			@Nonnull IIdType theId,
+			@Nonnull RequestPartitionId theRequestPartitionId,
+			boolean theJoinTags,
+			boolean theJoinResourceTable) {
+
+		assert !(theJoinTags
+						&& myStorageSettings.getTagStorageMode() == StorageSettings.TagStorageModeEnum.NON_VERSIONED
+						&& theId.hasVersionIdPart())
+				: "Attempting to join tags on a versioned ID indicates a potential bug in NON_VERSIONED tag storage mode since we will be returning an entity that can't contain tags in this mode";
+
+		validateResourceTypeAndThrowInvalidRequestException(theId);
+
+		JpaPid pid = null;
+		if (theTransactionDetails != null) {
+			pid = (JpaPid) theTransactionDetails.getResolvedResourceId(theId);
+		}
+		boolean preResolved = pid != null;
+
+		if (!preResolved) {
+			pid = myIdHelperService
+					.resolveResourceIdentity(
+							theRequestPartitionId,
+							getResourceName(),
+							theId.getIdPart(),
+							ResolveIdentityMode.includeDeleted().cacheOk())
+					.getPersistentId();
+		}
+
+		/*
+		 * If we're partitioned, but not in Database Partition Mode, then the PARTITION_ID
+		 * column isn't a part of the PK and we need to explicitly add a WHERE clause for it.
+		 */
+		boolean needExplicitPartitionSelector = myPartitionSettings.isPartitioningEnabled()
+				&& !myPartitionSettings.isDatabasePartitionMode()
+				&& !theRequestPartitionId.isAllPartitions();
+
+		/*
+		 * If the TransactionDetails indicates that we've already pre-resolved
+		 * the resource, we can assume it's already in the L1 cache.
+		 */
+		BaseHasResource<?> retVal = null;
+		if (isBlank(theId.getVersionIdPart())) {
+			if (preResolved || (!theJoinTags && !needExplicitPartitionSelector)) {
+				retVal = myEntityManager.find(ResourceTable.class, pid);
+			}
+		}
+
+		if (retVal == null) {
+			CriteriaBuilder cb = myEntityManager.getCriteriaBuilder();
+			CriteriaQuery<? extends BaseHasResource<?>> query;
+			Root<? extends BaseHasResource<?>> root;
+			List<Predicate> predicates = new ArrayList<>(3);
+
+			if (theId.hasVersionIdPart()) {
+				if (!theId.isVersionIdPartValidLong()) {
+					throw new ResourceNotFoundException(Msg.code(978)
+							+ getContext()
+									.getLocalizer()
+									.getMessageSanitized(
+											BaseStorageDao.class,
+											"invalidVersion",
+											theId.getVersionIdPart(),
+											theId.toUnqualifiedVersionless()));
+				}
+
+				/*
+				 * We're looking for a specific version of a resource, fetch
+				 * the entity from ResourceHistoryTable
+				 */
+				query = cb.createQuery(ResourceHistoryTable.class);
+				root = query.from(ResourceHistoryTable.class);
+				addPartitionPredicateIfNecessary(
+						theRequestPartitionId, needExplicitPartitionSelector, cb, root, predicates);
+				predicates.add(cb.equal(root.get("myResourcePid"), JpaPidFk.fromPid(pid)));
+				predicates.add(cb.equal(root.get("myResourceVersion"), theId.getVersionIdPartAsLong()));
+				if (theJoinResourceTable) {
+					root.fetch("myResourceTable");
+					if (theJoinTags) {
+						root.fetch("myResourceTable")
+								.fetch("myTags", JoinType.LEFT)
+								.fetch("myTag", JoinType.LEFT);
+					}
+				}
+			} else {
+				/*
+				 * We're looking for the latest version of a resource, fetch
+				 * the entity from ResourceTable
+				 */
+				query = cb.createQuery(ResourceTable.class);
+				root = query.from(ResourceTable.class);
+				addPartitionPredicateIfNecessary(
+						theRequestPartitionId, needExplicitPartitionSelector, cb, root, predicates);
+				predicates.add(cb.equal(root.get("myPid"), pid));
+			}
+
+			if (theJoinTags) {
+				root.fetch("myTags", JoinType.LEFT).fetch("myTag", JoinType.LEFT);
+			}
+
+			query.where(cb.and(predicates.toArray(EMPTY_PREDICATE_ARRAY)));
+
+			try {
+				retVal = myEntityManager.createQuery(query).getSingleResult();
+			} catch (NoResultException e) {
+				// fall through
+			}
+		}
+
+		if (retVal == null) {
+			if (theId.hasVersionIdPart()) {
+				throw new ResourceNotFoundException(Msg.code(979)
+						+ getContext()
+								.getLocalizer()
+								.getMessageSanitized(
+										BaseStorageDao.class,
+										"invalidVersion",
+										theId.getVersionIdPart(),
+										theId.toUnqualifiedVersionless()));
+			} else {
+				throw new ResourceNotFoundException(Msg.code(1996) + "Resource " + theId + " is not known");
+			}
+		}
+
+		validateResourceType(retVal);
+		validateGivenIdIsAppropriateToRetrieveResource(theId, retVal);
+
+		return retVal;
+	}
+
+	private void addPartitionPredicateIfNecessary(
+			@Nonnull RequestPartitionId theRequestPartitionId,
+			boolean needExplicitPartitionSelector,
+			CriteriaBuilder cb,
+			Root<? extends BaseHasResource<?>> root,
+			List<Predicate> predicates) {
+		if (needExplicitPartitionSelector) {
+			Set<Integer> readPartitions = myRequestPartitionHelperService.toReadPartitions(theRequestPartitionId);
+			if (readPartitions.contains(null)) {
+				// Because the list of partitions can include null, we need to handle that possibilty separately
+				// since you can just do FOO IN (NULL) in SQL
+				Predicate partitionIsNull = cb.isNull(root.get("myPartitionIdValue"));
+				if (readPartitions.size() == 1) {
+					predicates.add(partitionIsNull);
+				} else {
+					readPartitions.remove(null);
+					predicates.add(cb.or(partitionIsNull, toPartitionPredicate(cb, root, readPartitions)));
+				}
+			} else {
+				predicates.add(toPartitionPredicate(cb, root, readPartitions));
+			}
+		}
+	}
+
+	private static Predicate toPartitionPredicate(
+			CriteriaBuilder cb, Root<? extends BaseHasResource<?>> root, Set<Integer> readPartitions) {
+		Predicate predicate;
+		if (readPartitions.size() == 1) {
+			predicate = cb.equal(
+					root.get("myPartitionIdValue"), readPartitions.iterator().next());
+		} else {
+			predicate = root.get("myPartitionIdValue").in(readPartitions.toArray());
+		}
+		return predicate;
+	}
+
+	@Override
+	protected IBasePersistedResource readEntityLatestVersion(
+			IResourcePersistentId thePersistentId,
+			RequestDetails theRequestDetails,
+			TransactionDetails theTransactionDetails) {
+		JpaPid jpaPid = (JpaPid) thePersistentId;
+		return myEntityManager.find(ResourceTable.class, jpaPid);
+	}
+
+	@Override
+	@Nonnull
+	protected ResourceTable readEntityLatestVersion(
+			IIdType theId, RequestDetails theRequestDetails, TransactionDetails theTransactionDetails) {
+		RequestPartitionId requestPartitionId = myRequestPartitionHelperService.determineReadPartitionForRequestForRead(
+				theRequestDetails, getResourceName(), theId);
+
+		return myTransactionService
+				.withRequest(theRequestDetails)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(() ->
+						readEntityLatestVersion(theRequestDetails, theId, requestPartitionId, theTransactionDetails));
+	}
+
+	@Nonnull
+	private ResourceTable readEntityLatestVersion(
+			RequestDetails theRequestDetails,
+			IIdType theId,
+			@Nonnull RequestPartitionId theRequestPartitionId,
+			TransactionDetails theTransactionDetails) {
+		HapiTransactionService.requireTransaction();
+
+		IIdType id = theId;
+		validateResourceTypeAndThrowInvalidRequestException(id);
+		if (!id.hasResourceType()) {
+			id = id.withResourceType(getResourceName());
+		}
+
+		JpaPid persistentId = null;
+		if (theTransactionDetails != null) {
+			if (theTransactionDetails.isResolvedResourceIdEmpty(id.toUnqualifiedVersionless())) {
+				throw new ResourceNotFoundException(Msg.code(1997) + id);
+			}
+			if (theTransactionDetails.hasResolvedResourceIds()) {
+				persistentId = (JpaPid) theTransactionDetails.getResolvedResourceId(id);
+			}
+		}
+
+		if (persistentId == null) {
+			persistentId = myIdHelperService.resolveResourceIdentityPid(
+					theRequestPartitionId,
+					id.getResourceType(),
+					id.getIdPart(),
+					ResolveIdentityMode.includeDeleted().cacheOk());
+		}
+
+		ResourceTable entity = myEntityManager.find(ResourceTable.class, persistentId);
+		if (entity == null) {
+			throw new ResourceNotFoundException(Msg.code(1998) + id);
+		}
+		validateGivenIdIsAppropriateToRetrieveResource(id, entity);
+		return entity;
+	}
+
+	@Override
+	public void removeTag(IIdType theId, TagTypeEnum theTagType, String theSystem, String theCode) {
+		removeTag(theId, theTagType, theSystem, theCode, null);
+	}
+
+	@Override
+	public void removeTag(
+			IIdType theId, TagTypeEnum theTagType, String theSystem, String theCode, RequestDetails theRequest) {
+
+		IBaseMetaType instance =
+				(IBaseMetaType) myFhirContext.getElementDefinition("Meta").newInstance();
+		switch (theTagType) {
+			case TAG -> instance.addTag().setSystem(theSystem).setCode(theCode);
+			case PROFILE -> {
+				assert theSystem == null || BaseHapiFhirDao.NS_JPA_PROFILE.equals(theSystem);
+				instance.addProfile(theCode);
+			}
+			case SECURITY_LABEL -> instance.addSecurity().setSystem(theSystem).setCode(theCode);
+		}
+
+		metaDeleteOperation(theId, instance, theRequest, new TransactionDetails());
+	}
+
+	/**
+	 * @deprecated Use {@link #search(SearchParameterMap, RequestDetails)} instead
+	 */
+	@Override
+	public IBundleProvider search(final SearchParameterMap theParams) {
+		return search(theParams, null);
+	}
+
+	@Override
+	public IBundleProvider search(final SearchParameterMap theParams, RequestDetails theRequest) {
+		return search(theParams, theRequest, null);
+	}
+
+	@Override
+	public IBundleProvider search(
+			final SearchParameterMap theParams, RequestDetails theRequest, HttpServletResponse theServletResponse) {
+
+		if (theParams.getSearchContainedMode() == SearchContainedModeEnum.BOTH) {
+			throw new MethodNotAllowedException(Msg.code(983) + "Contained mode 'both' is not currently supported");
+		}
+		if (theParams.getSearchContainedMode() != SearchContainedModeEnum.FALSE
+				&& !myStorageSettings.isIndexOnContainedResources()) {
+			throw new MethodNotAllowedException(
+					Msg.code(984) + "Searching with _contained mode enabled is not enabled on this server");
+		}
+
+		translateListSearchParams(theParams);
+
+		setOffsetAndCount(theParams, theRequest);
+
+		CacheControlDirective cacheControlDirective = new CacheControlDirective();
+		if (theRequest != null) {
+			cacheControlDirective.parse(theRequest.getHeaders(Constants.HEADER_CACHE_CONTROL));
+		}
+
+		return mySearchCoordinatorSvc.createNewSearch(
+				this, theParams, getResourceName(), cacheControlDirective, theRequest);
+	}
+
+	private void translateListSearchParams(SearchParameterMap theParams) {
+
+		Set<Map.Entry<String, List<List<IQueryParameterType>>>> entryHashSet = new HashSet<>(theParams.entrySet());
+
+		// Translate _list=42 to _has=List:item:_id=42
+		for (Map.Entry<String, List<List<IQueryParameterType>>> stringListEntry : entryHashSet) {
+			String key = stringListEntry.getKey();
+			if (Constants.PARAM_LIST.equals((key))) {
+				List<List<IQueryParameterType>> andOrValues = theParams.get(key);
+				theParams.remove(key);
+				List<List<IQueryParameterType>> hasParamValues = new ArrayList<>();
+				for (List<IQueryParameterType> orValues : andOrValues) {
+					List<IQueryParameterType> orList = new ArrayList<>();
+					for (IQueryParameterType value : orValues) {
+						orList.add(new HasParam(
+								"List", ListResource.SP_ITEM, BaseResource.SP_RES_ID, value.getValueAsQueryToken()));
+					}
+					hasParamValues.add(orList);
+				}
+				theParams.put(Constants.PARAM_HAS, hasParamValues);
+			}
+		}
+	}
+
+	protected void setOffsetAndCount(SearchParameterMap theParams, RequestDetails theRequest) {
+		if (theRequest != null) {
+
+			if (theRequest.isSubRequest()) {
+				Integer max = getStorageSettings().getMaximumSearchResultCountInTransaction();
+				if (max != null) {
+					Validate.inclusiveBetween(
+							1,
+							Integer.MAX_VALUE,
+							max,
+							"Maximum search result count in transaction must be a positive integer");
+					theParams.setLoadSynchronousUpTo(getStorageSettings().getMaximumSearchResultCountInTransaction());
+				}
+			}
+
+			final Integer offset = RestfulServerUtils.extractOffsetParameter(theRequest);
+			if (offset != null || !isPagingProviderDatabaseBacked(theRequest)) {
+				theParams.setLoadSynchronous(true);
+				if (offset != null) {
+					Validate.inclusiveBetween(0, Integer.MAX_VALUE, offset, "Offset must be a positive integer");
+				}
+				theParams.setOffset(offset);
+			}
+
+			Integer count = RestfulServerUtils.extractCountParameter(theRequest);
+			if (count != null) {
+				Integer maxPageSize = theRequest.getServer().getMaximumPageSize();
+				if (maxPageSize != null && count > maxPageSize) {
+					ourLog.info(
+							"Reducing {} from {} to {} which is the maximum allowable page size.",
+							Constants.PARAM_COUNT,
+							count,
+							maxPageSize);
+					count = maxPageSize;
+				}
+				theParams.setCount(count);
+			} else if (theRequest.getServer().getDefaultPageSize() != null) {
+				theParams.setCount(theRequest.getServer().getDefaultPageSize());
+			}
+		}
+	}
+
+	@Override
+	public List<JpaPid> searchForIds(
+			SearchParameterMap theParams,
+			RequestDetails theRequest,
+			@Nullable IBaseResource theConditionalOperationTargetOrNull) {
+		TransactionDetails transactionDetails = new TransactionDetails();
+		RequestPartitionId requestPartitionId =
+				myRequestPartitionHelperService.determineReadPartitionForRequestForSearchType(
+						theRequest, myResourceName, theParams, theConditionalOperationTargetOrNull);
+
+		myStorageInterceptorHooks.callStoragePresearchRegistered(
+				theRequest, theParams, new NonPersistedSearch(getResourceName()), requestPartitionId);
+
+		return myTransactionService
+				.withRequest(theRequest)
+				.withTransactionDetails(transactionDetails)
+				.withRequestPartitionId(requestPartitionId)
+				.searchList(partition -> {
+					if (isNull(theParams.getLoadSynchronousUpTo())) {
+						theParams.setLoadSynchronousUpTo(myStorageSettings.getInternalSynchronousSearchSize());
+					}
+
+					ISearchBuilder<JpaPid> builder =
+							mySearchBuilderFactory.newSearchBuilder(getResourceName(), getResourceType());
+
+					List<JpaPid> ids = new ArrayList<>();
+
+					String uuid = UUID.randomUUID().toString();
+
+					SearchRuntimeDetails searchRuntimeDetails = new SearchRuntimeDetails(theRequest, uuid);
+					try (IResultIterator<JpaPid> iter =
+							builder.createQuery(theParams, searchRuntimeDetails, theRequest, partition)) {
+						while (iter.hasNext()) {
+							ids.add(iter.next());
+						}
+					} catch (IOException e) {
+						ourLog.error("IO failure during database access", e);
+					}
+
+					return ids;
+				});
+	}
+
+	@Override
+	public <PID extends IResourcePersistentId<?>> Stream<PID> searchForIdStream(
+			SearchParameterMap theParams,
+			RequestDetails theRequest,
+			@Nullable IBaseResource theConditionalOperationTargetOrNull) {
+
+		// the Stream is useless outside the bound connection time, so require our caller to have a session.
+		HapiTransactionService.requireTransaction();
+
+		RequestPartitionId requestPartitionId =
+				myRequestPartitionHelperService.determineReadPartitionForRequestForSearchType(
+						theRequest, myResourceName, theParams, theConditionalOperationTargetOrNull);
+
+		ISearchBuilder<JpaPid> builder = mySearchBuilderFactory.newSearchBuilder(getResourceName(), getResourceType());
+
+		String uuid = UUID.randomUUID().toString();
+
+		SearchRuntimeDetails searchRuntimeDetails = new SearchRuntimeDetails(theRequest, uuid);
+		//noinspection unchecked
+		return (Stream<PID>) myTransactionService
+				.withRequest(theRequest)
+				.withRequestPartitionId(requestPartitionId)
+				.search(partition -> builder.createQueryStream(theParams, searchRuntimeDetails, theRequest, partition));
+	}
+
+	@Override
+	public List<T> searchForResources(SearchParameterMap theParams, RequestDetails theRequest) {
+		return searchForTransformedIds(theParams, theRequest, this::pidsToResource);
+	}
+
+	@Override
+	public List<IIdType> searchForResourceIds(SearchParameterMap theParams, RequestDetails theRequest) {
+		return searchForTransformedIds(theParams, theRequest, this::pidStreamToVersionedIdStream);
+	}
+
+	private <V> List<V> searchForTransformedIds(
+			SearchParameterMap theParams,
+			RequestDetails theRequest,
+			TriFunction<RequestDetails, Stream<JpaPid>, RequestPartitionId, Stream<V>> transform) {
+		RequestPartitionId requestPartitionId =
+				myRequestPartitionHelperService.determineReadPartitionForRequestForSearchType(
+						theRequest, myResourceName, theParams);
+
+		String uuid = UUID.randomUUID().toString();
+
+		SearchRuntimeDetails searchRuntimeDetails = new SearchRuntimeDetails(theRequest, uuid);
+		return myTransactionService
+				.withRequest(theRequest)
+				.withPropagation(Propagation.REQUIRED)
+				.withRequestPartitionId(requestPartitionId)
+				.searchList(partition -> {
+					ISearchBuilder<JpaPid> builder =
+							mySearchBuilderFactory.newSearchBuilder(getResourceName(), getResourceType());
+					Stream<JpaPid> pidStream =
+							builder.createQueryStream(theParams, searchRuntimeDetails, theRequest, partition);
+
+					Stream<V> transformedStream = transform.apply(theRequest, pidStream, partition);
+
+					return transformedStream.collect(Collectors.toList());
+				});
+	}
+
+	/**
+	 * Fetch the resources in chunks and apply PreAccess/PreShow interceptors.
+	 */
+	@Nonnull
+	private Stream<T> pidsToResource(
+			RequestDetails theRequest, Stream<JpaPid> thePidStream, RequestPartitionId theRequestPartitionId) {
+		ISearchBuilder<JpaPid> searchBuilder =
+				mySearchBuilderFactory.newSearchBuilder(getResourceName(), getResourceType());
+		@SuppressWarnings("unchecked")
+		Stream<T> resourceStream = (Stream<T>) new QueryChunker<>()
+				.chunk(thePidStream, SearchBuilder.getMaximumPageSize())
+				.flatMap(pidChunk -> searchBuilder.loadResourcesByPid(pidChunk, theRequest).stream());
+		// apply interceptors
+		return resourceStream
+				.flatMap(resource -> resource == null
+						? Stream.empty()
+						: invokeStoragePreAccessResources(theRequest, resource).stream())
+				.flatMap(resource -> Optional.ofNullable(invokeStoragePreShowResources(theRequest, resource)).stream());
+	}
+
+	/**
+	 * get the Ids from the ResourceTable entities in chunks.
+	 */
+	@Nonnull
+	private Stream<IIdType> pidStreamToVersionedIdStream(
+			RequestDetails theRequestDetails, Stream<JpaPid> thePidStream, RequestPartitionId theRequestPartitionId) {
+
+		Stream<JpaPid> pidStream = thePidStream;
+
+		if (!theRequestPartitionId.isAllPartitions()
+				&& theRequestPartitionId.getPartitionIds().size() == 1) {
+			pidStream = pidStream.map(t -> t.setPartitionIdIfNotAlreadySet(
+					theRequestPartitionId.getPartitionIds().get(0)));
+		}
+
+		/*
+		 * Partitioned PIDs have to parts (partition ID and PID), so we can only have half
+		 * as many parameters without exceeding the max parameters.
+		 */
+		int chunkSize = SearchBuilder.getMaximumPageSize();
+		if (myPartitionSettings.isPartitioningEnabled()) {
+			chunkSize = chunkSize / 2;
+		}
+
+		return QueryChunker.chunk(pidStream, chunkSize).flatMap(this::pidListToVersionedIdList);
+	}
+
+	/**
+	 * Converts a list of PIDS to a list of versioned resource IDs.
+	 * This method has special handling for MSSQL when operating in database partition mode.
+	 * See {@link SearchBuilder#loadCurrentResourceVersionsForMsSqlDbpm(List)} for details on why.
+	 */
+	private Stream<? extends IIdType> pidListToVersionedIdList(List<JpaPid> pids) {
+		List<JpaPid> pidsNormalized = normalizeIdListForInClause(pids);
+
+		CriteriaBuilder cb = myEntityManager.getCriteriaBuilder();
+		CriteriaQuery<Tuple> cq = cb.createTupleQuery();
+		Root<ResourceTable> from = cq.from(ResourceTable.class);
+		cq.select(cb.tuple(from.get("myPid"), from.get("myResourceType"), from.get("myFhirId"), from.get("myVersion")));
+		Predicate wherePredicate;
+
+		if (myPartitionSettings.isDatabasePartitionMode() && myDialectSvc.isMssql()) {
+			Multimap<Integer, Long> partitionIdToPid = splitPidListByPartitionId(pidsNormalized);
+			List<Predicate> partitionAndPidPredicates =
+					new ArrayList<>(partitionIdToPid.keySet().size());
+			for (Map.Entry<Integer, Collection<Long>> entry :
+					partitionIdToPid.asMap().entrySet()) {
+				Integer partitionId = entry.getKey();
+				Collection<Long> pidsForPartitionId = entry.getValue();
+
+				Predicate partitionIdPredicate = cb.equal(from.get("myPartitionIdValue"), partitionId);
+				Predicate pidPredicate = from.get("myResourceId").in(pidsForPartitionId);
+				partitionAndPidPredicates.add(cb.and(partitionIdPredicate, pidPredicate));
+			}
+			wherePredicate = cb.or(partitionAndPidPredicates.toArray(EMPTY_PREDICATE_ARRAY));
+		} else {
+			wherePredicate = from.get("myPid").in(pidsNormalized);
+		}
+
+		cq.where(wherePredicate);
+
+		return myEntityManager.createQuery(cq).getResultStream().map(t -> {
+			JpaPid pid = t.get(0, JpaPid.class);
+			String resourceType = t.get(1, String.class);
+			String fhirId = t.get(2, String.class);
+			Long version = t.get(3, Long.class);
+
+			/*
+			 * There really shouldn't be any null FHIR_ID values in the wild any more, but
+			 * just in case... I think this would be fine to remove eventually.
+			 */
+			if (isBlank(fhirId)) {
+				fhirId = Long.toString(pid.getId());
+			}
+
+			return myFhirContext.getVersion().newIdType(resourceType + "/" + fhirId + "/_history/" + version);
+		});
+	}
+
+	protected <MT extends IBaseMetaType> MT toMetaDt(Class<MT> theType, Collection<TagDefinition> tagDefinitions) {
+		MT retVal = ReflectionUtil.newInstance(theType);
+		for (TagDefinition next : tagDefinitions) {
+			switch (next.getTagType()) {
+				case PROFILE:
+					retVal.addProfile(next.getCode());
+					break;
+				case SECURITY_LABEL:
+					retVal.addSecurity()
+							.setSystem(next.getSystem())
+							.setCode(next.getCode())
+							.setDisplay(next.getDisplay());
+					break;
+				case TAG:
+					retVal.addTag()
+							.setSystem(next.getSystem())
+							.setCode(next.getCode())
+							.setDisplay(next.getDisplay());
+					break;
+			}
+		}
+		myMetaTagSorter.sort(retVal);
 		return retVal;
 	}
 
 	private ArrayList<TagDefinition> toTagList(IBaseMetaType theMeta) {
-		ArrayList<TagDefinition> retVal = new ArrayList<TagDefinition>();
+		ArrayList<TagDefinition> retVal = new ArrayList<>();
 
 		for (IBaseCoding next : theMeta.getTag()) {
 			retVal.add(new TagDefinition(TagTypeEnum.TAG, next.getSystem(), next.getCode(), next.getDisplay()));
 		}
 		for (IBaseCoding next : theMeta.getSecurity()) {
-			retVal.add(new TagDefinition(TagTypeEnum.SECURITY_LABEL, next.getSystem(), next.getCode(), next.getDisplay()));
+			retVal.add(
+					new TagDefinition(TagTypeEnum.SECURITY_LABEL, next.getSystem(), next.getCode(), next.getDisplay()));
 		}
 		for (IPrimitiveType<String> next : theMeta.getProfile()) {
 			retVal.add(new TagDefinition(TagTypeEnum.PROFILE, BaseHapiFhirDao.NS_JPA_PROFILE, next.getValue(), null));
@@ -985,6 +2735,9 @@ public abstract class BaseHapiFhirResourceDao<T extends IBaseResource> extends B
 		return retVal;
 	}
 
+	/**
+	 * @deprecated Use {@link #update(T, RequestDetails)} instead
+	 */
 	@Override
 	public DaoMethodOutcome update(T theResource) {
 		return update(theResource, null, null);
@@ -995,154 +2748,641 @@ public abstract class BaseHapiFhirResourceDao<T extends IBaseResource> extends B
 		return update(theResource, null, theRequestDetails);
 	}
 
+	/**
+	 * @deprecated Use {@link #update(T, String, RequestDetails)} instead
+	 */
 	@Override
 	public DaoMethodOutcome update(T theResource, String theMatchUrl) {
 		return update(theResource, theMatchUrl, null);
 	}
 
 	@Override
-	public DaoMethodOutcome update(T theResource, String theMatchUrl, boolean thePerformIndexing, RequestDetails theRequestDetails) {
-		StopWatch w = new StopWatch();
-
-		preProcessResourceForStorage(theResource);
-
-		final ResourceTable entity;
-
-		IIdType resourceId;
-		if (isNotBlank(theMatchUrl)) {
-			Set<Long> match = processMatchUrl(theMatchUrl, myResourceType);
-			if (match.size() > 1) {
-				String msg = getContext().getLocalizer().getMessage(BaseHapiFhirDao.class, "transactionOperationWithMultipleMatchFailure", "UPDATE", theMatchUrl, match.size());
-				throw new PreconditionFailedException(msg);
-			} else if (match.size() == 1) {
-				Long pid = match.iterator().next();
-				entity = myEntityManager.find(ResourceTable.class, pid);
-				resourceId = entity.getIdDt();
-			} else {
-				return create(theResource, null, thePerformIndexing, theRequestDetails);
-			}
-		} else {
-			/*
-			 * Note: resourcdeId will not be null or empty here, because we check it and reject requests in BaseOutcomeReturningMethodBindingWithResourceParam
-			 */
-			resourceId = theResource.getIdElement();
-
-			try {
-				entity = readEntityLatestVersion(resourceId);
-			} catch (ResourceNotFoundException e) {
-				if (resourceId.isIdPartValidLong()) {
-					throw new InvalidRequestException(
-							getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "failedToCreateWithClientAssignedNumericId", theResource.getIdElement().getIdPart()));
-				}
-				return doCreate(theResource, null, thePerformIndexing, new Date(), theRequestDetails);
-			}
-		}
-
-		if (resourceId.hasVersionIdPart() && Long.parseLong(resourceId.getVersionIdPart()) != entity.getVersion()) {
-			throw new ResourceVersionConflictException("Trying to update " + resourceId + " but this is not the current version");
-		}
-
-		if (resourceId.hasResourceType() && !resourceId.getResourceType().equals(getResourceName())) {
-			throw new UnprocessableEntityException(
-					"Invalid resource ID[" + entity.getIdDt().toUnqualifiedVersionless() + "] of type[" + entity.getResourceType() + "] - Does not match expected [" + getResourceName() + "]");
-		}
-
-		// Notify interceptors
-		ActionRequestDetails requestDetails = null;
-		if (theRequestDetails != null) {
-			requestDetails = new ActionRequestDetails(theRequestDetails, theResource, getResourceName(), resourceId);
-			notifyInterceptors(RestOperationTypeEnum.UPDATE, requestDetails);
-		}
-
-		// Perform update
-		ResourceTable savedEntity = updateEntity(theResource, entity, null, thePerformIndexing, thePerformIndexing, new Date());
-
-		// Notify interceptors
-		if (theRequestDetails != null) {
-			theRequestDetails.getRequestOperationCallback().resourceUpdated(theResource);
-			for (IServerInterceptor next : getConfig().getInterceptors()) {
-				if (next instanceof IJpaServerInterceptor) {
-					((IJpaServerInterceptor) next).resourceUpdated(requestDetails, entity);
-				}
-			}
-		}
-
-		DaoMethodOutcome outcome = toMethodOutcome(savedEntity, theResource).setCreated(false);
-
-		String msg = getContext().getLocalizer().getMessage(BaseHapiFhirResourceDao.class, "successfulCreate", outcome.getId(), w.getMillisAndRestart());
-		outcome.setOperationOutcome(createInfoOperationOutcome(msg));
-
-		ourLog.info(msg);
-		return outcome;
-	}
-
-	@Override
-	public DaoMethodOutcome patch(IIdType theId, PatchTypeEnum thePatchType, String thePatchBody, RequestDetails theRequestDetails) {
-		ResourceTable entityToUpdate = readEntityLatestVersion(theId);
-		if (theId.hasVersionIdPart()) {
-			if (theId.getVersionIdPartAsLong() != entityToUpdate.getVersion()) {
-				throw new ResourceVersionConflictException("Version " + theId.getVersionIdPart() + " is not the most recent version of this resource, unable to apply patch");
-			}
-		}
-		
-		validateResourceType(entityToUpdate);
-		
-		IBaseResource resourceToUpdate = toResource(entityToUpdate, false);
-		IBaseResource destination;
-		if (thePatchType == PatchTypeEnum.JSON_PATCH) {
-			destination = JsonPatchUtils.apply(getContext(), resourceToUpdate, thePatchBody);
-		} else {
-			destination = XmlPatchUtils.apply(getContext(), resourceToUpdate, thePatchBody);
-		}
-		
-		@SuppressWarnings("unchecked")
-		T destinationCasted = (T) destination;
-		return update(destinationCasted, null, true, theRequestDetails);
-	}
-	
-	
-	@Override
 	public DaoMethodOutcome update(T theResource, String theMatchUrl, RequestDetails theRequestDetails) {
 		return update(theResource, theMatchUrl, true, theRequestDetails);
 	}
 
-	private void validateGivenIdIsAppropriateToRetrieveResource(IIdType theId, BaseHasResource entity) {
-		if (entity.getForcedId() != null) {
-			if (theId.isIdPartValidLong()) {
-				// This means that the resource with the given numeric ID exists, but it has a "forced ID", meaning that
-				// as far as the outside world is concerned, the given ID doesn't exist (it's just an internal pointer
-				// to the
-				// forced ID)
-				throw new ResourceNotFoundException(theId);
+	@Override
+	public DaoMethodOutcome update(
+			T theResource, String theMatchUrl, boolean thePerformIndexing, RequestDetails theRequestDetails) {
+		return update(theResource, theMatchUrl, thePerformIndexing, false, theRequestDetails, new TransactionDetails());
+	}
+
+	@Override
+	public DaoMethodOutcome update(
+			T theResource,
+			String theMatchUrl,
+			boolean thePerformIndexing,
+			boolean theForceUpdateVersion,
+			RequestDetails theRequest,
+			@Nonnull TransactionDetails theTransactionDetails) {
+		if (theResource == null) {
+			String msg = getContext().getLocalizer().getMessage(BaseStorageDao.class, "missingBody");
+			throw new InvalidRequestException(Msg.code(986) + msg);
+		}
+		if (!theResource.getIdElement().hasIdPart() && isBlank(theMatchUrl)) {
+			String type = myFhirContext.getResourceType(theResource);
+			String msg = myFhirContext.getLocalizer().getMessage(BaseStorageDao.class, "updateWithNoId", type);
+			throw new InvalidRequestException(Msg.code(987) + msg);
+		}
+
+		/*
+		 * Resource updates will modify/update the version of the resource with the new version. This is generally helpful
+		 * but leads to issues if the transaction is rolled back and retried. So if we do a rollback, we reset the resource
+		 * version to what it was.
+		 */
+		String id = theResource.getIdElement().getValue();
+		Runnable onRollback = () -> {
+			ourLog.trace("Rolling back from {} to {}", theResource.getIdElement(), id);
+			theResource.getIdElement().setValue(id);
+		};
+		theTransactionDetails.addRollbackUndoAction(onRollback);
+
+		RequestPartitionId requestPartitionId = determineCreatePartitionForUpdate(theResource, theMatchUrl, theRequest);
+
+		boolean rewriteHistory = theRequest != null && theRequest.isRewriteHistory();
+		if (rewriteHistory && !myStorageSettings.isUpdateWithHistoryRewriteEnabled()) {
+			String msg =
+					getContext().getLocalizer().getMessage(BaseStorageDao.class, "updateWithHistoryRewriteDisabled");
+			throw new InvalidRequestException(Msg.code(2781) + msg);
+		}
+
+		Callable<DaoMethodOutcome> updateCallback;
+		if (rewriteHistory) {
+			updateCallback = () -> doUpdateWithHistoryRewrite(
+					theResource, theRequest, theTransactionDetails, requestPartitionId, RestOperationTypeEnum.UPDATE);
+		} else {
+			updateCallback = () -> doUpdate(
+					theResource,
+					theMatchUrl,
+					thePerformIndexing,
+					theForceUpdateVersion,
+					theRequest,
+					theTransactionDetails,
+					requestPartitionId);
+		}
+
+		// Execute the update in a retryable transaction
+		return myTransactionService
+				.withRequest(theRequest)
+				.withTransactionDetails(theTransactionDetails)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(updateCallback);
+	}
+
+	/**
+	 * Determines the partition to open the write transaction for.
+	 *
+	 * <p>Partition selection is driven by the resource body, but a conditional update sends no id in the body and
+	 * some strategies need one - patient compartment partitioning derives a Patient's partition from its own id.
+	 * Where the body alone cannot be routed, the write is deferred to all partitions and settled once the
+	 * conditional URL has resolved: a matched update writes to the partition its match already lives in, and
+	 * {@link #doCreateForPostOrPut} re-derives and validates the target partition, which remains the authoritative
+	 * gate. This mirrors how the transaction path handles the same situation in
+	 * {@code BaseTransactionProcessor#tryDetermineCreatePartitionForWriteEntryBeforePrefetch}.
+	 *
+	 * @throws PreFetchSkippableMethodNotAllowedException if the body cannot be routed and either the write is not
+	 *     conditional, or storage cannot search across all partitions and so the partition must be fixed up front
+	 */
+	private RequestPartitionId determineCreatePartitionForUpdate(
+			T theResource, String theMatchUrl, RequestDetails theRequest) {
+		try {
+			return myRequestPartitionHelperService.determineCreatePartitionForRequest(
+					theRequest, theResource, getResourceName());
+		} catch (PreFetchSkippableMethodNotAllowedException e) {
+			if (isBlank(theMatchUrl) || !myPartitionSettings.isAllPartitionSearchSupported()) {
+				throw e;
+			}
+			return RequestPartitionId.allPartitions();
+		}
+	}
+
+	private DaoMethodOutcome doUpdate(
+			T theResource,
+			String theMatchUrl,
+			boolean thePerformIndexing,
+			boolean theForceUpdateVersion,
+			RequestDetails theRequest,
+			TransactionDetails theTransactionDetails,
+			RequestPartitionId theRequestPartitionId) {
+		DaoMethodOutcome outcome = null;
+		preProcessResourceForStorage(theResource);
+		preProcessResourceForStorage(theResource, theRequest, theTransactionDetails, thePerformIndexing);
+
+		ResourceTable entity = null;
+
+		IIdType resourceId = null;
+		RestOperationTypeEnum update = RestOperationTypeEnum.UPDATE;
+		if (isNotBlank(theMatchUrl)) {
+			// Validate that the supplied resource matches the conditional.
+			Set<JpaPid> match = myMatchResourceUrlService.processMatchUrl(
+					theMatchUrl, myResourceType, theTransactionDetails, theRequest, theResource, theRequestPartitionId);
+			if (match.size() > 1) {
+				String msg = getContext()
+						.getLocalizer()
+						.getMessageSanitized(
+								BaseStorageDao.class,
+								"transactionOperationWithMultipleMatchFailure",
+								"UPDATE",
+								myResourceName,
+								theMatchUrl,
+								match.size());
+				throw new PreconditionFailedException(Msg.code(988) + msg);
+			} else if (match.size() == 1) {
+				JpaPid pid = match.iterator().next();
+				entity = myEntityManager.find(ResourceTable.class, pid);
+				resourceId = entity.getIdDt();
+				if (myFhirContext.getVersion().getVersion().isEqualOrNewerThan(FhirVersionEnum.R4)
+						&& theResource.getIdElement().getIdPart() != null) {
+					if (!Objects.equals(theResource.getIdElement().getIdPart(), resourceId.getIdPart())) {
+						String msg = getContext()
+								.getLocalizer()
+								.getMessageSanitized(
+										BaseStorageDao.class,
+										"transactionOperationWithIdNotMatchFailure",
+										"UPDATE",
+										theMatchUrl);
+						throw new InvalidRequestException(Msg.code(2279) + msg);
+					}
+				}
+			} else {
+				// assign UUID if no id provided in the request (numeric id mode is handled in doCreateForPostOrPut)
+				if (!theResource.getIdElement().hasIdPart()
+						&& getStorageSettings().getResourceServerIdStrategy()
+								== JpaStorageSettings.IdStrategyEnum.UUID) {
+					theResource.setId(UUID.randomUUID().toString());
+					theResource.setUserData(JpaConstants.RESOURCE_ID_SERVER_ASSIGNED, Boolean.TRUE);
+				}
+				outcome = doCreateForPostOrPut(
+						theRequest,
+						theResource,
+						theMatchUrl,
+						false,
+						thePerformIndexing,
+						theRequestPartitionId,
+						update,
+						theTransactionDetails);
+
+				// Pre-cache the match URL
+				if (outcome.getPersistentId() != null) {
+					myMatchResourceUrlService.matchUrlResolved(
+							theTransactionDetails, getResourceName(), theMatchUrl, (JpaPid) outcome.getPersistentId());
+				}
+			}
+		} else {
+			/*
+			 * Note: resourceId will not be null or empty here, because we
+			 * check it and reject requests in
+			 * BaseOutcomeReturningMethodBindingWithResourceParam
+			 */
+			resourceId = theResource.getIdElement();
+			assert resourceId != null;
+			assert resourceId.hasIdPart();
+
+			if (!resourceId.hasResourceType()) {
+				resourceId = resourceId.withResourceType(getResourceName());
+			}
+
+			boolean create = false;
+
+			if (theRequest != null) {
+				String existenceCheck = theRequest.getHeader(JpaConstants.HEADER_UPSERT_EXISTENCE_CHECK);
+				if (JpaConstants.HEADER_UPSERT_EXISTENCE_CHECK_DISABLED.equals(existenceCheck)) {
+					create = true;
+				}
+			}
+
+			if (!create) {
+				if (theTransactionDetails != null && theTransactionDetails.hasNullResolvedResourceId(resourceId)) {
+					create = true;
+				} else {
+					try {
+						entity = readEntityLatestVersion(
+								theRequest, resourceId, theRequestPartitionId, theTransactionDetails);
+						if (myPartitionSettings.isPartitioningEnabled()) {
+							validatePartitionIdMatch(theResource.getIdElement(), theRequestPartitionId, entity);
+						}
+					} catch (ResourceNotFoundException e) {
+						create = true;
+					}
+				}
+			}
+
+			if (create) {
+				outcome = doCreateForPostOrPut(
+						theRequest,
+						theResource,
+						null,
+						false,
+						thePerformIndexing,
+						theRequestPartitionId,
+						update,
+						theTransactionDetails);
+			}
+		}
+
+		// Start
+		if (outcome == null) {
+			UpdateParameters updateParameters = new UpdateParameters<>()
+					.setRequestDetails(theRequest)
+					.setResourceIdToUpdate(resourceId)
+					.setMatchUrl(theMatchUrl)
+					.setShouldPerformIndexing(thePerformIndexing)
+					.setShouldForceUpdateVersion(theForceUpdateVersion)
+					.setResource(theResource)
+					.setEntity(entity)
+					.setOperationType(update)
+					.setTransactionDetails(theTransactionDetails)
+					.setShouldForcePopulateOldResourceForProcessing(false);
+
+			outcome = doUpdateForUpdateOrPatch(updateParameters);
+		}
+
+		postUpdateTransaction(theTransactionDetails);
+
+		return outcome;
+	}
+
+	@SuppressWarnings("rawtypes")
+	protected void postUpdateTransaction(TransactionDetails theTransactionDetails) {
+		// Transactions will delete these at the end of the entire transaction
+		if (!theTransactionDetails.isFhirTransaction()) {
+			Set<IResourcePersistentId> resourceIds = theTransactionDetails.getUpdatedResourceIds();
+			if (resourceIds != null && !resourceIds.isEmpty()) {
+				@Nonnull
+				List<JpaPid> ids = resourceIds.stream().map(r -> (JpaPid) r).collect(Collectors.toList());
+				myResourceSearchUrlSvc.deleteByResIds(ids);
 			}
 		}
 	}
 
-	protected void validateOkToDelete(List<DeleteConflict> theDeleteConflicts, ResourceTable theEntity) {
-		TypedQuery<ResourceLink> query = myEntityManager.createQuery("SELECT l FROM ResourceLink l WHERE l.myTargetResourcePid = :target_pid", ResourceLink.class);
-		query.setParameter("target_pid", theEntity.getId());
-		query.setMaxResults(1);
-		List<ResourceLink> resultList = query.getResultList();
-		if (resultList.isEmpty()) {
-			return;
+	@Override
+	protected DaoMethodOutcome doUpdateForUpdateOrPatch(UpdateParameters<T> theUpdateParameters) {
+
+		/*
+		 * We stored a resource searchUrl at creation time to prevent resource duplication.
+		 * We'll clear any currently existing urls from the db, otherwise we could hit
+		 * duplicate index violations if we try to add another (after this create/update)
+		 */
+		ResourceTable entity = (ResourceTable) theUpdateParameters.getEntity();
+
+		/*
+		 * If we read back the entity from hibernate, and it's already saying
+		 * it's been updated in this transaction, then someone is probably
+		 * doing multiple modifications of the same resource within the same
+		 * database transaction. The only way for this to work cleanly is for
+		 * us to flush hibernate now. That way we can increment the version
+		 * a second time, create multiple history entries, etc.
+		 */
+		if (entity != null) {
+			flushPendingResourceVersionUpdate(entity);
 		}
 
-		ResourceLink link = resultList.get(0);
-		IdDt targetId = theEntity.getIdDt();
-		IdDt sourceId = link.getSourceResource().getIdDt();
-		String sourcePath = link.getSourcePath();
+		if (entity.isSearchUrlPresent()) {
+			JpaPid persistentId = entity.getResourceId();
+			theUpdateParameters.getTransactionDetails().addUpdatedResourceId(persistentId);
 
-		theDeleteConflicts.add(new DeleteConflict(sourceId, sourcePath, targetId));
+			entity.setSearchUrlPresent(false); // it will be removed at the end
+		}
+
+		if (entity.isDeleted()) {
+			// We're un-deleting this entity so let's inform the memory cache service
+			myIdHelperService.addResolvedPidToFhirIdAfterCommit(
+					entity.getPersistentId(),
+					entity.getPartitionId() == null
+							? myPartitionSettings.getDefaultRequestPartitionId()
+							: entity.getPartitionId().toPartitionId(),
+					entity.getResourceType(),
+					entity.getFhirId(),
+					null);
+		}
+
+		theUpdateParameters.setShouldForcePopulateOldResourceForProcessing(
+				isPatientCompartmentEnforcingInterceptorRegistered());
+		return super.doUpdateForUpdateOrPatch(theUpdateParameters);
 	}
 
-	private void validateResourceType(BaseHasResource entity) {
+	/**
+	 * Method for updating the historical version of the resource when a history version id is included in the request.
+	 *
+	 * @param theResource           to be saved
+	 * @param theRequest            details of the request
+	 * @param theTransactionDetails details of the transaction
+	 * @param theRequestPartitionId the partition on which to perform the request
+	 * @param theRestOperationType  the rest operation type (update or patch)
+	 * @return the outcome of the operation
+	 */
+	DaoMethodOutcome doUpdateWithHistoryRewrite(
+			T theResource,
+			RequestDetails theRequest,
+			TransactionDetails theTransactionDetails,
+			RequestPartitionId theRequestPartitionId,
+			RestOperationTypeEnum theRestOperationType) {
+		StopWatch w = new StopWatch();
+
+		// No need for indexing as this will update a non-current version of the resource which will not be searchable
+		preProcessResourceForStorage(theResource, theRequest, theTransactionDetails, false);
+
+		BaseHasResource entity;
+		BaseHasResource currentEntity;
+
+		IIdType resourceId;
+
+		resourceId = theResource.getIdElement();
+		assert resourceId != null;
+		assert resourceId.hasIdPart();
+
+		try {
+			currentEntity = readEntityLatestVersion(
+					theRequest, resourceId.toVersionless(), theRequestPartitionId, theTransactionDetails);
+
+			if (!resourceId.hasVersionIdPart()) {
+				throw new InvalidRequestException(
+						Msg.code(2093) + "Invalid resource ID, ID must contain a history version");
+			}
+			entity = readEntity(resourceId, theRequest);
+			validateResourceType(entity);
+		} catch (ResourceNotFoundException e) {
+			throw new ResourceNotFoundException(
+					Msg.code(2087) + "Resource not found [" + resourceId + "] - Doesn't exist");
+		}
+
+		if (resourceId.hasResourceType() && !resourceId.getResourceType().equals(getResourceName())) {
+			throw new UnprocessableEntityException(
+					Msg.code(2088) + "Invalid resource ID[" + entity.getIdDt().toUnqualifiedVersionless() + "] of type["
+							+ entity.getResourceType() + "] - Does not match expected [" + getResourceName() + "]");
+		}
+		assert resourceId.hasVersionIdPart();
+
+		boolean wasDeleted = isDeleted(entity);
+		entity.setDeleted(null);
+		boolean isUpdatingCurrent = resourceId.hasVersionIdPart()
+				&& Long.parseLong(resourceId.getVersionIdPart()) == currentEntity.getVersion();
+		IBasePersistedResource<?> savedEntity = updateHistoryEntity(
+				theRequest, theResource, currentEntity, entity, resourceId, theTransactionDetails, isUpdatingCurrent);
+		DaoMethodOutcome outcome = toMethodOutcome(theRequest, savedEntity, theResource, null, theRestOperationType)
+				.setCreated(wasDeleted);
+
+		populateOperationOutcomeForUpdate(w, outcome, null, theRestOperationType, theTransactionDetails);
+
+		return outcome;
+	}
+
+	@Override
+	public MethodOutcome validate(
+			T theResource,
+			IIdType theId,
+			String theRawResource,
+			EncodingEnum theEncoding,
+			ValidationModeEnum theMode,
+			String theProfile,
+			RequestDetails theRequest) {
+		TransactionDetails transactionDetails = new TransactionDetails();
+
+		if (theMode == ValidationModeEnum.DELETE) {
+			if (theId == null || !theId.hasIdPart()) {
+				throw new InvalidRequestException(
+						Msg.code(991) + "No ID supplied. ID is required when validating with mode=DELETE");
+			}
+
+			RequestPartitionId requestPartitionId =
+					myRequestPartitionHelperService.determineReadPartitionForRequestForRead(
+							theRequest, getResourceName(), theId);
+
+			return myTransactionService
+					.withRequest(theRequest)
+					.withRequestPartitionId(requestPartitionId)
+					.execute(() -> {
+						final ResourceTable entity =
+								readEntityLatestVersion(theRequest, theId, requestPartitionId, transactionDetails);
+
+						// Validate that there are no resources pointing to the candidate that
+						// would prevent deletion
+						DeleteConflictList deleteConflicts = new DeleteConflictList();
+						if (getStorageSettings().isEnforceReferentialIntegrityOnDelete()) {
+							myDeleteConflictService.validateOkToDelete(
+									deleteConflicts, entity, true, theRequest, new TransactionDetails());
+						}
+						DeleteConflictUtil.validateDeleteConflictsEmptyOrThrowException(getContext(), deleteConflicts);
+
+						IBaseOperationOutcome oo = createInfoOperationOutcome("Ok to delete");
+						return new MethodOutcome(new IdDt(theId.getValue()), oo);
+					});
+		}
+
+		FhirValidator validator = getContext().newValidator();
+		validator.setInterceptorBroadcaster(
+				CompositeInterceptorBroadcaster.newCompositeBroadcaster(myInterceptorBroadcaster, theRequest));
+		validator.registerValidatorModule(getInstanceValidator());
+		validator.registerValidatorModule(new IdChecker(theMode));
+
+		IBaseResource resourceToValidateById = null;
+		if (theId != null && theId.hasResourceType() && theId.hasIdPart()) {
+			Class<? extends IBaseResource> type =
+					getContext().getResourceDefinition(theId.getResourceType()).getImplementingClass();
+			IFhirResourceDao<? extends IBaseResource> dao = myDaoRegistry.getResourceDaoOrNull(type);
+			resourceToValidateById = dao.read(theId, theRequest);
+		}
+
+		ValidationResult result;
+		ValidationOptions options = new ValidationOptions().addProfileIfNotBlank(theProfile);
+
+		if (theResource == null) {
+			if (resourceToValidateById != null) {
+				result = validator.validateWithResult(resourceToValidateById, options);
+			} else {
+				String msg = getContext().getLocalizer().getMessage(BaseStorageDao.class, "cantValidateWithNoResource");
+				throw new InvalidRequestException(Msg.code(992) + msg);
+			}
+		} else if (isNotBlank(theRawResource)) {
+			result = validator.validateWithResult(theRawResource, options);
+		} else {
+			result = validator.validateWithResult(theResource, options);
+		}
+
+		if (isNotBlank(theProfile)) {
+			// The $validate operation SHALL return error if the server cannot validate against the nominated profile.
+			// See https://www.hl7.org/fhir/resource-operation-validate.html
+			// even if FhirInstanceValidator.setErrorForUnknownProfiles(false) has been set
+			result.getMessages().stream()
+					.filter(m -> I18nConstants.VALIDATION_VAL_PROFILE_UNKNOWN.equals(m.getMessageId())
+							&& m.getSeverity() != ResultSeverityEnum.ERROR
+							&& m.getSeverity() != ResultSeverityEnum.FATAL)
+					.forEach(m -> m.setSeverity(ResultSeverityEnum.ERROR));
+		}
+
+		MethodOutcome retVal = new MethodOutcome();
+		retVal.setOperationOutcome(result.toOperationOutcome());
+		// Note an earlier version of this code returned PreconditionFailedException when the validation
+		// failed, but we since realized the spec requires we return 200 regardless of the validation result.
+		return retVal;
+	}
+
+	/**
+	 * Get the resource definition from the criteria which specifies the resource type
+	 */
+	@Override
+	public RuntimeResourceDefinition validateCriteriaAndReturnResourceDefinition(String criteria) {
+		String resourceName;
+		if (criteria == null || criteria.trim().isEmpty()) {
+			throw new IllegalArgumentException(Msg.code(994) + "Criteria cannot be empty");
+		}
+		if (criteria.contains("?")) {
+			resourceName = criteria.substring(0, criteria.indexOf("?"));
+		} else {
+			resourceName = criteria;
+		}
+
+		return getContext().getResourceDefinition(resourceName);
+	}
+
+	private void validateGivenIdIsAppropriateToRetrieveResource(IIdType theId, BaseHasResource entity) {
+		if (!entity.getIdDt().getIdPart().equals(theId.getIdPart())) {
+			// This means that the resource with the given numeric ID exists, but it has a "forced ID", meaning
+			// that
+			// as far as the outside world is concerned, the given ID doesn't exist (it's just an internal
+			// pointer
+			// to the
+			// forced ID)
+			throw new ResourceNotFoundException(Msg.code(2000) + theId);
+		}
+	}
+
+	private void validateResourceType(IBasePersistedResource<?> entity) {
 		validateResourceType(entity, myResourceName);
 	}
 
-	private void validateResourceTypeAndThrowIllegalArgumentException(IIdType theId) {
+	private void validateResourceTypeAndThrowInvalidRequestException(IIdType theId) {
 		if (theId.hasResourceType() && !theId.getResourceType().equals(myResourceName)) {
-			throw new IllegalArgumentException("Incorrect resource type (" + theId.getResourceType() + ") for this DAO, wanted: " + myResourceName);
+			// Note- Throw a HAPI FHIR exception here so that hibernate doesn't try to translate it into a database
+			// exception
+			throw new InvalidRequestException(Msg.code(996) + "Incorrect resource type (" + theId.getResourceType()
+					+ ") for this DAO, wanted: " + myResourceName);
 		}
 	}
 
+	@VisibleForTesting
+	public void setIdHelperSvcForUnitTest(IIdHelperService theIdHelperService) {
+		myIdHelperService = theIdHelperService;
+	}
+
+	@SuppressWarnings("BooleanMethodIsAlwaysInverted")
+	public static <T extends IBaseResource> boolean isResourceIdServerAssigned(IBaseResource theResource) {
+		return Boolean.TRUE.equals(theResource.getUserData(JpaConstants.RESOURCE_ID_SERVER_ASSIGNED));
+	}
+
+	private static class IdChecker implements IValidatorModule {
+
+		private final ValidationModeEnum myMode;
+
+		IdChecker(ValidationModeEnum theMode) {
+			myMode = theMode;
+		}
+
+		@Override
+		public void validateResource(IValidationContext<IBaseResource> theCtx) {
+			IBaseResource resource = theCtx.getResource();
+			if (resource instanceof Parameters) {
+				List<ParametersParameterComponent> params = ((Parameters) resource).getParameter();
+				params = params.stream()
+						.filter(param -> param.getName().contains("resource"))
+						.collect(Collectors.toList());
+				resource = params.get(0).getResource();
+			}
+			boolean hasId = resource.getIdElement().hasIdPart();
+			if (myMode == ValidationModeEnum.CREATE) {
+				if (hasId) {
+					throw new UnprocessableEntityException(
+							Msg.code(997) + "Resource has an ID - ID must not be populated for a FHIR create");
+				}
+			} else if (myMode == ValidationModeEnum.UPDATE) {
+				if (!hasId) {
+					throw new UnprocessableEntityException(
+							Msg.code(998) + "Resource has no ID - ID must be populated for a FHIR update");
+				}
+			}
+		}
+	}
+
+	/**
+	 * Validates that the partition ID of the request resource matches the partition ID of the entity.
+	 * <p>
+	 * If the request is for all partitions, this method does nothing. Otherwise, it checks that the resource type
+	 * and FHIR ID of the entity match those of the provided resource ID type, and that the partition IDs are equal.
+	 * If there is a mismatch, an {@link InvalidRequestException} is thrown.
+	 *
+	 * @param theResourceIdType     The resource ID type being processed
+	 * @param theRequestPartitionId The partition ID from the request
+	 * @param theEntity             The entity being updated
+	 * @throws InvalidRequestException if the partition IDs do not match for the same resource type and FHIR ID
+	 */
+	@VisibleForTesting
+	protected void validatePartitionIdMatch(
+			@Nonnull IIdType theResourceIdType,
+			@Nonnull RequestPartitionId theRequestPartitionId,
+			@Nonnull ResourceTable theEntity) {
+		if (theRequestPartitionId.isAllPartitions()) {
+			return;
+		}
+
+		boolean sameResType = Objects.equals(theEntity.getResourceType(), theResourceIdType.getResourceType());
+		boolean sameFhirId = Objects.equals(theResourceIdType.getIdPart(), theEntity.getFhirId());
+		boolean differentPartition =
+				!theRequestPartitionId.isPartition(theEntity.getPartitionId().getPartitionId());
+
+		if (sameResType && sameFhirId && differentPartition) {
+			String msg = getContext()
+					.getLocalizer()
+					.getMessageSanitized(
+							BaseHapiFhirDao.class,
+							"resourceTypeAndFhirIdConflictAcrossPartitions",
+							theEntity.getResourceType(),
+							theResourceIdType.getIdPart(),
+							theRequestPartitionId.getFirstPartitionNameOrNull());
+			throw new InvalidRequestException(Msg.code(2733) + msg);
+		}
+	}
+
+	@VisibleForTesting
+	public void setMemoryCacheService(MemoryCacheService theMemoryCacheService) {
+		myMemoryCacheService = theMemoryCacheService;
+	}
+
+	@Override
+	protected void postPersist(ResourceTable theEntity, T theResource, RequestDetails theRequestDetails) {
+		super.postPersist(theEntity, theResource, theRequestDetails);
+		invalidateHistoryCountCacheAfterCommit(theEntity);
+	}
+
+	@Override
+	protected void postUpdate(ResourceTable theEntity, T theResource, RequestDetails theRequestDetails) {
+		super.postUpdate(theEntity, theResource, theRequestDetails);
+		invalidateHistoryCountCacheAfterCommit(theEntity);
+	}
+
+	@Override
+	protected void postDelete(ResourceTable theEntity) {
+		super.postDelete(theEntity);
+		invalidateHistoryCountCacheAfterCommit(theEntity);
+	}
+
+	/**
+	 * Invalidates the {@link MemoryCacheService.CacheEnum#HISTORY_COUNT} entries that the
+	 * given resource write affects, scheduled to run after the surrounding transaction commits.
+	 */
+	private void invalidateHistoryCountCacheAfterCommit(ResourceTable theEntity) {
+		myMemoryCacheService.invalidateKeyAfterCommit(
+				MemoryCacheService.CacheEnum.HISTORY_COUNT,
+				MemoryCacheService.HistoryCountKey.forInstance(theEntity.getPersistentId()));
+		myMemoryCacheService.invalidateKeyAfterCommit(
+				MemoryCacheService.CacheEnum.HISTORY_COUNT,
+				MemoryCacheService.HistoryCountKey.forType(theEntity.getResourceType()));
+		myMemoryCacheService.invalidateKeyAfterCommit(
+				MemoryCacheService.CacheEnum.HISTORY_COUNT, MemoryCacheService.HistoryCountKey.forSystem());
+	}
+
+	/**
+	 * Method return type for {@link #reindexCorrectCurrentVersion(ResourceTable, ReindexParameters.ReindexSearchParametersEnum)}
+	 */
+	private record CorrectCurrentVersionResponse(
+			boolean forceReindexSps, boolean forceReloadResourceEntity, ResourceHistoryTable currentVersion) {}
 }

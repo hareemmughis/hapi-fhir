@@ -1,0 +1,279 @@
+/*-
+ * #%L
+ * HAPI FHIR JPA Server Test Utilities
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.provider;
+
+import ca.uhn.fhir.batch2.jobs.bulkmodify.reindex.ReindexProvider;
+import ca.uhn.fhir.batch2.jobs.export.BulkDataExportProvider;
+import ca.uhn.fhir.batch2.jobs.expunge.DeleteExpungeProvider;
+import ca.uhn.fhir.jpa.api.dao.DaoRegistry;
+import ca.uhn.fhir.jpa.dao.data.IPartitionDao;
+import ca.uhn.fhir.jpa.graphql.GraphQLProvider;
+import ca.uhn.fhir.jpa.provider.merge.PatientMergeProvider;
+import ca.uhn.fhir.jpa.search.DatabaseBackedPagingProvider;
+import ca.uhn.fhir.jpa.subscription.match.registry.SubscriptionLoader;
+import ca.uhn.fhir.jpa.test.BaseJpaR4Test;
+import ca.uhn.fhir.jpa.util.ResourceCountCache;
+import ca.uhn.fhir.narrative.DefaultThymeleafNarrativeGenerator;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.client.api.IClientInterceptor;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import ca.uhn.fhir.rest.client.api.IHttpRequest;
+import ca.uhn.fhir.rest.client.api.IHttpResponse;
+import ca.uhn.fhir.rest.client.api.ServerValidationModeEnum;
+import ca.uhn.fhir.rest.client.interceptor.LoggingInterceptor;
+import ca.uhn.fhir.rest.server.interceptor.CorsInterceptor;
+import ca.uhn.fhir.test.utilities.HttpClientExtension;
+import ca.uhn.fhir.test.utilities.server.RestfulServerConfigurerExtension;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Bundle.BundleEntryComponent;
+import org.hl7.fhir.r4.model.Parameters;
+import org.hl7.fhir.r4.model.Parameters.ParametersParameterComponent;
+import org.hl7.fhir.r4.model.Patient;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.web.cors.CorsConfiguration;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+@ContextConfiguration(classes = ServerConfiguration.class)
+public abstract class BaseResourceProviderR4Test extends BaseJpaR4Test {
+
+	/**
+	 * @deprecated Use {@code myServer.fhirRequest(path)}, or {@code myServer.getHttpClient()} for an
+	 * absolute URL. Kept only because Smile CDR tests still use it; this field will be removed once
+	 * those call sites are migrated.
+	 */
+	@Deprecated
+	@RegisterExtension
+	protected static HttpClientExtension ourHttpClient = new HttpClientExtension();
+
+	protected int myPort;
+	protected String myServerBase;
+	protected IGenericClient myClient;
+
+	@Autowired
+	@RegisterExtension
+	protected RestfulServerExtension myServer;
+
+	private MyHttpCodeClientIntercepter myLastHttpResponseCodeCapture = new MyHttpCodeClientIntercepter();
+
+	@RegisterExtension
+	protected RestfulServerConfigurerExtension myServerConfigurer = new RestfulServerConfigurerExtension(() -> myServer)
+			.withServerBeforeAll(s -> {
+				s.registerProviders(myResourceProviders.createProviders());
+				s.setDefaultResponseEncoding(EncodingEnum.XML);
+				s.setDefaultPrettyPrint(false);
+
+				myFhirContext.setNarrativeGenerator(new DefaultThymeleafNarrativeGenerator());
+
+				s.registerProvider(mySystemProvider);
+				s.registerProvider(myBinaryAccessProvider);
+				s.registerProvider(myAppCtx.getBean(BulkDataExportProvider.class));
+				s.registerProvider(myAppCtx.getBean(DeleteExpungeProvider.class));
+				s.registerProvider(myAppCtx.getBean(DiffProvider.class));
+				s.registerProvider(myAppCtx.getBean(GraphQLProvider.class));
+				s.registerProvider(myAppCtx.getBean(ProcessMessageProvider.class));
+				s.registerProvider(myAppCtx.getBean(ReindexProvider.class));
+				s.registerProvider(myAppCtx.getBean(SubscriptionTriggeringProvider.class));
+				s.registerProvider(myAppCtx.getBean(TerminologyUploaderProvider.class));
+				s.registerProvider(myAppCtx.getBean(ValueSetOperationProvider.class));
+				s.registerProvider(myAppCtx.getBean(PatientMergeProvider.class));
+
+				s.setPagingProvider(myAppCtx.getBean(DatabaseBackedPagingProvider.class));
+
+				JpaCapabilityStatementProvider confProvider = new JpaCapabilityStatementProvider(
+						s, mySystemDao, myStorageSettings, mySearchParamRegistry, myValidationSupport);
+				confProvider.setImplementationDescription("THIS IS THE DESC");
+				s.setServerConformanceProvider(confProvider);
+
+				// Register a CORS filter
+				CorsConfiguration config = new CorsConfiguration();
+				CorsInterceptor corsInterceptor = new CorsInterceptor(config);
+				config.addAllowedHeader(Constants.HEADER_ACCEPT);
+				config.addAllowedHeader(Constants.HEADER_CORS_REQUEST_HEADERS);
+				config.addAllowedHeader(Constants.HEADER_CORS_REQUEST_METHOD);
+				config.addAllowedHeader("Cache-Control");
+				config.addAllowedHeader(Constants.HEADER_CONTENT_TYPE);
+				config.addAllowedHeader(Constants.HEADER_CORS_ORIGIN);
+				config.addAllowedHeader("Prefer");
+				config.addAllowedHeader(Constants.HEADER_X_FHIR_STARTER);
+				config.addAllowedHeader(Constants.HEADER_X_REQUESTED_WITH);
+				config.addAllowedOrigin("*");
+				config.addExposedHeader(Constants.HEADER_LOCATION);
+				config.addExposedHeader(Constants.HEADER_CONTENT_LOCATION);
+				config.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+				s.registerInterceptor(corsInterceptor);
+			})
+			.withServerBeforeEach(s -> {
+				myPort = myServer.getPort();
+				myServerBase = myServer.getBaseUrl();
+				myClient = myServer.getFhirClient();
+
+				myClient.getInterceptorService().unregisterInterceptorsIf(t -> t instanceof LoggingInterceptor);
+				if (shouldLogClient()) {
+					myClient.registerInterceptor(new LoggingInterceptor(verboseClientLogging()));
+				}
+
+				myClient.registerInterceptor(myLastHttpResponseCodeCapture);
+			});
+
+	@Autowired
+	protected SubscriptionLoader mySubscriptionLoader;
+
+	@Autowired
+	protected DaoRegistry myDaoRegistry;
+
+	@Autowired
+	protected IPartitionDao myPartitionDao;
+
+	@Autowired
+	protected ResourceCountCache myResourceCountsCache;
+
+	public BaseResourceProviderR4Test() {
+		super();
+	}
+
+	@AfterEach
+	public void after() throws Exception {
+		myFhirContext.getRestfulClientFactory().setServerValidationMode(ServerValidationModeEnum.ONCE);
+		myServer.getRestfulServer().getInterceptorService().unregisterAllInterceptors();
+	}
+
+	protected boolean shouldLogClient() {
+		return true;
+	}
+
+	protected boolean verboseClientLogging() {
+		return false;
+	}
+
+	protected List<String> toNameList(Bundle resp) {
+		List<String> names = new ArrayList<>();
+		for (BundleEntryComponent next : resp.getEntry()) {
+			Patient nextPt = (Patient) next.getResource();
+			String nextStr = nextPt.getName().size() > 0
+					? nextPt.getName().get(0).getGivenAsSingleString() + " "
+							+ nextPt.getName().get(0).getFamily()
+					: "";
+			if (isNotBlank(nextStr)) {
+				names.add(nextStr);
+			}
+		}
+		return names;
+	}
+
+	protected int getLastHttpStatusCode() {
+		return myLastHttpResponseCodeCapture.getLastHttpStatusCode();
+	}
+
+	public static int getNumberOfParametersByName(Parameters theParameters, String theName) {
+		int retVal = 0;
+
+		for (ParametersParameterComponent param : theParameters.getParameter()) {
+			if (param.getName().equals(theName)) {
+				retVal++;
+			}
+		}
+
+		return retVal;
+	}
+
+	public static ParametersParameterComponent getParameterByName(Parameters theParameters, String theName) {
+		for (ParametersParameterComponent param : theParameters.getParameter()) {
+			if (param.getName().equals(theName)) {
+				return param;
+			}
+		}
+
+		return new ParametersParameterComponent();
+	}
+
+	public static List<ParametersParameterComponent> getParametersByName(Parameters theParameters, String theName) {
+		List<ParametersParameterComponent> params = new ArrayList<>();
+		for (ParametersParameterComponent param : theParameters.getParameter()) {
+			if (param.getName().equals(theName)) {
+				params.add(param);
+			}
+		}
+
+		return params;
+	}
+
+	public static ParametersParameterComponent getPartByName(
+			ParametersParameterComponent theParameter, String theName) {
+		for (ParametersParameterComponent part : theParameter.getPart()) {
+			if (part.getName().equals(theName)) {
+				return part;
+			}
+		}
+
+		return new ParametersParameterComponent();
+	}
+
+	public static boolean hasParameterByName(Parameters theParameters, String theName) {
+		for (ParametersParameterComponent param : theParameters.getParameter()) {
+			if (param.getName().equals(theName)) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * @param thePath the path below the server base, starting with {@literal "/"}, e.g. {@literal "/Patient?_id=FOO"}
+	 * @return the unqualified versionless ids of the resources in the returned Bundle
+	 */
+	protected List<String> searchAndReturnUnqualifiedVersionlessIdValues(String thePath) {
+		Validate.isTrue(thePath.startsWith("/"), "Path must start with '/': %s", thePath);
+		String resp = myServer.fhirRequest(thePath).get().getBody();
+		Bundle bundle = myFhirContext.newXmlParser().parseResource(Bundle.class, resp);
+		ourLog.debug("Observation: \n"
+				+ myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(bundle));
+		return toUnqualifiedVersionlessIdValues(bundle);
+	}
+
+	private class MyHttpCodeClientIntercepter implements IClientInterceptor {
+
+		private int myLastHttpStatusCode;
+
+		@Override
+		public void interceptRequest(IHttpRequest theRequest) {}
+
+		@Override
+		public void interceptResponse(IHttpResponse theResponse) throws IOException {
+			myLastHttpStatusCode = theResponse.getStatus();
+		}
+
+		public int getLastHttpStatusCode() {
+			return myLastHttpStatusCode;
+		}
+	}
+}

@@ -1,0 +1,363 @@
+package ca.uhn.fhir.util;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import org.hl7.fhir.r4.model.CodeSystem;
+import org.hl7.fhir.r4.model.Device;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.ValueSet;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+
+public class UrlUtilTest {
+
+	private final FhirContext myCtx = FhirContext.forR4Cached();
+
+	@Test
+	public void testNormalizeCanonicalUrl() {
+		assertEquals("http://foo", UrlUtil.normalizeCanonicalUrlForComparison("http://foo/"));
+		assertEquals("http://foo", UrlUtil.normalizeCanonicalUrlForComparison("http://foo"));
+		assertEquals("http://foo", UrlUtil.normalizeCanonicalUrlForComparison("http://foo|1.23"));
+		assertEquals("http://foo", UrlUtil.normalizeCanonicalUrlForComparison("http://foo|1.23#333"));
+		assertEquals("abc", UrlUtil.normalizeCanonicalUrlForComparison("abc"));
+		assertEquals("abc", UrlUtil.normalizeCanonicalUrlForComparison("abc/"));
+	}
+
+	@Test
+	public void testConstructAbsoluteUrl() {
+		assertEquals("http://foo/bar/baz", UrlUtil.constructAbsoluteUrl(null, "http://foo/bar/baz"));
+		assertEquals("http://foo/bar/baz", UrlUtil.constructAbsoluteUrl("http://foo/bar/", "baz"));
+		assertEquals("http://foo/bar/baz/", UrlUtil.constructAbsoluteUrl("http://foo/bar/", "baz/"));
+		assertEquals("http://foo/bar/baz/", UrlUtil.constructAbsoluteUrl("http://foo/bar/", "./baz/"));
+
+		assertEquals("http://foo/baz/", UrlUtil.constructAbsoluteUrl("http://foo/bar/", "../baz/"));
+		assertEquals("http://foo/baz/", UrlUtil.constructAbsoluteUrl("http://foo/bar/", "/baz/"));
+	}
+
+	@Test
+	public void testConstructRelativeUrl() {
+		assertEquals("http://foo/bar/baz", UrlUtil.constructRelativeUrl("http://boo/far/faz", "http://foo/bar/baz"));
+		assertEquals("http://foo/bar/baz", UrlUtil.constructRelativeUrl("http://foo/far/faz", "http://foo/bar/baz"));
+		assertEquals("baz", UrlUtil.constructRelativeUrl("http://foo/bar/boo", "http://foo/bar/baz"));
+	}
+
+	@Test
+	public void testEscape() {
+		assertEquals("A%20B", UrlUtil.escapeUrlParam("A B"));
+		assertEquals("A%2BB", UrlUtil.escapeUrlParam("A+B"));
+	}
+
+	@Test
+	public void testUnescape() {
+		assertAll(
+			() -> assertEquals(Constants.CT_JSON, UrlUtil.unescape(Constants.CT_JSON)),
+			() -> assertEquals(Constants.CT_NDJSON, UrlUtil.unescape(Constants.CT_NDJSON)),
+			() -> assertEquals(Constants.CT_XML, UrlUtil.unescape(Constants.CT_XML)),
+			() -> assertEquals(Constants.CT_XML_PATCH, UrlUtil.unescape(Constants.CT_XML_PATCH)),
+			() -> assertEquals(Constants.CT_APPLICATION_GZIP, UrlUtil.unescape(Constants.CT_APPLICATION_GZIP)),
+			() -> assertEquals(Constants.CT_RDF_TURTLE, UrlUtil.unescape(Constants.CT_RDF_TURTLE)),
+			() -> assertEquals(Constants.CT_FHIR_JSON, UrlUtil.unescape(Constants.CT_FHIR_JSON)),
+			() -> assertEquals(Constants.CT_FHIR_NDJSON, UrlUtil.unescape(Constants.CT_FHIR_NDJSON))
+		);
+	}
+
+	@Test
+	public void testIsValid() {
+		assertTrue(UrlUtil.isValid("http://foo"));
+		assertTrue(UrlUtil.isValid("https://foo"));
+		assertTrue(UrlUtil.isValid("HTTP://Foo"));
+		assertTrue(UrlUtil.isValid("HTTPS://Foo"));
+
+		assertFalse(UrlUtil.isValid("file://foo"));
+		assertFalse(UrlUtil.isValid("://foo"));
+		assertFalse(UrlUtil.isValid("http:/ss"));
+		assertFalse(UrlUtil.isValid("http:/"));
+		assertFalse(UrlUtil.isValid("http:"));
+		assertFalse(UrlUtil.isValid("h"));
+		assertFalse(UrlUtil.isValid(""));
+		assertFalse(UrlUtil.isValid(null));
+	}
+
+	@Test
+	public void testParseUrl() {
+		assertEquals("ConceptMap", UrlUtil.parseUrl("http://hl7.org/fhir/ConceptMap/ussgfht-loincde").getResourceType());
+		assertEquals("ConceptMap", UrlUtil.parseUrl("http://hl7.org/fhir/ConceptMap/ussgfht-loincde").getResourceType());
+		assertEquals("ussgfht-loincde", UrlUtil.parseUrl("http://hl7.org/fhir/ConceptMap/ussgfht-loincde").getResourceId());
+		assertNull(UrlUtil.parseUrl("http://hl7.org/fhir/ConceptMap/ussgfht-loincde?").getParams());
+		assertEquals("a=b", UrlUtil.parseUrl("http://hl7.org/fhir/ConceptMap/ussgfht-loincde?a=b").getParams());
+
+		assertEquals("a=b", UrlUtil.parseUrl("ConceptMap/ussgfht-loincde?a=b").getParams());
+		assertEquals("a=b", UrlUtil.parseUrl("/ConceptMap?a=b").getParams());
+		assertEquals("a=b", UrlUtil.parseUrl("/ConceptMap/ussgfht-loincde?a=b").getParams());
+
+		assertEquals("a=b", UrlUtil.parseUrl("?a=b").getParams());
+
+	}
+
+	@Test
+	public void testSanitize() {
+		assertEquals(" &apos; ", UrlUtil.sanitizeUrlPart(" ' "));
+		assertEquals(" &lt; ", UrlUtil.sanitizeUrlPart(" < "));
+		assertEquals(" &gt; ", UrlUtil.sanitizeUrlPart(" > "));
+		assertEquals(" &quot; ", UrlUtil.sanitizeUrlPart(" \" "));
+		assertEquals(" &#10; ", UrlUtil.sanitizeUrlPart(" \n "));
+		assertEquals(" &#13; ", UrlUtil.sanitizeUrlPart(" \r "));
+		assertEquals("  ", UrlUtil.sanitizeUrlPart(" \0 "));
+	}
+
+	@ParameterizedTest
+	@CsvSource({
+		"null,    null",
+		"null,    urn:uuid:12345",
+		"Patient, Patient",
+		"Patient, Patient?",
+		"Patient, Patient?identifier=foo",
+		"Patient, /Patient",
+		"Patient, /Patient?",
+		"Patient, /Patient?identifier=foo",
+		"Patient, http://foo/base/Patient?identifier=foo",
+		"Patient, http://foo/base/Patient/1",
+		"Patient, http://foo/base/Patient/1/_history/2",
+		"Patient, /Patient/1",
+		"Patient, /Patient/1/_history/2",
+		"Patient, Patient/1",
+		"Patient, Patient/1/_history/2",
+	})
+	public void testDetermineResourceTypeInResourceUrl(String theExpected, String theUrl) {
+		String url = theUrl;
+		if (url.equals("null")) {
+			url = null;
+		}
+
+		String actual = UrlUtil.determineResourceTypeInResourceUrl(myCtx, url);
+
+		if (theExpected.equals("null")) {
+			assertNull(actual);
+		} else {
+			assertEquals(theExpected, actual);
+		}
+	}
+
+	@Test
+	public void testGetAboveUriCandidates_returnsUriList() {
+		List<String> candidates = UrlUtil.getAboveUriCandidates("http://host/v1/v2/v3/v4");
+		assertThat(candidates).hasSize(5);
+		assertThat(candidates).containsExactlyInAnyOrder("http://host/v1/v2/v3/v4", "http://host/v1/v2/v3", "http://host/v1/v2", "http://host/v1", "http://host");
+	}
+
+	@Test
+	public void testGetAboveUriCandidates_withHostOnly_returnsHostUri() {
+		List<String> candidates = UrlUtil.getAboveUriCandidates("http://host");
+		assertThat(candidates).hasSize(1);
+		assertThat(candidates).containsExactlyInAnyOrder("http://host");
+	}
+
+	@Test
+	public void testGetAboveUriCandidates_withFullUri_returnsUriList() {
+		List<String> candidates = UrlUtil.getAboveUriCandidates("https://host.com:8080/path1/path2?name=name#name");
+		assertThat(candidates).hasSize(3);
+		assertThat(candidates).containsExactlyInAnyOrder("https://host.com:8080/path1/path2?name=name#name", "https://host.com:8080/path1", "https://host.com:8080");
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"invalid_uri", "http://some-source/ with_invalid_uri", "http://"})
+	public void testGetAboveUriCandidates_withInvalidURI_throwsException(String theUri) {
+		try {
+			UrlUtil.getAboveUriCandidates(theUri);
+			fail();		} catch (InvalidRequestException e) {
+			assertEquals(Msg.code(2419) + "Provided URI is not valid: " + theUri, e.getMessage());
+		}
+	}
+
+	@Test
+	public void testParseQueryString_leadingQuestionMark() {
+		Map<String, String[]> map = UrlUtil.parseQueryString("?key1=value1&key2=value2");
+		assertThat(map).hasSize(2);
+		assertThat(map.get("key1")).containsExactly("value1");
+		assertThat(map.get("key2")).containsExactly("value2");
+	}
+
+	@Test
+	public void testParseQueryString_questionMarkInValue() {
+		Map<String, String[]> map = UrlUtil.parseQueryString(
+			 "_type=Patient,Observation,Group&_typeFilter=Patient?gender=female&_outputFormat=application/fhir+ndjson");
+		assertThat(map).hasSize(3);
+		assertThat(map.get("_type")).containsExactly("Patient,Observation,Group");
+		assertThat(map.get("_typeFilter")).containsExactly("Patient?gender=female");
+		assertThat(map.get("_outputFormat")).containsExactly("application/fhir+ndjson");
+	}
+
+	@Test
+	public void testParseQueryString_urlDecoding() {
+		// %2B -> '+' and '+' -> ' ' when decoded by URLDecoder
+		Map<String, String[]> map = UrlUtil.parseQueryString("key=sunny%2Bwarm+beach");
+		assertThat(map).hasSize(1);
+		assertThat(map.get("key")[0]).isEqualTo("sunny+warm beach");
+
+		// values should be unescaped
+		map = UrlUtil.parseQueryString("key=nice%20day");
+		assertThat(map).hasSize(1);
+		assertThat(map.containsKey("key")).isTrue();
+		assertThat(map.get("key")).contains("nice day");
+	}
+
+	@ParameterizedTest
+	@CsvSource(textBlock = """
+		# Input URL      ,  Input Version , Expected URL   , Expected Version
+		http://foo       ,                , http://foo     , null
+		http://foo|      ,                , http://foo     , null
+		http://foo%7C    ,                , http://foo     , null
+		http://foo|123   ,                , http://foo     , 123
+		http://foo%7C123 ,                , http://foo     , 123
+		http://foo       , 123            , http://foo     , 123
+		http://foo|123   , 123            , http://foo     , 123
+		http://foo|      , 123            , http://foo     , 123
+		http://foo%7C123 , 123            , http://foo     , 123
+		http://foo|a|b   ,                , http://foo     , a|b
+		                 ,                ,                , null
+		http://foo|456   , 123            , http://foo     , FAIL
+		""")
+	void testParseCanonicalUrl(String theInputUrl, String theInputVersionId, String theExpectedUrl, String theExpectedVersionId) {
+		UrlUtil.CanonicalUrlParts parts;
+		if ("FAIL".equals(theExpectedVersionId)) {
+			assertThatThrownBy(() -> UrlUtil.parseCanonicalUrl(theInputUrl, theInputVersionId))
+				.isInstanceOf(InvalidRequestException.class)
+				.hasMessageContaining("Version in URL[http://foo|456 does not match expected version: 123");
+			return;
+		} else if (isNotBlank(theExpectedUrl)) {
+			parts = UrlUtil.parseCanonicalUrl(theInputUrl, theInputVersionId);
+		} else {
+			parts = UrlUtil.parseCanonicalUrl(theInputUrl);
+		}
+		assertEquals(theExpectedUrl, parts.url());
+		if ("null".equals(theExpectedVersionId)) {
+			assertFalse(parts.versionId().isPresent());
+		} else {
+			assertEquals(theExpectedVersionId, parts.versionId().orElseThrow());
+		}
+	}
+
+	// Created by Claude Opus 5
+	@ParameterizedTest
+	@CsvSource(textBlock = """
+		# Input URL      , Input Version , Expected Canonical
+		http://foo       , 123           , http://foo|123
+		http://foo       ,               , http://foo
+		http://foo       , ''            , http://foo
+		http://foo|123   ,               , http://foo|123
+		http://foo%7C123 ,               , http://foo|123
+		http://foo|123   , 123           , http://foo|123
+		http://foo|      , 123           , http://foo|123
+		                 , 123           ,
+		''               , 123           ,
+		""")
+	void toCanonicalUrl_withVariousUrlsAndVersions_returnsTheJoinedCanonical(String theInputUrl, String theInputVersionId, String theExpectedCanonical) {
+		assertEquals(theExpectedCanonical, UrlUtil.toCanonicalUrl(theInputUrl, theInputVersionId));
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	void toCanonicalUrl_versionDisagreesWithTheOneInTheUrl_throws() {
+		assertThatThrownBy(() -> UrlUtil.toCanonicalUrl("http://foo|456", "123"))
+			.isInstanceOf(InvalidRequestException.class)
+			.hasMessageContaining("Version in URL[http://foo|456 does not match expected version: 123");
+	}
+
+	// Created by Claude Opus 5.5
+	@ParameterizedTest
+	@CsvSource(textBlock = """
+		# url            , url version , version , expected url , expected version
+		http://foo       ,             ,         , http://foo   ,
+		http://foo       , 1           ,         , http://foo   , 1
+		http://foo       ,             , 1       , http://foo   , 1
+		http://foo|1     ,             ,         , http://foo   , 1
+		http://foo       , 1           , 1       , http://foo   , 1
+		http://foo|1     , 1           , 1       , http://foo   , 1
+		http://foo%7C1   ,             , 1       , http://foo   , 1
+		""")
+	void parseCanonicalUrl_versionBesideOrPackedOrSeparate_returnsUrlAndVersion(
+		String theUrl, String theUrlVersion, String theVersion, String theExpectedUrl, String theExpectedVersion) {
+		UrlUtil.CanonicalUrlParts parts = UrlUtil.parseCanonicalUrl(theUrl, theUrlVersion, theVersion);
+
+		assertEquals(theExpectedUrl, parts.url());
+		assertEquals(Optional.ofNullable(theExpectedVersion), parts.versionId());
+	}
+
+	// Created by Claude Opus 5.5
+	@ParameterizedTest
+	@CsvSource(textBlock = """
+		# url          , url version , version
+		http://foo|1   , 2           ,
+		http://foo     , 1           , 2
+		http://foo|1   ,             , 2
+		""")
+	void parseCanonicalUrl_versionsDisagree_throws(String theUrl, String theUrlVersion, String theVersion) {
+		assertThatThrownBy(() -> UrlUtil.parseCanonicalUrl(theUrl, theUrlVersion, theVersion))
+			.isInstanceOf(InvalidRequestException.class)
+			.hasMessageContaining(Msg.code(2952));
+	}
+
+	/**
+	 * A version with no URL is not a canonical, so there is nothing to render. The declared @Nonnull has to
+	 * hold for callers which concatenate or log the result.
+	 */
+	@Test
+	void canonicalUrlPartsToString_withNoUrl_returnsEmptyString() {
+		assertEquals("", new UrlUtil.CanonicalUrlParts(null, Optional.empty()).toString());
+		assertEquals("", new UrlUtil.CanonicalUrlParts(null, Optional.of("123")).toString());
+	}
+
+	// Created by Claude Opus 5.5
+	@Test
+	void getCanonicalUrl_conformanceResourceWithAndWithoutVersion_readsUrlAndVersion() {
+		ValueSet versioned = new ValueSet().setUrl("http://example.org/vs").setVersion("1.0");
+		CodeSystem unversioned = new CodeSystem().setUrl("http://example.org/cs");
+		CodeSystem blankVersion = new CodeSystem().setUrl("http://example.org/cs").setVersion("");
+
+		assertEquals(new UrlUtil.CanonicalUrlParts("http://example.org/vs", Optional.of("1.0")), UrlUtil.getCanonicalUrl(myCtx, versioned));
+		assertEquals(new UrlUtil.CanonicalUrlParts("http://example.org/cs", Optional.empty()), UrlUtil.getCanonicalUrl(myCtx, unversioned));
+		assertEquals(new UrlUtil.CanonicalUrlParts("http://example.org/cs", Optional.empty()), UrlUtil.getCanonicalUrl(myCtx, blankVersion));
+	}
+
+	// Created by Claude Opus 5.5
+	@Test
+	void getCanonicalUrl_resourceWithoutUrlElement_returnsEmptyParts() {
+		UrlUtil.CanonicalUrlParts parts = UrlUtil.getCanonicalUrl(myCtx, new Patient());
+		UrlUtil.CanonicalUrlParts noUrlSet = UrlUtil.getCanonicalUrl(myCtx, new ValueSet());
+
+		assertEquals(new UrlUtil.CanonicalUrlParts(null, Optional.empty()), parts);
+		assertEquals(new UrlUtil.CanonicalUrlParts(null, Optional.empty()), noUrlSet);
+	}
+
+	// Created by Claude Opus 5.5
+	@Test
+	void getCanonicalUrl_resourceWithNonPrimitiveVersionElement_readsUrlOnly() {
+		Device device = new Device().setUrl("http://example.org/device");
+		device.addVersion().setValue("1.0");
+
+		assertEquals(
+				new UrlUtil.CanonicalUrlParts("http://example.org/device", Optional.empty()),
+				UrlUtil.getCanonicalUrl(myCtx, device));
+	}
+
+}

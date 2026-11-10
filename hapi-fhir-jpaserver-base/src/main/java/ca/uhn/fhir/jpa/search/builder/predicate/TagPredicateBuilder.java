@@ -1,0 +1,144 @@
+/*-
+ * #%L
+ * HAPI FHIR JPA Server
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.search.builder.predicate;
+
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.dao.BaseHapiFhirDao;
+import ca.uhn.fhir.jpa.model.entity.TagTypeEnum;
+import ca.uhn.fhir.jpa.search.builder.TagToken;
+import ca.uhn.fhir.jpa.search.builder.sql.SearchQueryBuilder;
+import ca.uhn.fhir.jpa.util.QueryParameterUtils;
+import ca.uhn.fhir.rest.param.UriParamQualifierEnum;
+import com.google.common.collect.Lists;
+import com.healthmarketscience.sqlbuilder.BinaryCondition;
+import com.healthmarketscience.sqlbuilder.ComboCondition;
+import com.healthmarketscience.sqlbuilder.Condition;
+import com.healthmarketscience.sqlbuilder.dbspec.basic.DbColumn;
+import com.healthmarketscience.sqlbuilder.dbspec.basic.DbTable;
+
+import java.util.Collection;
+import java.util.List;
+import java.util.Objects;
+
+import static ca.uhn.fhir.jpa.search.builder.predicate.StringPredicateBuilder.createLeftMatchLikeExpression;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+public class TagPredicateBuilder extends BaseJoiningPredicateBuilder {
+
+	private final DbColumn myColumnResId;
+	private final DbTable myTagDefinitionTable;
+	private final DbColumn myTagDefinitionColumnTagId;
+	private final DbColumn myTagDefinitionColumnTagSystem;
+	private final DbColumn myTagDefinitionColumnTagCode;
+	private final DbColumn myColumnTagId;
+	private final DbColumn myTagDefinitionColumnTagType;
+	private volatile boolean myTagDefinitionTableIsJoined = false;
+
+	public TagPredicateBuilder(SearchQueryBuilder theSearchSqlBuilder) {
+		super(theSearchSqlBuilder, theSearchSqlBuilder.addTable("HFJ_RES_TAG"));
+
+		myColumnResId = getTable().addColumn("RES_ID");
+		myColumnTagId = getTable().addColumn("TAG_ID");
+
+		myTagDefinitionTable = theSearchSqlBuilder.addTable("HFJ_TAG_DEF");
+		myTagDefinitionColumnTagId = myTagDefinitionTable.addColumn("TAG_ID");
+		myTagDefinitionColumnTagSystem = myTagDefinitionTable.addColumn("TAG_SYSTEM");
+		myTagDefinitionColumnTagCode = myTagDefinitionTable.addColumn("TAG_CODE");
+		myTagDefinitionColumnTagType = myTagDefinitionTable.addColumn("TAG_TYPE");
+	}
+
+	public Condition createPredicateTag(
+			TagTypeEnum theTagType,
+			List<TagToken> theTokens,
+			String theParamName,
+			RequestPartitionId theRequestPartitionId) {
+		if (!myTagDefinitionTableIsJoined) {
+			synchronized (this) {
+				if (!myTagDefinitionTableIsJoined) {
+					addJoin(getTable(), myTagDefinitionTable, new DbColumn[] {myColumnTagId}, new DbColumn[] {
+						myTagDefinitionColumnTagId
+					});
+					myTagDefinitionTableIsJoined = true;
+				}
+			}
+		}
+		return createPredicateTagList(theTagType, theTokens);
+	}
+
+	/**
+	 * Builds a predicate that matches resources carrying one of the given tag definition ids by
+	 * filtering directly on the indexed {@code HFJ_RES_TAG.TAG_ID} column, <b>without</b> joining
+	 * {@code HFJ_TAG_DEF}.
+	 *
+	 * <p>This is the counterpart to {@link #createPredicateTag} for the case where the caller has
+	 * already resolved the {@code TAG_ID}(s) up front. Keeping the selective tag id out of a join
+	 * lets the query planner see it as a bound value and consult per-value statistics, rather than
+	 * underestimating cardinality for a heavy-hitter tag.
+	 *
+	 * @param theTagIds the resolved tag definition ids; an empty collection means the requested tag
+	 *     does not exist, so the predicate matches nothing.
+	 */
+	public Condition createPredicateTagIds(Collection<Long> theTagIds) {
+		if (theTagIds.isEmpty()) {
+			// The requested tag does not exist in HFJ_TAG_DEF, so no resource can carry it. TAG_ID is
+			// a positive sequence value, so this comparison never matches.
+			return BinaryCondition.equalTo(myColumnTagId, generatePlaceholder(-1L));
+		}
+		return QueryParameterUtils.toEqualToOrInPredicate(myColumnTagId, generatePlaceholders(theTagIds));
+	}
+
+	private Condition createPredicateTagList(TagTypeEnum theTagType, List<TagToken> theTokens) {
+		Condition typePredicate =
+				BinaryCondition.equalTo(myTagDefinitionColumnTagType, generatePlaceholder(theTagType.ordinal()));
+
+		List<Condition> orPredicates = Lists.newArrayList();
+		for (TagToken next : theTokens) {
+			String system = next.system();
+			String code = next.code();
+			String qualifier = next.qualifier();
+
+			if (theTagType == TagTypeEnum.PROFILE) {
+				system = BaseHapiFhirDao.NS_JPA_PROFILE;
+			}
+
+			Condition codePredicate = Objects.equals(qualifier, UriParamQualifierEnum.BELOW.getValue())
+					? BinaryCondition.like(
+							myTagDefinitionColumnTagCode, generatePlaceholder(createLeftMatchLikeExpression(code)))
+					: BinaryCondition.equalTo(myTagDefinitionColumnTagCode, generatePlaceholder(code));
+
+			if (isNotBlank(system)) {
+				Condition systemPredicate =
+						BinaryCondition.equalTo(myTagDefinitionColumnTagSystem, generatePlaceholder(system));
+				orPredicates.add(ComboCondition.and(typePredicate, systemPredicate, codePredicate));
+			} else {
+				// Note: We don't have an index for this combo, which means that this may not perform
+				// well on MySQL (and maybe others) without an added index
+				orPredicates.add(ComboCondition.and(typePredicate, codePredicate));
+			}
+		}
+
+		return ComboCondition.or(orPredicates.toArray(new Condition[0]));
+	}
+
+	@Override
+	public DbColumn getResourceIdColumn() {
+		return myColumnResId;
+	}
+}

@@ -1,17 +1,15 @@
-package ca.uhn.fhir.context;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,15 +17,17 @@ package ca.uhn.fhir.context;
  * limitations under the License.
  * #L%
  */
-
-import java.util.Map;
+package ca.uhn.fhir.context;
 
 import org.hl7.fhir.instance.model.api.IBase;
 import org.hl7.fhir.instance.model.api.IBaseXhtml;
 
-public class RuntimePrimitiveDatatypeXhtmlHl7OrgDefinition  extends BaseRuntimeElementDefinition<IBaseXhtml> {
+import java.util.Map;
 
-	public RuntimePrimitiveDatatypeXhtmlHl7OrgDefinition(String theName, Class<? extends IBaseXhtml> theImplementingClass, boolean theStandardType) {
+public class RuntimePrimitiveDatatypeXhtmlHl7OrgDefinition extends BaseRuntimeElementDefinition<IBaseXhtml> {
+
+	public RuntimePrimitiveDatatypeXhtmlHl7OrgDefinition(
+			String theName, Class<? extends IBaseXhtml> theImplementingClass, boolean theStandardType) {
 		super(theName, theImplementingClass, theStandardType);
 	}
 
@@ -37,8 +37,9 @@ public class RuntimePrimitiveDatatypeXhtmlHl7OrgDefinition  extends BaseRuntimeE
 	}
 
 	@Override
-	void sealAndInitialize(FhirContext theContext, Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
+	void sealAndInitialize(
+			FhirContext theContext,
+			Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
 		// nothing
 	}
-
 }

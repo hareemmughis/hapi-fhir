@@ -1,0 +1,250 @@
+/*-
+ * #%L
+ * HAPI FHIR JPA Server - Master Data Management
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.mdm.svc.candidate;
+
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.api.svc.IIdHelperService;
+import ca.uhn.fhir.mdm.api.IMdmSettings;
+import ca.uhn.fhir.mdm.api.MdmRuleSetEnum;
+import ca.uhn.fhir.mdm.log.Logs;
+import ca.uhn.fhir.mdm.model.MdmTransactionContext;
+import ca.uhn.fhir.mdm.rules.json.MdmFilterSearchParamJson;
+import ca.uhn.fhir.mdm.rules.json.MdmResourceSearchParamJson;
+import ca.uhn.fhir.mdm.rules.json.MdmRulesJson;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.api.server.storage.IResourcePersistentId;
+import org.hl7.fhir.instance.model.api.IAnyResource;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.slf4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import static ca.uhn.fhir.jpa.mdm.svc.candidate.CandidateSearcher.idOrType;
+import static ca.uhn.fhir.mdm.api.MdmConstants.ALL_RESOURCE_SEARCH_PARAM_TYPE;
+
+@Service
+public class MdmCandidateSearchSvc {
+
+	private static final Logger ourLog = Logs.getMdmTroubleshootingLog();
+
+	@Autowired
+	private IMdmSettings myMdmSettings;
+
+	@Autowired
+	private IIdHelperService myIdHelperService;
+
+	@Autowired
+	private MdmCandidateSearchCriteriaBuilderSvc myMdmCandidateSearchCriteriaBuilderSvc;
+
+	@Autowired
+	private CandidateSearcher myCandidateSearcher;
+
+	public MdmCandidateSearchSvc() {}
+
+	/**
+	 * Given a source resource, search for all resources that are considered an MDM match based on defined MDM rules.
+	 *
+	 * @param theResourceType the resource type of the resource being matched
+	 * @param theResource the {@link IBaseResource} we are attempting to match.
+	 * @param theRequestPartitionId  the {@link RequestPartitionId} representation of the partitions we are limited to when attempting to match
+	 * @param theContext the context of the current MDM operation; receives the too-many-candidates flag
+	 *
+	 * @return the list of candidate {@link IBaseResource} which could be matches to theResource
+	 */
+	@Transactional
+	public Collection<IAnyResource> findCandidates(
+			String theResourceType,
+			IAnyResource theResource,
+			RequestPartitionId theRequestPartitionId,
+			MdmTransactionContext theContext) {
+		return findCandidates(
+				theResourceType, theResource, theRequestPartitionId, MdmRuleSetEnum.MATCH_AND_LINK, theContext);
+	}
+
+	/**
+	 * Same as {@link #findCandidates(String, IAnyResource, RequestPartitionId, MdmTransactionContext)}, with the
+	 * candidate search parameters of the given rule set.
+	 *
+	 * @param theResourceType the resource type of the resource being matched
+	 * @param theResource the {@link IBaseResource} we are attempting to match.
+	 * @param theRequestPartitionId  the {@link RequestPartitionId} representation of the partitions we are limited to when attempting to match
+	 * @param theRuleSet which rules' {@code candidateSearchParams} and {@code candidateFilterSearchParams} to search with
+	 * @param theContext the context of the current MDM operation; receives the too-many-candidates flag
+	 *
+	 * @return the list of candidate {@link IBaseResource} which could be matches to theResource
+	 */
+	@Transactional
+	public Collection<IAnyResource> findCandidates(
+			String theResourceType,
+			IAnyResource theResource,
+			RequestPartitionId theRequestPartitionId,
+			MdmRuleSetEnum theRuleSet,
+			MdmTransactionContext theContext) {
+
+		/*
+		 * This is a LinkedHashMap only because a number of Smile MDM unit tests depend on
+		 * the order of candidates being returned in an order consistent with the order they
+		 * were created. Before we added the partition ID to the hashCode() of JpaPid this
+		 * seemed to happen naturally by complete coincidence, but after that change it
+		 * stopped happening. So now a linked hashmap is used instead.
+		 */
+		Map<IResourcePersistentId, IAnyResource> matchedPidsToResources = new LinkedHashMap<>();
+
+		MdmRulesJson rules = myMdmSettings.getMdmRules(theRuleSet);
+		List<MdmFilterSearchParamJson> filterSearchParams = rules.getCandidateFilterSearchParams();
+		List<String> filterCriteria = buildFilterQuery(filterSearchParams, theResourceType);
+		List<MdmResourceSearchParamJson> candidateSearchParams = rules.getCandidateSearchParams();
+
+		// If there are zero MdmResourceSearchParamJson, we end up only making a single search, otherwise we
+		// must perform one search per MdmResourceSearchParamJson.
+		if (candidateSearchParams.isEmpty()) {
+			searchForIdsAndAddToMap(
+					theResourceType,
+					theResource,
+					matchedPidsToResources,
+					filterCriteria,
+					null,
+					theRequestPartitionId,
+					theContext);
+		} else {
+			for (MdmResourceSearchParamJson resourceSearchParam : candidateSearchParams) {
+
+				if (!isSearchParamForResource(theResourceType, resourceSearchParam)) {
+					continue;
+				}
+
+				searchForIdsAndAddToMap(
+						theResourceType,
+						theResource,
+						matchedPidsToResources,
+						filterCriteria,
+						resourceSearchParam,
+						theRequestPartitionId,
+						theContext);
+
+				if (theContext.isMatchingAborted()) {
+					// partial results don't help; return nothing and upstream we'll tag
+					// this candidate as 'too many candidates'
+					return Collections.emptyList();
+				}
+			}
+		}
+
+		// Obviously we don't want to consider the incoming resource as a potential candidate.
+		// Sometimes, we are running this function on a resource that has not yet been persisted,
+		// so it may not have an ID yet, precluding the need to remove it.
+		if (theResource.getIdElement().getIdPart() != null) {
+			if (matchedPidsToResources.remove(
+							myIdHelperService.getPidOrNull(RequestPartitionId.allPartitions(), theResource))
+					!= null) {
+				ourLog.debug(
+						"Removing incoming resource {} from list of candidates.",
+						theResource.getIdElement().toUnqualifiedVersionless());
+			}
+		}
+
+		ourLog.info(
+				"Candidate search found {} matching resources for {}",
+				matchedPidsToResources.size(),
+				idOrType(theResource, theResourceType));
+		return matchedPidsToResources.values();
+	}
+
+	private boolean isSearchParamForResource(String theResourceType, MdmResourceSearchParamJson resourceSearchParam) {
+		String resourceType = resourceSearchParam.getResourceType();
+		return resourceType.equals(theResourceType) || resourceType.equalsIgnoreCase(ALL_RESOURCE_SEARCH_PARAM_TYPE);
+	}
+
+	/*
+	 * Helper method which performs too much work currently.
+	 * 1. Build a full query string for the given filter and resource criteria.
+	 * 2. Convert that URL to a SearchParameterMap.
+	 * 3. Execute a Synchronous search on the DAO using that parameter map.
+	 * 4. Store all results in `theMatchedPidsToResources`
+	 */
+	@SuppressWarnings("rawtypes")
+	private void searchForIdsAndAddToMap(
+			String theResourceType,
+			IAnyResource theResource,
+			Map<IResourcePersistentId, IAnyResource> theMatchedPidsToResources,
+			List<String> theFilterCriteria,
+			MdmResourceSearchParamJson resourceSearchParam,
+			RequestPartitionId theRequestPartitionId,
+			MdmTransactionContext theContext) {
+		// 1.
+		Optional<String> oResourceCriteria = myMdmCandidateSearchCriteriaBuilderSvc.buildResourceQueryString(
+				theResourceType, theResource, theFilterCriteria, resourceSearchParam);
+		if (!oResourceCriteria.isPresent()) {
+			return;
+		}
+		String resourceCriteria = oResourceCriteria.get();
+		ourLog.debug("Searching for {} candidates with {}", theResourceType, resourceCriteria);
+
+		// 2.
+		Optional<IBundleProvider> bundleProvider =
+				myCandidateSearcher.search(theResourceType, resourceCriteria, theRequestPartitionId, theContext);
+
+		if (!bundleProvider.isPresent()) {
+			// no results means either no matches or too many candidates
+			// either way, we want to exit immediately
+			return;
+		}
+		List<IBaseResource> resources = bundleProvider.get().getAllResources();
+
+		int initialSize = theMatchedPidsToResources.size();
+
+		// 4.
+		resources.forEach(resource -> theMatchedPidsToResources.put(
+				myIdHelperService.getPidOrNull(RequestPartitionId.allPartitions(), resource), (IAnyResource) resource));
+
+		int newSize = theMatchedPidsToResources.size();
+
+		if (ourLog.isDebugEnabled()) {
+			ourLog.debug("Candidate search added {} {}s", newSize - initialSize, theResourceType);
+		}
+	}
+
+	private List<String> buildFilterQuery(
+			List<MdmFilterSearchParamJson> theFilterSearchParams, String theResourceType) {
+		return Collections.unmodifiableList(theFilterSearchParams.stream()
+				.filter(spFilterJson -> paramIsOnCorrectType(theResourceType, spFilterJson))
+				.map(this::convertToQueryString)
+				.collect(Collectors.toList()));
+	}
+
+	private boolean paramIsOnCorrectType(String theResourceType, MdmFilterSearchParamJson spFilterJson) {
+		return spFilterJson.getResourceType().equals(theResourceType)
+				|| spFilterJson.getResourceType().equalsIgnoreCase(ALL_RESOURCE_SEARCH_PARAM_TYPE);
+	}
+
+	private String convertToQueryString(MdmFilterSearchParamJson theSpFilterJson) {
+		String qualifier = theSpFilterJson.getTokenParamModifierAsString();
+		return theSpFilterJson.getSearchParam() + qualifier + "=" + theSpFilterJson.getFixedValue();
+	}
+}

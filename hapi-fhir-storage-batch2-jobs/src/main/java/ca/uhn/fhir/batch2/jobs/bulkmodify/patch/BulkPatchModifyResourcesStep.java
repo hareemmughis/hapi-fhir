@@ -1,0 +1,77 @@
+/*-
+ * #%L
+ * HAPI-FHIR Storage Batch2 Jobs
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.batch2.jobs.bulkmodify.patch;
+
+import ca.uhn.fhir.batch2.api.StepExecutionDetails;
+import ca.uhn.fhir.batch2.jobs.bulkmodify.framework.api.ResourceModificationRequest;
+import ca.uhn.fhir.batch2.jobs.bulkmodify.framework.api.ResourceModificationResponse;
+import ca.uhn.fhir.batch2.jobs.bulkmodify.framework.base.BaseBulkModifyResourcesIndividuallyStep;
+import ca.uhn.fhir.batch2.jobs.chunk.TypedPidAndVersionListWorkChunkJson;
+import ca.uhn.fhir.jpa.model.util.JpaConstants;
+import ca.uhn.fhir.jpa.patch.FhirPatch;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+
+import java.util.List;
+
+public class BulkPatchModifyResourcesStep<PT extends BulkPatchJobParameters>
+		extends BaseBulkModifyResourcesIndividuallyStep<PT, BulkPatchModificationContext> {
+
+	private final boolean myRewriteHistory;
+
+	public BulkPatchModifyResourcesStep(boolean theRewriteHistory) {
+		myRewriteHistory = theRewriteHistory;
+	}
+
+	@Nullable
+	@Override
+	protected BulkPatchModificationContext preModifyResources(
+			StepExecutionDetails<PT, TypedPidAndVersionListWorkChunkJson> theStepExecutionDetails,
+			List<IBaseResource> theResources) {
+		IBaseResource patch = theStepExecutionDetails.getParameters().getFhirPatch(myFhirContext);
+		return new BulkPatchModificationContext(patch);
+	}
+
+	@Nonnull
+	@Override
+	protected ResourceModificationResponse modifyResource(
+			StepExecutionDetails<PT, TypedPidAndVersionListWorkChunkJson> theStepExecutionDetails,
+			BulkPatchModificationContext theModificationContext,
+			@Nonnull ResourceModificationRequest theModificationRequest) {
+		IBaseResource resourceToPatch = theModificationRequest.getResource();
+		IBaseResource patchToApply = theModificationContext.getPatch();
+		new FhirPatch(myFhirContext).apply(resourceToPatch, patchToApply);
+		return ResourceModificationResponse.updateResource(resourceToPatch);
+	}
+
+	@Override
+	protected boolean isRewriteHistory(
+			StepExecutionDetails<PT, TypedPidAndVersionListWorkChunkJson> theStepExecutionDetails,
+			BulkPatchModificationContext theState,
+			IBaseResource theResource) {
+		return myRewriteHistory;
+	}
+
+	@Override
+	protected String getJobNameForLogging() {
+		return JpaConstants.OPERATION_BULK_PATCH;
+	}
+}

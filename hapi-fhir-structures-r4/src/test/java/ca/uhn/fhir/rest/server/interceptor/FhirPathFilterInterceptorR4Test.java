@@ -1,0 +1,222 @@
+package ca.uhn.fhir.rest.server.interceptor;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.HashMapResourceProviderExtension;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.Composition;
+import org.hl7.fhir.r4.model.DateTimeType;
+import org.hl7.fhir.r4.model.MedicationAdministration;
+import org.hl7.fhir.r4.model.Parameters;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Period;
+import org.hl7.fhir.r4.model.Reference;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.util.stream.Stream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class FhirPathFilterInterceptorR4Test {
+
+	private static FhirContext ourCtx = FhirContext.forR4();
+	@Order(0)
+	@RegisterExtension
+	public RestfulServerExtension myServerExtension = new RestfulServerExtension(ourCtx);
+	@Order(1)
+	@RegisterExtension
+	public HashMapResourceProviderExtension<Patient> myPatientProvider = new HashMapResourceProviderExtension<>(myServerExtension, Patient.class);
+	@Order(1)
+	@RegisterExtension
+	public HashMapResourceProviderExtension<MedicationAdministration> myMedicationAdministrationProvider = new HashMapResourceProviderExtension<>(myServerExtension, MedicationAdministration.class);
+	@Order(1)
+	@RegisterExtension
+	public HashMapResourceProviderExtension<Bundle> myBundleProvider = new HashMapResourceProviderExtension<>(myServerExtension, Bundle.class);
+	private IGenericClient myClient;
+	private String myBaseUrl;
+
+	@BeforeEach
+	public void before() {
+		myServerExtension.getRestfulServer().getInterceptorService().unregisterAllInterceptors();
+		myServerExtension.getRestfulServer().getInterceptorService().registerInterceptor(new FhirPathFilterInterceptor());
+
+		myClient = myServerExtension.getFhirClient();
+		myBaseUrl = "http://localhost:" + myServerExtension.getPort();
+	}
+
+	@Test
+	public void testUnfilteredResponse() {
+		IIdType patientId = createPatient();
+
+		String responseText = myServerExtension.fhirRequest("/" + patientId.toUnqualified().getValue()).get().getBody();
+		assertThat(responseText).contains("\"system\": \"http://identifiers/1\"");
+		assertThat(responseText).contains("\"given\": [ \"Homer\", \"Jay\" ]");
+	}
+
+
+	@Test
+	public void testUnfilteredResponse_WithResponseHighlightingInterceptor() {
+		myServerExtension.getRestfulServer().registerInterceptor(new ResponseHighlighterInterceptor());
+		final IIdType patientId = createPatient();
+
+		String responseText = myServerExtension.fhirRequest("/" + patientId.toUnqualified().getValue() + "?_format=" + Constants.FORMATS_HTML_JSON)
+			.get()
+			.getBody();
+		assertThat(responseText).contains("<span class='hlTagName'>&quot;system&quot;</span>: <span class='hlQuot'>&quot;http://identifiers/1&quot;");
+		assertThat(responseText).contains("<span class='hlTagName'>&quot;given&quot;</span>: <span class='hlControl'>[</span> <span class='hlTagName'>&quot;Homer&quot;</span><span class='hlControl'>,</span> <span class='hlTagName'>&quot;Jay&quot;</span> ]</div>");
+	}
+
+	@Test
+	public void testFilteredResponse() {
+		final IIdType patientId = createPatient();
+
+		String responseText = myServerExtension.fhirRequest("/" + patientId.toUnqualified().getValue() + "?_fhirpath=Patient.identifier&_pretty=true")
+			.get()
+			.getBody();
+		assertThat(responseText).contains("\"system\": \"http://identifiers/1\"");
+		assertThat(responseText).doesNotContain("\"given\": [ \"Homer\", \"Jay\" ]");
+
+	}
+
+	@Test
+	public void testFilteredResponse_ExpressionReturnsExtension() {
+		final IIdType patientId = createPatient();
+
+		String responseText = myServerExtension.fhirRequest("/" + patientId.toUnqualified().getValue() + "?_fhirpath=Patient.extension('http://hl7.org/fhir/us/core/StructureDefinition/us-core-race')&_pretty=true")
+			.get()
+			.getBody();
+		assertThat(responseText).contains("\"url\": \"http://hl7.org/fhir/us/core/StructureDefinition/us-core-race\"");
+
+	}
+
+	@Test
+	public void testFilteredResponse_ExpressionReturnsResource() {
+		final IIdType patientId = createPatient();
+
+		String responseText = myServerExtension.fhirRequest("/" + patientId.toUnqualified().getValue() + "?_fhirpath=Patient&_pretty=true")
+			.get()
+			.getBody();
+		assertThat(responseText).contains("\"resource\": {");
+		assertThat(responseText).contains("\"system\": \"http://identifiers/1\"");
+		assertThat(responseText).contains("\"given\": [ \"Homer\", \"Jay\" ]");
+
+	}
+
+	@Test
+	public void testFilteredResponse_ExpressionIsInvalid() {
+		final IIdType patientId = createPatient();
+
+		myServerExtension.fhirRequest("/" + patientId.toUnqualified().getValue())
+				.withQueryParam("_fhirpath", "***")
+				.get()
+				.assertStatus(400)
+				.assertBodyContains("left operand to * can only have 1 value, but has 8 values");
+
+	}
+
+	@Test
+	public void testFilteredResponseBundle() {
+		createPatient();
+
+		String responseText = myServerExtension.fhirRequest("/Patient?_fhirpath=Bundle.entry.resource.as(Patient).name&_pretty=true")
+			.get()
+			.getBody();
+		assertThat(responseText).contains("      \"valueHumanName\": {\n" +
+			"        \"family\": \"Simpson\",\n" +
+			"        \"given\": [ \"Homer\", \"Jay\" ]\n" +
+			"      }");
+
+	}
+
+	@Test
+	public void testFilteredResponse_WithResponseHighlightingInterceptor() {
+		myServerExtension.getRestfulServer().registerInterceptor(new ResponseHighlighterInterceptor());
+		final IIdType patientId = createPatient();
+
+		String responseText = myServerExtension.fhirRequest("/" + patientId.toUnqualified().getValue() + "?_fhirpath=Patient.identifier&_format=" + Constants.FORMATS_HTML_JSON)
+			.get()
+			.getBody();
+		assertThat(responseText).contains("<span class='hlTagName'>&quot;system&quot;</span>: <span class='hlQuot'>&quot;http://identifiers/1&quot;");
+		assertThat(responseText).doesNotContain("<span class='hlTagName'>&quot;given&quot;</span>: <span class='hlControl'>[</span> <span class='hlTagName'>&quot;Homer&quot;</span><span class='hlControl'>,</span> <span class='hlTagName'>&quot;Jay&quot;</span> ]</div>");
+
+	}
+
+	public static Stream<Arguments> getBundleParameters() {
+		return Stream.of(
+				Arguments.of("Bundle.entry.resource.type", "valueCodeableConcept"),
+				Arguments.of("Bundle.entry.resource.ofType(Patient).identifier", "valueIdentifier"),
+				Arguments.of("Bundle.entry.resource.ofType(MedicationAdministration).effective", "valuePeriod"),
+				Arguments.of("Bundle.entry[0].resource.as(Composition).type", "valueCodeableConcept"),
+				Arguments.of("Bundle.entry[0].resource.as(Composition).subject.resolve().as(Patient).identifier", "valueIdentifier"),
+				Arguments.of("Bundle.entry[0].resource.as(Composition).section.entry.resolve().as(MedicationAdministration).effective", "valuePeriod")
+		);
+	}
+
+	@ParameterizedTest
+	@MethodSource(value = "getBundleParameters")
+	public void testFilteredResponse_withBundleComposition_returnsResult(final String theFhirPathExpression, final String expectedResult) {
+		IIdType bundle = createBundleDocument();
+
+		HttpTestResponse response = myServerExtension.fhirRequest("/" + bundle.toUnqualified().getValue() + "?_fhirpath=" + theFhirPathExpression)
+				.get();
+		Parameters parameters = response.getBodyAsResource(Parameters.class);
+		Parameters.ParametersParameterComponent parameterComponent = parameters.getParameter("result");
+		assertThat(parameterComponent).isNotNull();
+		assertThat(parameterComponent.getPart()).hasSize(2);
+		Parameters.ParametersParameterComponent resultComponent = parameterComponent.getPart().get(1);
+		assertThat(resultComponent.getName()).isEqualTo("result");
+		response.assertBodyContains(expectedResult);
+
+	}
+
+	private IIdType createPatient() {
+		Patient p = new Patient();
+		p.addExtension()
+				.setUrl("http://hl7.org/fhir/us/core/StructureDefinition/us-core-race")
+				.addExtension()
+				.setUrl("ombCategory")
+				.setValue(new Coding("urn:oid:2.16.840.1.113883.6.238", "2106-3", "White"));
+		p.setActive(true);
+		p.addIdentifier().setSystem("http://identifiers/1").setValue("value-1");
+		p.addIdentifier().setSystem("http://identifiers/2").setValue("value-2");
+		p.addName().setFamily("Simpson").addGiven("Homer").addGiven("Jay");
+		p.addName().setFamily("Simpson").addGiven("Grandpa");
+		return myClient.create().resource(p).execute().getId().withServerBase(myBaseUrl, "Patient");
+	}
+
+	private IIdType createBundleDocument() {
+		Patient patient = new Patient();
+		patient.setActive(true);
+		patient.addIdentifier().setSystem("http://identifiers/1").setValue("value-1");
+		patient.addName().setFamily("Simpson").addGiven("Homer").addGiven("Jay");
+		patient = (Patient) myClient.create().resource(patient).execute().getResource();
+
+		MedicationAdministration medicationAdministration = new MedicationAdministration();
+		medicationAdministration.setEffective(new Period().setStartElement(DateTimeType.now()));
+		medicationAdministration = (MedicationAdministration) myClient.create().resource(medicationAdministration).execute().getResource();
+
+		Bundle bundle = new Bundle();
+		bundle.setType(Bundle.BundleType.DOCUMENT);
+		Composition composition = new Composition();
+		composition.setType(new CodeableConcept().addCoding(new Coding().setCode("code").setSystem("http://example.org")));
+		bundle.addEntry().setResource(composition);
+		composition.getSubject().setReference(patient.getIdElement().getValue());
+		composition.addSection().addEntry(new Reference(medicationAdministration.getIdElement()));
+		bundle.addEntry().setResource(patient);
+		bundle.addEntry().setResource(medicationAdministration);
+
+		return myClient.create().resource(bundle).execute().getId().withServerBase(myBaseUrl, "Bundle");
+	}
+}

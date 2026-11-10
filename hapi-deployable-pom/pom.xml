@@ -1,51 +1,112 @@
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-	<modelVersion>4.0.0</modelVersion>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+			xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	 <modelVersion>4.0.0</modelVersion>
 
 	<parent>
-		<groupId>ca.uhn.hapi.fhir</groupId>
-		<artifactId>hapi-fhir</artifactId>
-		<version>2.3-SNAPSHOT</version>
-		<relativePath>../pom.xml</relativePath>
-	</parent>
+		 <groupId>ca.uhn.hapi.fhir</groupId>
+		 <artifactId>hapi-fhir</artifactId>
+		 <version>9.1.3-SNAPSHOT</version>
+
+		 <relativePath>../pom.xml</relativePath>
+	 </parent>
 
 	<artifactId>hapi-deployable-pom</artifactId>
 	<packaging>pom</packaging>
 
 	<name>HAPI FHIR - Deployable Artifact Parent POM</name>
 
-	<dependencies>
-	</dependencies>
-
 	<build>
 		<plugins>
+			<!-- Anything deployable inherits the parent spotless configuration -->
 			<plugin>
-				<groupId>org.codehaus.mojo</groupId>
-				<artifactId>animal-sniffer-maven-plugin</artifactId>
+				<groupId>com.diffplug.spotless</groupId>
+				<artifactId>spotless-maven-plugin</artifactId>
+				<inherited>true</inherited>
+			</plugin>
+			<plugin>
+				<groupId>org.basepom.maven</groupId>
+				<artifactId>duplicate-finder-maven-plugin</artifactId>
 				<executions>
 					<execution>
-						<id>check-java-api</id>
-						<phase>test</phase>
-						<inherited>true</inherited>
+						<id>default</id>
+						<phase>verify</phase>
 						<goals>
 							<goal>check</goal>
 						</goals>
-						<configuration>
-							<signature>
-								<groupId>org.codehaus.mojo.signature
-								</groupId>
-								<artifactId>java16</artifactId>
-								<version>1.1</version>
-							</signature>
-						</configuration>
+						<inherited>true</inherited>
 					</execution>
 				</executions>
-				<dependencies>
-					<dependency>
-						<groupId>org.ow2.asm</groupId>
-						<artifactId>asm-all</artifactId>
-						<version>5.0.4</version>
-					</dependency>
-				</dependencies>
+				<configuration>
+					<printEqualFiles>false</printEqualFiles>
+					<failBuildInCaseOfDifferentContentConflict>true</failBuildInCaseOfDifferentContentConflict>
+					<failBuildInCaseOfEqualContentConflict>true</failBuildInCaseOfEqualContentConflict>
+					<failBuildInCaseOfConflict>true</failBuildInCaseOfConflict>
+					<checkCompileClasspath>true</checkCompileClasspath>
+					<checkRuntimeClasspath>false</checkRuntimeClasspath>
+					<checkTestClasspath>false</checkTestClasspath>
+					<skip>false</skip>
+					<preferLocal>true</preferLocal>
+					<useResultFile>true</useResultFile>
+					<resultFileMinClasspathCount>2</resultFileMinClasspathCount>
+					<resultFile>${project.build.directory}/duplicate-finder-result.xml</resultFile>
+					<ignoredDependencies>
+						<dependency>
+							<groupId>javax.el</groupId>
+							<artifactId>javax.el-api</artifactId>
+						</dependency>
+						<dependency>
+							<groupId>javax.mail</groupId>
+							<artifactId>javax.mail-api</artifactId>
+						</dependency>
+						<dependency>
+							<groupId>commons-logging</groupId>
+							<artifactId>commons-logging</artifactId>
+						</dependency>
+						<dependency>
+							<groupId>org.springframework</groupId>
+							<artifactId>spring-jcl</artifactId>
+						</dependency>
+						<dependency>
+							<groupId>org.springframework</groupId>
+							<artifactId>spring-jcl</artifactId>
+						</dependency>
+						<dependency>
+							<groupId>com.google.code.findbugs</groupId>
+							<artifactId>annotations</artifactId>
+						</dependency>
+						<dependency>
+							<groupId>org.checkerframework</groupId>
+							<artifactId>checker-compat-qual</artifactId>
+						</dependency>
+						<dependency>
+							<groupId>org.apache.poi</groupId>
+							<artifactId>ooxml-schemas</artifactId>
+						</dependency>
+						<dependency>
+							<groupId>net.bytebuddy</groupId>
+							<artifactId>byte-buddy</artifactId>
+						</dependency>
+						<dependency>
+							<groupId>jakarta.el</groupId>
+							<artifactId>jakarta.el-api</artifactId>
+						</dependency>
+					</ignoredDependencies>
+					<ignoredResourcePatterns>
+						<!-- docker-java-transport-zerodep and httpclient5 each ship a copy of the public suffix
+						     list, and hapi-fhir-test-utilities is on the classpath of both. Remove this once a
+						     module no longer needs both on one classpath. -->
+						<ignoredResourcePattern>org/publicsuffix/list/effective_tld_names\.dat$</ignoredResourcePattern>
+						<ignoredResourcePattern>.*\.txt$</ignoredResourcePattern>
+						<ignoredResourcePattern>.*\.html$</ignoredResourcePattern>
+						<ignoredResourcePattern>schemaorg_apache_xmlbeans.*</ignoredResourcePattern>
+						<ignoredResource>classpath.index</ignoredResource>
+						<ignoredResource>javac.bat</ignoredResource>
+						<ignoredResource>about.html</ignoredResource>
+						<ignoredResource>changelog.xml</ignoredResource>
+						<ignoredResource>.*/favicon.ico$</ignoredResource>
+						<ignoredResource>Log4j-charsets.properties</ignoredResource>
+					</ignoredResourcePatterns>
+				</configuration>
 			</plugin>
 		</plugins>
 	</build>
@@ -69,11 +130,9 @@
 							<report>javadoc</report>
 						</reports>
 						<configuration>
-							<links>
-								<link>http://jamesagnew.github.io/hapi-fhir/apidocs/</link>
-								<link>https://docs.oracle.com/javaee/7/api/</link>
-							</links>
 							<additionalparam>-Xdoclint:none</additionalparam>
+							<additionalJOption>-Xdoclint:none</additionalJOption>
+							<source>17</source>
 						</configuration>
 					</reportSet>
 				</reportSets>
@@ -96,7 +155,8 @@
 							<linksource>true</linksource>
 							<verbose>false</verbose>
 							<debug>false</debug>
-							<additionalparam>-Xdoclint:none</additionalparam>
+							<additionalJOption>-Xdoclint:none</additionalJOption>
+							<source>17</source>
 						</configuration>
 						<executions>
 							<execution>
@@ -130,9 +190,11 @@
 								</goals>
 								<phase>process-sources</phase>
 								<configuration>
+									<addJavaLicenseAfterPackage>false</addJavaLicenseAfterPackage>
 									<licenseName>apache_v2</licenseName>
 									<canUpdateDescription>true</canUpdateDescription>
 									<canUpdateCopyright>true</canUpdateCopyright>
+									<trimHeaderLine>true</trimHeaderLine>
 									<roots>
 										<root>src/main/java</root>
 									</roots>
@@ -144,5 +206,4 @@
 			</build>
 		</profile>
 	</profiles>
-
 </project>

@@ -1,8 +1,27 @@
 package ca.uhn.fhir.model;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import ca.uhn.fhir.context.BaseRuntimeDeclaredChildDefinition;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.RuntimeResourceDefinition;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.util.FhirTerser;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.dstu3.model.Appointment;
+import org.hl7.fhir.dstu3.model.Claim;
+import org.hl7.fhir.dstu3.model.CodeableConcept;
+import org.hl7.fhir.dstu3.model.Element;
+import org.hl7.fhir.dstu3.model.Enumerations;
+import org.hl7.fhir.dstu3.model.HumanName;
+import org.hl7.fhir.dstu3.model.InstantType;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.hl7.fhir.dstu3.model.Practitioner;
+import org.hl7.fhir.dstu3.model.Practitioner.PractitionerQualificationComponent;
+import org.hl7.fhir.instance.model.api.IBaseElement;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -10,26 +29,9 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 
-import org.hl7.fhir.dstu3.model.Appointment;
-import org.hl7.fhir.dstu3.model.Claim;
-import org.hl7.fhir.dstu3.model.Claim.CareTeamComponent;
-import org.hl7.fhir.dstu3.model.CodeableConcept;
-import org.hl7.fhir.dstu3.model.Element;
-import org.hl7.fhir.dstu3.model.Enumerations;
-import org.hl7.fhir.dstu3.model.HumanName;
-import org.hl7.fhir.dstu3.model.Identifier;
-import org.hl7.fhir.dstu3.model.Patient;
-import org.hl7.fhir.dstu3.model.Practitioner;
-import org.hl7.fhir.dstu3.model.Practitioner.PractitionerRoleComponent;
-import org.hl7.fhir.instance.model.api.IBaseElement;
-import org.junit.AfterClass;
-import org.junit.Test;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.fail;
 
-import ca.uhn.fhir.context.BaseRuntimeDeclaredChildDefinition;
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.context.RuntimeResourceDefinition;
-import ca.uhn.fhir.util.FhirTerser;
-import ca.uhn.fhir.util.TestUtil;
 
 public class ModelDstu3Test {
 
@@ -46,18 +48,24 @@ public class ModelDstu3Test {
 	@Test
 	public void testSetters() {
 		Claim claim = new Claim();
-		claim.setIdentifier(new ArrayList<Identifier>()).setCareTeam(new ArrayList<CareTeamComponent>());
+		claim.setIdentifier(new ArrayList<>()).setCareTeam(new ArrayList<>());
+	}
+
+	@Test
+	public void testbase64BinaryName() {
+		assertEquals("base64Binary", ourCtx.getElementDefinition("base64binary").getName());
+		assertEquals("base64Binary", ourCtx.getElementDefinition("base64Binary").getName());
 	}
 
 	@Test
 	public void testModelBindings() {
 		FhirTerser t = ourCtx.newTerser();
 		RuntimeResourceDefinition def = ourCtx.getResourceDefinition(Patient.class);
-		assertEquals("http://hl7.org/fhir/ValueSet/administrative-gender", ((BaseRuntimeDeclaredChildDefinition)def.getChildByName("gender")).getBindingValueSet());
-		assertEquals("http://hl7.org/fhir/ValueSet/link-type", ((BaseRuntimeDeclaredChildDefinition)t.getDefinition(Patient.class, "Patient.link.type")).getBindingValueSet());
+		assertEquals("http://hl7.org/fhir/ValueSet/administrative-gender", ((BaseRuntimeDeclaredChildDefinition) def.getChildByName("gender")).getBindingValueSet());
+		assertEquals("http://hl7.org/fhir/ValueSet/link-type", ((BaseRuntimeDeclaredChildDefinition) t.getDefinition(Patient.class, "Patient.link.type")).getBindingValueSet());
 
 		def = ourCtx.getResourceDefinition(Appointment.class);
-		assertEquals("http://hl7.org/fhir/ValueSet/appointmentstatus", ((BaseRuntimeDeclaredChildDefinition)def.getChildByName("status")).getBindingValueSet());
+		assertEquals("http://hl7.org/fhir/ValueSet/appointmentstatus", ((BaseRuntimeDeclaredChildDefinition) def.getChildByName("status")).getBindingValueSet());
 	}
 
 	/**
@@ -66,14 +74,14 @@ public class ModelDstu3Test {
 	@Test
 	public void testDontUseBoundCodeForExampleBinding() {
 		Practitioner p = new Practitioner();
-		PractitionerRoleComponent role = p.addRole();
-		CodeableConcept roleField = role.getCode();
+		PractitionerQualificationComponent qualification = p.addQualification();
+		CodeableConcept roleField = qualification.getCode();
 		assertEquals(CodeableConcept.class, roleField.getClass());
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 
@@ -92,7 +100,7 @@ public class ModelDstu3Test {
 		try {
 			ourCtx.newXmlParser().encodeResourceToString(p);
 		} catch (ClassCastException e) {
-			assertEquals("Found instance of class java.lang.String - Did you set a field value to the incorrect type? Expected org.hl7.fhir.instance.model.api.IBase", e.getMessage());
+			assertEquals(Msg.code(1748) + "Found instance of class java.lang.String - Did you set a field value to the incorrect type? Expected org.hl7.fhir.instance.model.api.IBase", e.getMessage());
 		}
 	}
 	
@@ -146,5 +154,18 @@ public class ModelDstu3Test {
 		assertFalse(patient1.equalsDeep(patient5));
 
 	}
+
+	@Test
+	public void testInstantPrecision() {
+		new InstantType("2019-01-01T00:00:00Z");
+		new InstantType("2019-01-01T00:00:00.0Z");
+		new InstantType("2019-01-01T00:00:00.000Z");
+		try {
+			new InstantType("2019-01-01T00:00Z");
+			fail();		} catch (IllegalArgumentException e) {
+			// good
+		}
+	}
+
 
 }

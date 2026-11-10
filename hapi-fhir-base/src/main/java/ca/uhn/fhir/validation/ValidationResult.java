@@ -1,17 +1,15 @@
-package ca.uhn.fhir.validation;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,17 +17,19 @@ package ca.uhn.fhir.validation;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.validation;
 
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.util.OperationOutcomeUtil;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.instance.model.api.IBase;
+import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
 
 import java.util.Collections;
 import java.util.List;
 
-import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
-
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.rest.server.interceptor.ExceptionHandlingInterceptor;
-import ca.uhn.fhir.util.OperationOutcomeUtil;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 /**
  * Encapsulates the results of validation
@@ -38,18 +38,22 @@ import ca.uhn.fhir.util.OperationOutcomeUtil;
  * @since 0.7
  */
 public class ValidationResult {
+	public static final int ERROR_DISPLAY_LIMIT_DEFAULT = 1;
+	public static final String UNKNOWN = "(unknown)";
+	private static final String ourNewLine = System.getProperty("line.separator");
 	private final FhirContext myCtx;
 	private final boolean myIsSuccessful;
-	private final List<SingleValidationMessage> myMessages;
+	private List<SingleValidationMessage> myMessages;
+	private int myErrorDisplayLimit = ERROR_DISPLAY_LIMIT_DEFAULT;
 
 	public ValidationResult(FhirContext theCtx, List<SingleValidationMessage> theMessages) {
 		boolean successful = true;
 		myCtx = theCtx;
 		myMessages = theMessages;
 		for (SingleValidationMessage next : myMessages) {
-			next.getSeverity();
 			if (next.getSeverity() == null || next.getSeverity().ordinal() > ResultSeverityEnum.WARNING.ordinal()) {
 				successful = false;
+				break;
 			}
 		}
 		myIsSuccessful = successful;
@@ -59,12 +63,17 @@ public class ValidationResult {
 		return Collections.unmodifiableList(myMessages);
 	}
 
+	public void setMessages(List<SingleValidationMessage> theMessages) {
+		Validate.notNull(theMessages, "theMessages must not be null");
+		myMessages = theMessages;
+	}
+
 	/**
 	 * Was the validation successful (in other words, do we have no issues that are at
 	 * severity {@link ResultSeverityEnum#ERROR} or {@link ResultSeverityEnum#FATAL}. A validation
 	 * is still considered successful if it only has issues at level {@link ResultSeverityEnum#WARNING} or
 	 * lower.
-	 * 
+	 *
 	 * @return true if the validation was successful
 	 */
 	public boolean isSuccessful() {
@@ -72,25 +81,41 @@ public class ValidationResult {
 	}
 
 	private String toDescription() {
-		StringBuilder b = new StringBuilder(100);
-		if (myMessages.size() > 0) {
-			if (myMessages.get(0).getSeverity() != null) {
-				b.append(myMessages.get(0).getSeverity().name());
+		if (myMessages.isEmpty()) {
+			return "No issues";
+		}
+
+		StringBuilder b = new StringBuilder(100 * myMessages.size());
+		int shownMsgQty = Math.min(myErrorDisplayLimit, myMessages.size());
+
+		if (shownMsgQty < myMessages.size()) {
+			b.append("(showing first ")
+					.append(shownMsgQty)
+					.append(" messages out of ")
+					.append(myMessages.size())
+					.append(" total)")
+					.append(ourNewLine);
+		}
+
+		for (int i = 0; i < shownMsgQty; i++) {
+			SingleValidationMessage nextMsg = myMessages.get(i);
+			b.append(ourNewLine);
+			if (nextMsg.getSeverity() != null) {
+				b.append(nextMsg.getSeverity().name());
 				b.append(" - ");
 			}
-			b.append(myMessages.get(0).getMessage());
+			b.append(nextMsg.getMessage());
 			b.append(" - ");
-			b.append(myMessages.get(0).getLocationString());
-		} else {
-			b.append("No issues");
+			b.append(nextMsg.getLocationString());
 		}
+
 		return b.toString();
 	}
 
 	/**
 	 * @deprecated Use {@link #toOperationOutcome()} instead since this method returns a view.
-	 *             {@link #toOperationOutcome()} is identical to this method, but has a more suitable name so this method
-	 *             will be removed at some point.
+	 *    {@link #toOperationOutcome()} is identical to this method, but has a more suitable name so this method
+	 * 	will be removed at some point.
 	 */
 	@Deprecated
 	public IBaseOperationOutcome getOperationOutcome() {
@@ -98,33 +123,133 @@ public class ValidationResult {
 	}
 
 	/**
-	 * Create an OperationOutcome resource which contains all of the messages found as a result of this validation
+	 * Create an OperationOutcome resource which contains all the messages found as a result of this validation
 	 */
 	public IBaseOperationOutcome toOperationOutcome() {
-		IBaseOperationOutcome oo = (IBaseOperationOutcome) myCtx.getResourceDefinition("OperationOutcome").newInstance();
+		IBaseOperationOutcome oo = (IBaseOperationOutcome)
+				myCtx.getResourceDefinition("OperationOutcome").newInstance();
+		populateOperationOutcome(oo);
+		return oo;
+	}
+
+	/**
+	 * Populate an operation outcome with the results of the validation
+	 */
+	public void populateOperationOutcome(IBaseOperationOutcome theOperationOutcome) {
 		for (SingleValidationMessage next : myMessages) {
-			String location;
-			if (isNotBlank(next.getLocationString())) {
-				location = next.getLocationString();
-			} else if (next.getLocationLine() != null || next.getLocationCol() != null) {
-				location = "Line[" + next.getLocationLine() + "] Col[" + next.getLocationCol() + "]";
-			} else {
-				location = null;
+			Integer locationLine = next.getLocationLine();
+			Integer locationCol = next.getLocationCol();
+			String location = next.getLocationString();
+			ResultSeverityEnum issueSeverity = next.getSeverity();
+			String message = next.getMessage();
+			String messageId = next.getMessageId();
+
+			if (next.getSliceMessages() == null) {
+				addIssueToOperationOutcome(
+						theOperationOutcome, location, locationLine, locationCol, issueSeverity, message, messageId);
+				continue;
 			}
-			String severity = next.getSeverity() != null ? next.getSeverity().getCode() : null;
-			OperationOutcomeUtil.addIssue(myCtx, oo, severity, next.getMessage(), location, ExceptionHandlingInterceptor.PROCESSING);
-		}
+
+			/*
+			 * Occasionally the validator will return these lists of "slice messages"
+			 * which happen when validating rules associated with a specific slice in
+			 * a profile.
+			 */
+			for (String nextSliceMessage : next.getSliceMessages()) {
+				String combinedMessage = message + " - " + nextSliceMessage;
+				addIssueToOperationOutcome(
+						theOperationOutcome,
+						location,
+						locationLine,
+						locationCol,
+						issueSeverity,
+						combinedMessage,
+						messageId);
+			}
+		} // for
 
 		if (myMessages.isEmpty()) {
 			String message = myCtx.getLocalizer().getMessage(ValidationResult.class, "noIssuesDetected");
-			OperationOutcomeUtil.addIssue(myCtx, oo, "information", message, null, "informational");
+			OperationOutcomeUtil.addIssue(myCtx, theOperationOutcome, "information", message, null, "informational");
+		}
+	}
+
+	/**
+	 * Adds a repetition of <code>OperationOutcome.issue</code> to an
+	 * <code>OperationOutcome</code> instance.
+	 *
+	 * @param theOperationOutcome   The OperationOutcome to add to
+	 * @param theLocationExpression The FHIRPath expression describing where the issue was found
+	 * @param theLocationLine       The line number in the source where the issue was found
+	 * @param theLocationCol        The column number in the source where the issue was found
+	 * @param theIssueSeverity      The severity code (must be a valid value for <code>OperationOutcome.issue.severity</code>
+	 * @param theMessage            The validation message
+	 * @param theMessageId          The java validator message ID
+	 */
+	private void addIssueToOperationOutcome(
+			IBaseOperationOutcome theOperationOutcome,
+			String theLocationExpression,
+			Integer theLocationLine,
+			Integer theLocationCol,
+			ResultSeverityEnum theIssueSeverity,
+			String theMessage,
+			String theMessageId) {
+
+		String severity = theIssueSeverity != null ? theIssueSeverity.getCode() : null;
+		IBase issue = OperationOutcomeUtil.addIssueWithMessageId(
+				myCtx,
+				theOperationOutcome,
+				severity,
+				theMessage,
+				theMessageId,
+				theLocationExpression,
+				Constants.OO_INFOSTATUS_PROCESSING);
+
+		if (theLocationLine != null || theLocationCol != null) {
+			String unknown = UNKNOWN;
+			String line = unknown;
+			if (theLocationLine != null && theLocationLine != -1) {
+				line = theLocationLine.toString();
+			}
+			String col = unknown;
+			if (theLocationCol != null && theLocationCol != -1) {
+				col = theLocationCol.toString();
+			}
+			if (!unknown.equals(line) || !unknown.equals(col)) {
+				OperationOutcomeUtil.addIssueLineExtensionToIssue(myCtx, issue, line);
+				OperationOutcomeUtil.addIssueColExtensionToIssue(myCtx, issue, col);
+				String locationString = "Line[" + line + "] Col[" + col + "]";
+				OperationOutcomeUtil.addLocationToIssue(myCtx, issue, locationString);
+			}
 		}
 
-		return oo;
+		if (isNotBlank(theLocationExpression)) {
+			OperationOutcomeUtil.addExpressionToIssue(myCtx, issue, theLocationExpression);
+		}
+
+		if (isNotBlank(theMessageId)) {
+			OperationOutcomeUtil.addMessageIdExtensionToIssue(myCtx, issue, theMessageId);
+		}
 	}
 
 	@Override
 	public String toString() {
-		return "ValidationResult{" + "messageCount=" + myMessages.size() + ", isSuccessful=" + myIsSuccessful + ", description='" + toDescription() + '\'' + '}';
+		return "ValidationResult{" + "messageCount=" + myMessages.size() + ", isSuccessful=" + myIsSuccessful
+				+ ", description='" + toDescription() + '\'' + '}';
+	}
+
+	/**
+	 * @since 5.5.0
+	 */
+	public FhirContext getContext() {
+		return myCtx;
+	}
+
+	public int getErrorDisplayLimit() {
+		return myErrorDisplayLimit;
+	}
+
+	public void setErrorDisplayLimit(int theErrorDisplayLimit) {
+		myErrorDisplayLimit = theErrorDisplayLimit;
 	}
 }

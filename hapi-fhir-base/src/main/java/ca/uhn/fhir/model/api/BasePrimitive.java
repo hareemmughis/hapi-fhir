@@ -1,17 +1,15 @@
-package ca.uhn.fhir.model.api;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,26 +17,27 @@ package ca.uhn.fhir.model.api;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.model.api;
+
+import ca.uhn.fhir.parser.DataFormatException;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.builder.EqualsBuilder;
+import org.apache.commons.lang3.builder.HashCodeBuilder;
 
 import java.io.Externalizable;
 import java.io.IOException;
 import java.io.ObjectInput;
 import java.io.ObjectOutput;
 
-import org.apache.commons.lang3.builder.EqualsBuilder;
-import org.apache.commons.lang3.builder.HashCodeBuilder;
-import org.hl7.fhir.instance.model.api.IPrimitiveType;
-
-import ca.uhn.fhir.parser.DataFormatException;
-
-public abstract class BasePrimitive<T> extends BaseIdentifiableElement implements IPrimitiveDatatype<T>, Externalizable {
+public abstract class BasePrimitive<T> extends BaseIdentifiableElement
+		implements IPrimitiveDatatype<T>, Externalizable {
 
 	private T myCoercedValue;
 	private String myStringValue;
 
 	/**
 	 * Subclasses must override to convert a "coerced" value into an encoded one.
-	 * 
+	 *
 	 * @param theValue
 	 *           Will not be null
 	 * @return May return null if the value does not correspond to anything
@@ -83,7 +82,7 @@ public abstract class BasePrimitive<T> extends BaseIdentifiableElement implement
 
 	/**
 	 * Subclasses must override to convert an encoded representation of this datatype into a "coerced" one
-	 * 
+	 *
 	 * @param theValue
 	 *           Will not be null
 	 * @return May return null if the value does not correspond to anything
@@ -131,5 +130,10 @@ public abstract class BasePrimitive<T> extends BaseIdentifiableElement implement
 	@Override
 	public void writeExternal(ObjectOutput theOut) throws IOException {
 		theOut.writeObject(getValueAsString());
+	}
+
+	@Override
+	public boolean hasValue() {
+		return !StringUtils.isBlank(getValueAsString());
 	}
 }

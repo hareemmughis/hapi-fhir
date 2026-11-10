@@ -1,17 +1,15 @@
-package ca.uhn.fhir.parser;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,41 +17,7 @@ package ca.uhn.fhir.parser;
  * limitations under the License.
  * #L%
  */
-import static org.apache.commons.lang3.StringUtils.isBlank;
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
-
-import java.io.IOException;
-import java.io.Reader;
-import java.io.StringReader;
-import java.io.StringWriter;
-import java.io.Writer;
-import java.lang.reflect.Modifier;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.IdentityHashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
-import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.Validate;
-import org.hl7.fhir.instance.model.api.IAnyResource;
-import org.hl7.fhir.instance.model.api.IBase;
-import org.hl7.fhir.instance.model.api.IBaseCoding;
-import org.hl7.fhir.instance.model.api.IBaseElement;
-import org.hl7.fhir.instance.model.api.IBaseHasExtensions;
-import org.hl7.fhir.instance.model.api.IBaseHasModifierExtensions;
-import org.hl7.fhir.instance.model.api.IBaseMetaType;
-import org.hl7.fhir.instance.model.api.IBaseReference;
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.hl7.fhir.instance.model.api.IDomainResource;
-import org.hl7.fhir.instance.model.api.IIdType;
-import org.hl7.fhir.instance.model.api.IPrimitiveType;
+package ca.uhn.fhir.parser;
 
 import ca.uhn.fhir.context.BaseRuntimeChildDefinition;
 import ca.uhn.fhir.context.BaseRuntimeDeclaredChildDefinition;
@@ -63,227 +27,198 @@ import ca.uhn.fhir.context.BaseRuntimeElementDefinition.ChildTypeEnum;
 import ca.uhn.fhir.context.ConfigurationException;
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.context.ParserOptions;
 import ca.uhn.fhir.context.RuntimeChildChoiceDefinition;
 import ca.uhn.fhir.context.RuntimeChildContainedResources;
 import ca.uhn.fhir.context.RuntimeChildNarrativeDefinition;
 import ca.uhn.fhir.context.RuntimeResourceDefinition;
-import ca.uhn.fhir.model.api.Bundle;
+import ca.uhn.fhir.i18n.Msg;
 import ca.uhn.fhir.model.api.IIdentifiableElement;
 import ca.uhn.fhir.model.api.IResource;
 import ca.uhn.fhir.model.api.ISupportsUndeclaredExtensions;
 import ca.uhn.fhir.model.api.ResourceMetadataKeyEnum;
 import ca.uhn.fhir.model.api.Tag;
 import ca.uhn.fhir.model.api.TagList;
-import ca.uhn.fhir.model.primitive.IdDt;
-import ca.uhn.fhir.rest.server.Constants;
+import ca.uhn.fhir.parser.path.EncodeContextPath;
+import ca.uhn.fhir.rest.api.Constants;
 import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.util.BundleUtil;
+import ca.uhn.fhir.util.CollectionUtil;
+import ca.uhn.fhir.util.FhirTerser;
+import ca.uhn.fhir.util.MetaUtil;
+import ca.uhn.fhir.util.ResourceUtil;
+import ca.uhn.fhir.util.UrlUtil;
+import com.google.common.base.Charsets;
+import jakarta.annotation.Nullable;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.io.output.StringBuilderWriter;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Validate;
+import org.apache.commons.lang3.tuple.Pair;
+import org.hl7.fhir.instance.model.api.IBase;
+import org.hl7.fhir.instance.model.api.IBaseBundle;
+import org.hl7.fhir.instance.model.api.IBaseCoding;
+import org.hl7.fhir.instance.model.api.IBaseElement;
+import org.hl7.fhir.instance.model.api.IBaseHasExtensions;
+import org.hl7.fhir.instance.model.api.IBaseHasModifierExtensions;
+import org.hl7.fhir.instance.model.api.IBaseMetaType;
+import org.hl7.fhir.instance.model.api.IBaseReference;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.io.StringReader;
+import java.io.Writer;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.apache.commons.lang3.StringUtils.startsWith;
+
+@SuppressWarnings("WeakerAccess")
 public abstract class BaseParser implements IParser {
+
+	/**
+	 * Any resources that were created by the parser (i.e. by parsing a serialized resource) will have
+	 * a {@link IBaseResource#getUserData(String) user data} property with this key.
+	 *
+	 * @since 5.0.0
+	 */
+	public static final String RESOURCE_CREATED_BY_PARSER =
+			BaseParser.class.getName() + "_" + "RESOURCE_CREATED_BY_PARSER";
 
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BaseParser.class);
 
-	private ContainedResources myContainedResources;
+	private static final Set<String> notEncodeForContainedResource =
+			new HashSet<>(Arrays.asList("security", "versionId", "lastUpdated"));
 
-	private FhirContext myContext;
-	private Set<String> myDontEncodeElements;
-	private boolean myDontEncodeElementsIncludesStars;
-	private Set<String> myEncodeElements;
-	private Set<String> myEncodeElementsAppliesToResourceTypes;
-	private boolean myEncodeElementsIncludesStars;
+	private boolean myEncodeElementsAppliesToChildResourcesOnly;
+	private final FhirContext myContext;
+	private Collection<String> myDontEncodeElements;
+	private Collection<String> myEncodeElements;
 	private IIdType myEncodeForceResourceId;
 	private IParserErrorHandler myErrorHandler;
 	private boolean myOmitResourceId;
 	private List<Class<? extends IBaseResource>> myPreferTypes;
 	private String myServerBaseUrl;
 	private Boolean myStripVersionsFromReferences;
+	private Boolean myOverrideResourceIdWithBundleEntryFullUrl;
 	private boolean mySummaryMode;
 	private boolean mySuppressNarratives;
 	private Set<String> myDontStripVersionsFromReferencesAtPaths;
-
 	/**
 	 * Constructor
-	 * 
-	 * @param theParserErrorHandler
 	 */
 	public BaseParser(FhirContext theContext, IParserErrorHandler theParserErrorHandler) {
 		myContext = theContext;
 		myErrorHandler = theParserErrorHandler;
 	}
 
-	protected Iterable<CompositeChildElement> compositeChildIterator(IBase theCompositeElement, final boolean theContainedResource, final CompositeChildElement theParent) {
-
-		BaseRuntimeElementCompositeDefinition<?> elementDef = (BaseRuntimeElementCompositeDefinition<?>) myContext.getElementDefinition(theCompositeElement.getClass());
-		final List<BaseRuntimeChildDefinition> children = elementDef.getChildrenAndExtension();
-
-		return new Iterable<BaseParser.CompositeChildElement>() {
-			@Override
-			public Iterator<CompositeChildElement> iterator() {
-
-				return new Iterator<CompositeChildElement>() {
-					private Iterator<? extends BaseRuntimeChildDefinition> myChildrenIter;
-					private Boolean myHasNext = null;
-					private CompositeChildElement myNext;
-
-					/**
-					 * Constructor
-					 */
-					{
-						myChildrenIter = children.iterator();
-					}
-
-					@Override
-					public boolean hasNext() {
-						if (myHasNext != null) {
-							return myHasNext;
-						}
-
-						myNext = null;
-						do {
-							if (myChildrenIter.hasNext() == false) {
-								myHasNext = Boolean.FALSE;
-								return false;
-							}
-
-							myNext = new CompositeChildElement(theParent, myChildrenIter.next());
-
-							/*
-							 * There are lots of reasons we might skip encoding a particular child
-							 */
-							if (myNext.getDef().getElementName().equals("id")) {
-								myNext = null;
-							} else if (!myNext.shouldBeEncoded()) {
-								myNext = null;
-							} else if (isSummaryMode() && !myNext.getDef().isSummary()) {
-								myNext = null;
-							} else if (myNext.getDef() instanceof RuntimeChildNarrativeDefinition) {
-								if (isSuppressNarratives() || isSummaryMode()) {
-									myNext = null;
-								} else if (theContainedResource) {
-									myNext = null;
-								}
-							} else if (myNext.getDef() instanceof RuntimeChildContainedResources) {
-								if (theContainedResource) {
-									myNext = null;
-								}
-							}
-
-						} while (myNext == null);
-
-						myHasNext = true;
-						return true;
-					}
-
-					@Override
-					public CompositeChildElement next() {
-						if (myHasNext == null) {
-							if (!hasNext()) {
-								throw new IllegalStateException();
-							}
-						}
-						CompositeChildElement retVal = myNext;
-						myNext = null;
-						myHasNext = null;
-						return retVal;
-					}
-
-					@Override
-					public void remove() {
-						throw new UnsupportedOperationException();
-					}
-				};
-			}
-		};
+	protected FhirContext getContext() {
+		return myContext;
 	}
 
-	private void containResourcesForEncoding(ContainedResources theContained, IBaseResource theResource, IBaseResource theTarget) {
-		Set<String> allIds = new HashSet<String>();
-		Map<String, IBaseResource> existingIdToContainedResource = null;
+	@Override
+	public IParser setDontEncodeElements(Collection<String> theDontEncodeElements) {
+		myDontEncodeElements = theDontEncodeElements;
+		return this;
+	}
 
-		if (theTarget instanceof IResource) {
-			List<? extends IResource> containedResources = ((IResource) theTarget).getContained().getContainedResources();
-			for (IResource next : containedResources) {
-				String nextId = next.getId().getValue();
-				if (StringUtils.isNotBlank(nextId)) {
-					if (!nextId.startsWith("#")) {
-						nextId = '#' + nextId;
-					}
-					allIds.add(nextId);
-					if (existingIdToContainedResource == null) {
-						existingIdToContainedResource = new HashMap<String, IBaseResource>();
-					}
-					existingIdToContainedResource.put(nextId, next);
-				}
-			}
-		} else if (theTarget instanceof IDomainResource) {
-			List<? extends IAnyResource> containedResources = ((IDomainResource) theTarget).getContained();
-			for (IAnyResource next : containedResources) {
-				String nextId = next.getIdElement().getValue();
-				if (StringUtils.isNotBlank(nextId)) {
-					if (!nextId.startsWith("#")) {
-						nextId = '#' + nextId;
-					}
-					allIds.add(nextId);
-					if (existingIdToContainedResource == null) {
-						existingIdToContainedResource = new HashMap<String, IBaseResource>();
-					}
-					existingIdToContainedResource.put(nextId, next);
-				}
-			}
-		} else {
-			// no resources to contain
-		}
+	@Override
+	public IParser setEncodeElements(Set<String> theEncodeElements) {
+		myEncodeElements = theEncodeElements;
+		return this;
+	}
 
-		{
-			List<IBaseReference> allElements = myContext.newTerser().getAllPopulatedChildElementsOfType(theResource, IBaseReference.class);
-			for (IBaseReference next : allElements) {
-				IBaseResource resource = next.getResource();
-				if (resource != null) {
-					if (resource.getIdElement().isEmpty() || resource.getIdElement().isLocal()) {
-						if (theContained.getResourceId(resource) != null) {
-							// Prevent infinite recursion if there are circular loops in the contained resources
+	protected Iterable<CompositeChildElement> compositeChildIterator(
+			IBase theCompositeElement,
+			final boolean theContainedResource,
+			final CompositeChildElement theParent,
+			EncodeContext theEncodeContext) {
+		BaseRuntimeElementCompositeDefinition<?> elementDef = (BaseRuntimeElementCompositeDefinition<?>)
+				myContext.getElementDefinition(theCompositeElement.getClass());
+		return theEncodeContext
+				.getCompositeChildrenCache()
+				.computeIfAbsent(new Key(elementDef, theContainedResource, theParent, theEncodeContext), (k) -> {
+					final List<BaseRuntimeChildDefinition> children = elementDef.getChildrenAndExtension();
+					final List<CompositeChildElement> result = new ArrayList<>(children.size());
+
+					for (final BaseRuntimeChildDefinition child : children) {
+						CompositeChildElement myNext = new CompositeChildElement(theParent, child, theEncodeContext);
+
+						/*
+						 * There are lots of reasons we might skip encoding a particular child
+						 */
+						if (myNext.getDef().getElementName().equals("id")) {
 							continue;
+						} else if (!myNext.shouldBeEncoded(theContainedResource)) {
+							continue;
+						} else if (myNext.getDef() instanceof RuntimeChildNarrativeDefinition) {
+							if (isSuppressNarratives() || isSummaryMode()) {
+								continue;
+							}
+						} else if (myNext.getDef() instanceof RuntimeChildContainedResources) {
+							if (theContainedResource) {
+								continue;
+							}
 						}
-						theContained.addContained(resource);
-						if (resource.getIdElement().isLocal() && existingIdToContainedResource != null) {
-							existingIdToContainedResource.remove(resource.getIdElement().getValue());
-						}
-					} else {
-						continue;
+						result.add(myNext);
 					}
-
-					containResourcesForEncoding(theContained, resource, theTarget);
-				} else if (next.getReferenceElement().isLocal()) {
-					if (existingIdToContainedResource != null) {
-						IBaseResource potentialTarget = existingIdToContainedResource.remove(next.getReferenceElement().getValue());
-						if (potentialTarget != null) {
-							theContained.addContained(next.getReferenceElement(), potentialTarget);
-							containResourcesForEncoding(theContained, potentialTarget, theTarget);
-						}
-					}
-				}
-			}
-		}
-
+					return result;
+				});
 	}
 
-	protected void containResourcesForEncoding(IBaseResource theResource) {
-		ContainedResources contained = new ContainedResources();
-		containResourcesForEncoding(contained, theResource, theResource);
-		myContainedResources = contained;
+	/**
+	 * We add the reference to the input resources to ensure it doesn't get
+	 * overwritten if it wasn't there.
+	 * The resource is being mutated anyways, so this is fine.
+	 *
+	 * We need to maintain the reference as an internal reference (ie,
+	 * preceded by an #) because otherwise later transactions cannot
+	 * process the resource (since the reference will not be set).
+	 */
+	private void setReference(IBaseReference theReference, String theText) {
+		theReference.setReference(theText);
 	}
 
-	private String determineReferenceText(IBaseReference theRef, CompositeChildElement theCompositeChildElement) {
+	private String determineReferenceText(
+			IBaseReference theRef,
+			CompositeChildElement theCompositeChildElement,
+			IBaseResource theResource,
+			EncodeContext theContext) {
 		IIdType ref = theRef.getReferenceElement();
 		if (isBlank(ref.getIdPart())) {
 			String reference = ref.getValue();
 			if (theRef.getResource() != null) {
-				IIdType containedId = getContainedResources().getResourceId(theRef.getResource());
+				IIdType containedId = theContext.getContainedResources().getResourceId(theRef.getResource());
+				IIdType previouslyContainedId =
+						theContext.getContainedResources().getPreviouslyContainedResourceId(theRef.getResource());
 				if (containedId != null && !containedId.isEmpty()) {
 					if (containedId.isLocal()) {
 						reference = containedId.getValue();
 					} else {
 						reference = "#" + containedId.getValue();
+						setReference(theRef, reference);
 					}
+				} else if (previouslyContainedId != null) {
+					reference = "#" + previouslyContainedId.getValue();
+					theContext.getContainedResources().addContained(previouslyContainedId, theRef.getResource());
+					setReference(theRef, reference);
 				} else {
 					IIdType refId = theRef.getResource().getIdElement();
 					if (refId != null) {
@@ -292,9 +227,11 @@ public abstract class BaseParser implements IParser {
 								reference = refId.getValue();
 							} else {
 								if (!refId.hasResourceType()) {
-									refId = refId.withResourceType(myContext.getResourceDefinition(theRef.getResource()).getName());
+									refId = refId.withResourceType(myContext
+											.getResourceDefinition(theRef.getResource())
+											.getName());
 								}
-								if (isStripVersionsFromReferences(theCompositeChildElement)) {
+								if (isStripVersionsFromReferences(theCompositeChildElement, theResource)) {
 									reference = refId.toVersionless().getValue();
 								} else {
 									reference = refId.getValue();
@@ -306,111 +243,141 @@ public abstract class BaseParser implements IParser {
 			}
 			return reference;
 		} else {
-			if (!ref.hasResourceType() && !ref.isLocal() && theRef.getResource() != null) {
-				ref = ref.withResourceType(myContext.getResourceDefinition(theRef.getResource()).getName());
-			}
-			if (isNotBlank(myServerBaseUrl) && StringUtils.equals(myServerBaseUrl, ref.getBaseUrl())) {
-				if (isStripVersionsFromReferences(theCompositeChildElement)) {
-					return ref.toUnqualifiedVersionless().getValue();
-				} else {
-					return ref.toUnqualified().getValue();
-				}
-			} else {
-				if (isStripVersionsFromReferences(theCompositeChildElement)) {
-					return ref.toVersionless().getValue();
-				} else {
-					return ref.getValue();
-				}
+			if (!isValidInternalReference(theContext, ref)) {
+				myErrorHandler.invalidInternalReference(
+						ParseLocation.fromElementName(
+								theCompositeChildElement.getDef().getElementName()),
+						ref.getValue());
 			}
 		}
-	}
-
-	private boolean isStripVersionsFromReferences(CompositeChildElement theCompositeChildElement) {
-		Boolean stripVersionsFromReferences = myStripVersionsFromReferences;
-		if (stripVersionsFromReferences != null) {
-			return stripVersionsFromReferences;
+		if (!ref.hasResourceType() && !ref.isLocal() && theRef.getResource() != null) {
+			ref = ref.withResourceType(
+					myContext.getResourceDefinition(theRef.getResource()).getName());
 		}
-
-		if (myContext.getParserOptions().isStripVersionsFromReferences() == false) {
-			return false;
-		}
-
-		Set<String> dontStripVersionsFromReferencesAtPaths = myDontStripVersionsFromReferencesAtPaths;
-		if (dontStripVersionsFromReferencesAtPaths != null) {
-			if (dontStripVersionsFromReferencesAtPaths.isEmpty() == false && theCompositeChildElement.anyPathMatches(dontStripVersionsFromReferencesAtPaths)) {
-				return false;
+		if (isNotBlank(myServerBaseUrl) && StringUtils.equals(myServerBaseUrl, ref.getBaseUrl())) {
+			if (isStripVersionsFromReferences(theCompositeChildElement, theResource)) {
+				return ref.toUnqualifiedVersionless().getValue();
 			}
+			return ref.toUnqualified().getValue();
 		}
-
-		dontStripVersionsFromReferencesAtPaths = myContext.getParserOptions().getDontStripVersionsFromReferencesAtPaths();
-		if (dontStripVersionsFromReferencesAtPaths.isEmpty() == false && theCompositeChildElement.anyPathMatches(dontStripVersionsFromReferencesAtPaths)) {
-			return false;
+		if (isStripVersionsFromReferences(theCompositeChildElement, theResource)) {
+			return ref.toVersionless().getValue();
 		}
-
-		return true;
+		return ref.getValue();
 	}
 
-	protected abstract void doEncodeBundleToWriter(Bundle theBundle, Writer theWriter) throws IOException, DataFormatException;
-
-	protected abstract void doEncodeResourceToWriter(IBaseResource theResource, Writer theWriter) throws IOException, DataFormatException;
-
-	protected abstract <T extends IBaseResource> T doParseResource(Class<T> theResourceType, Reader theReader) throws DataFormatException;
-
-	@Override
-	public String encodeBundleToString(Bundle theBundle) throws DataFormatException {
-		if (theBundle == null) {
-			throw new NullPointerException("Bundle can not be null");
-		}
-		StringWriter stringWriter = new StringWriter();
-		try {
-			encodeBundleToWriter(theBundle, stringWriter);
-		} catch (IOException e) {
-			throw new Error("Encountered IOException during write to string - This should not happen!");
-		}
-
-		return stringWriter.toString();
+	private boolean isValidInternalReference(EncodeContext theContext, IIdType ref) {
+		// a # is a reference to the container resource.
+		return !ref.isLocal()
+				|| ref.getValue().equals("#")
+				|| theContext.getContainedResources().referenceMatchesAContainedResource(ref);
 	}
 
-	@Override
-	public final void encodeBundleToWriter(Bundle theBundle, Writer theWriter) throws IOException, DataFormatException {
-		Validate.notNull(theBundle, "theBundle must not be null");
-		Validate.notNull(theWriter, "theWriter must not be null");
-		doEncodeBundleToWriter(theBundle, theWriter);
+	protected abstract void doEncodeResourceToWriter(
+			IBaseResource theResource, Writer theWriter, EncodeContext theEncodeContext)
+			throws IOException, DataFormatException;
+
+	protected void doEncodeToWriter(IBase theElement, Writer theWriter, EncodeContext theEncodeContext)
+			throws IOException, DataFormatException {
+		throw new InternalErrorException(Msg.code(2363) + "This parser does not support encoding non-resource values");
 	}
+
+	protected abstract <T extends IBaseResource> T doParseResource(Class<T> theResourceType, Reader theReader)
+			throws DataFormatException;
 
 	@Override
 	public String encodeResourceToString(IBaseResource theResource) throws DataFormatException {
-		Writer stringWriter = new StringWriter();
+		Writer stringWriter = new StringBuilderWriter();
 		try {
 			encodeResourceToWriter(theResource, stringWriter);
 		} catch (IOException e) {
-			throw new Error("Encountered IOException during write to string - This should not happen!");
+			throw new Error(
+					Msg.code(1828) + "Encountered IOException during write to string - This should not happen!", e);
 		}
 		return stringWriter.toString();
 	}
 
 	@Override
-	public final void encodeResourceToWriter(IBaseResource theResource, Writer theWriter) throws IOException, DataFormatException {
+	public final void encodeResourceToWriter(IBaseResource theResource, Writer theWriter)
+			throws IOException, DataFormatException {
+		EncodeContext encodeContext =
+				new EncodeContext(this, myContext.getParserOptions(), new FhirTerser.ContainedResources());
+		encodeResourceToWriter(theResource, theWriter, encodeContext);
+	}
+
+	@Override
+	public String encodeToString(IBase theElement) throws DataFormatException {
+		Writer stringWriter = new StringBuilderWriter();
+		try {
+			encodeToWriter(theElement, stringWriter);
+		} catch (IOException e) {
+			throw new Error(
+					Msg.code(2364) + "Encountered IOException during write to string - This should not happen!", e);
+		}
+		return stringWriter.toString();
+	}
+
+	@Override
+	public void encodeToWriter(IBase theElement, Writer theWriter) throws DataFormatException, IOException {
+		if (theElement instanceof IBaseResource) {
+			encodeResourceToWriter((IBaseResource) theElement, theWriter);
+		} else if (theElement instanceof IPrimitiveType) {
+			theWriter.write(((IPrimitiveType<?>) theElement).getValueAsString());
+		} else {
+			EncodeContext encodeContext =
+					new EncodeContext(this, myContext.getParserOptions(), new FhirTerser.ContainedResources());
+			encodeToWriter(theElement, theWriter, encodeContext);
+		}
+	}
+
+	@Override
+	public void parseInto(Reader theSource, IBase theTarget) throws IOException {
+		if (theTarget instanceof IPrimitiveType) {
+			((IPrimitiveType<?>) theTarget).setValueAsString(IOUtils.toString(theSource));
+		} else {
+			doParseIntoComplexStructure(theSource, theTarget);
+		}
+	}
+
+	protected void doParseIntoComplexStructure(Reader theSource, IBase theTarget) {
+		throw new InternalErrorException(
+				Msg.code(2633) + "This " + getEncoding() + " parser does not support parsing non-resource values");
+	}
+
+	protected void encodeResourceToWriter(IBaseResource theResource, Writer theWriter, EncodeContext theEncodeContext)
+			throws IOException {
 		Validate.notNull(theResource, "theResource can not be null");
 		Validate.notNull(theWriter, "theWriter can not be null");
+		Validate.notNull(theEncodeContext, "theEncodeContext can not be null");
 
 		if (theResource.getStructureFhirVersionEnum() != myContext.getVersion().getVersion()) {
-			throw new IllegalArgumentException(
-					"This parser is for FHIR version " + myContext.getVersion().getVersion() + " - Can not encode a structure for version " + theResource.getStructureFhirVersionEnum());
+			throw new IllegalArgumentException(Msg.code(1829) + "This parser is for FHIR version "
+					+ myContext.getVersion().getVersion() + " - Can not encode a structure for version "
+					+ theResource.getStructureFhirVersionEnum());
 		}
 
-		doEncodeResourceToWriter(theResource, theWriter);
+		String resourceName =
+				myContext.getElementDefinition(theResource.getClass()).getName();
+		theEncodeContext.pushPath(resourceName, true);
+
+		doEncodeResourceToWriter(theResource, theWriter, theEncodeContext);
+
+		theEncodeContext.popPath();
 	}
 
-	@Override
-	public String encodeTagListToString(TagList theTagList) {
-		Writer stringWriter = new StringWriter();
-		try {
-			encodeTagListToWriter(theTagList, stringWriter);
-		} catch (IOException e) {
-			throw new Error("Encountered IOException during write to string - This should not happen!");
-		}
-		return stringWriter.toString();
+	protected void encodeToWriter(IBase theElement, Writer theWriter, EncodeContext theEncodeContext)
+			throws IOException {
+		Validate.notNull(theElement, "theElement can not be null");
+		Validate.notNull(theWriter, "theWriter can not be null");
+		Validate.notNull(theEncodeContext, "theEncodeContext can not be null");
+
+		BaseRuntimeElementDefinition<?> def = myContext.getElementDefinition(theElement.getClass());
+		String elementName = def.getName();
+		theEncodeContext.pushPath(elementName, true);
+
+		doEncodeToWriter(theElement, theWriter, theEncodeContext);
+
+		theEncodeContext.popPath();
 	}
 
 	private void filterCodingsWithNoCodeOrSystem(List<? extends IBaseCoding> tagList) {
@@ -449,7 +416,8 @@ public abstract class BaseParser implements IParser {
 			 */
 			BaseRuntimeElementDefinition<?> elementDef = myContext.getElementDefinition(type);
 			if (elementDef.getName().equals("code")) {
-				Class<? extends IBase> type2 = myContext.getElementDefinition("code").getImplementingClass();
+				Class<? extends IBase> type2 =
+						myContext.getElementDefinition("code").getImplementingClass();
 				childDef = theChild.getChildElementDefinitionByDatatype(type2);
 				childName = theChild.getChildNameByDatatype(type2);
 			}
@@ -460,7 +428,8 @@ public abstract class BaseParser implements IParser {
 				Class<?> nextSuperType = theValue.getClass();
 				while (IBase.class.isAssignableFrom(nextSuperType) && childDef == null) {
 					if (Modifier.isAbstract(nextSuperType.getModifiers()) == false) {
-						BaseRuntimeElementDefinition<?> def = myContext.getElementDefinition((Class<? extends IBase>) nextSuperType);
+						BaseRuntimeElementDefinition<?> def =
+								myContext.getElementDefinition((Class<? extends IBase>) nextSuperType);
 						Class<?> nextChildType = def.getImplementingClass();
 						childDef = theChild.getChildElementDefinitionByDatatype((Class<? extends IBase>) nextChildType);
 						childName = theChild.getChildNameByDatatype((Class<? extends IBase>) nextChildType);
@@ -489,24 +458,9 @@ public abstract class BaseParser implements IParser {
 		return elementId;
 	}
 
-	ContainedResources getContainedResources() {
-		return myContainedResources;
-	}
-
-	/**
-	 * See {@link #setEncodeElements(Set)}
-	 */
 	@Override
-	public Set<String> getEncodeElements() {
-		return myEncodeElements;
-	}
-
-	/**
-	 * See {@link #setEncodeElementsAppliesToResourceTypes(Set)}
-	 */
-	@Override
-	public Set<String> getEncodeElementsAppliesToResourceTypes() {
-		return myEncodeElementsAppliesToResourceTypes;
+	public Set<String> getDontStripVersionsFromReferencesAtPaths() {
+		return myDontStripVersionsFromReferencesAtPaths;
 	}
 
 	@Override
@@ -514,15 +468,43 @@ public abstract class BaseParser implements IParser {
 		return myEncodeForceResourceId;
 	}
 
+	@Override
+	public BaseParser setEncodeForceResourceId(IIdType theEncodeForceResourceId) {
+		myEncodeForceResourceId = theEncodeForceResourceId;
+		return this;
+	}
+
 	protected IParserErrorHandler getErrorHandler() {
 		return myErrorHandler;
 	}
 
-	protected TagList getMetaTagsForEncoding(IResource theIResource) {
+	protected List<Map.Entry<ResourceMetadataKeyEnum<?>, Object>> getExtensionMetadataKeys(IResource resource) {
+		List<Map.Entry<ResourceMetadataKeyEnum<?>, Object>> extensionMetadataKeys = new ArrayList<>();
+		for (Map.Entry<ResourceMetadataKeyEnum<?>, Object> entry :
+				resource.getResourceMetadata().entrySet()) {
+			if (entry.getKey() instanceof ResourceMetadataKeyEnum.ExtensionResourceMetadataKey) {
+				extensionMetadataKeys.add(entry);
+			}
+		}
+
+		return extensionMetadataKeys;
+	}
+
+	protected String getExtensionUrl(final String extensionUrl) {
+		String url = extensionUrl;
+		if (StringUtils.isNotBlank(extensionUrl) && StringUtils.isNotBlank(myServerBaseUrl)) {
+			url = !UrlUtil.isValid(extensionUrl) && extensionUrl.startsWith("/")
+					? myServerBaseUrl + extensionUrl
+					: extensionUrl;
+		}
+		return url;
+	}
+
+	protected TagList getMetaTagsForEncoding(IResource theIResource, EncodeContext theEncodeContext) {
 		TagList tags = ResourceMetadataKeyEnum.TAG_LIST.get(theIResource);
-		if (shouldAddSubsettedTag()) {
+		if (shouldAddSubsettedTag(theEncodeContext)) {
 			tags = new TagList(tags);
-			tags.add(new Tag(Constants.TAG_SUBSETTED_SYSTEM, Constants.TAG_SUBSETTED_CODE, subsetDescription()));
+			tags.add(new Tag(getSubsettedCodeSystem(), Constants.TAG_SUBSETTED_CODE, subsetDescription()));
 		}
 
 		return tags;
@@ -533,51 +515,73 @@ public abstract class BaseParser implements IParser {
 		return myPreferTypes;
 	}
 
-	@SuppressWarnings("deprecation")
-	protected <T extends IPrimitiveType<String>> List<T> getProfileTagsForEncoding(IBaseResource theResource, List<T> theProfiles) {
-		switch (myContext.getAddProfileTagWhenEncoding()) {
-		case NEVER:
-			return theProfiles;
-		case ONLY_FOR_CUSTOM:
-			RuntimeResourceDefinition resDef = myContext.getResourceDefinition(theResource);
-			if (resDef.isStandardType()) {
-				return theProfiles;
+	@Override
+	public void setPreferTypes(List<Class<? extends IBaseResource>> thePreferTypes) {
+		if (thePreferTypes != null) {
+			ArrayList<Class<? extends IBaseResource>> types = new ArrayList<>();
+			for (Class<? extends IBaseResource> next : thePreferTypes) {
+				if (Modifier.isAbstract(next.getModifiers()) == false) {
+					types.add(next);
+				}
 			}
-			break;
-		case ALWAYS:
-			break;
+			myPreferTypes = Collections.unmodifiableList(types);
+		} else {
+			myPreferTypes = thePreferTypes;
+		}
+	}
+
+	@SuppressWarnings("deprecation")
+	protected <T extends IPrimitiveType<String>> List<T> getProfileTagsForEncoding(
+			IBaseResource theResource, List<T> theProfiles) {
+		switch (myContext.getAddProfileTagWhenEncoding()) {
+			case NEVER:
+				return theProfiles;
+			case ONLY_FOR_CUSTOM:
+				RuntimeResourceDefinition resDef = myContext.getResourceDefinition(theResource);
+				if (resDef.isStandardType()) {
+					return theProfiles;
+				}
+				break;
+			case ALWAYS:
+				break;
 		}
 
-		if (myContext.getVersion().getVersion().isNewerThan(FhirVersionEnum.DSTU1)) {
-			RuntimeResourceDefinition nextDef = myContext.getResourceDefinition(theResource);
-			String profile = nextDef.getResourceProfile(myServerBaseUrl);
-			if (isNotBlank(profile)) {
-				for (T next : theProfiles) {
-					if (profile.equals(next.getValue())) {
-						return theProfiles;
-					}
+		RuntimeResourceDefinition nextDef = myContext.getResourceDefinition(theResource);
+		String profile = nextDef.getResourceProfile(myServerBaseUrl);
+		if (isNotBlank(profile)) {
+			for (T next : theProfiles) {
+				if (profile.equals(next.getValue())) {
+					return theProfiles;
 				}
-
-				List<T> newList = new ArrayList<T>();
-				newList.addAll(theProfiles);
-
-				BaseRuntimeElementDefinition<?> idElement = myContext.getElementDefinition("id");
-				@SuppressWarnings("unchecked")
-				T newId = (T) idElement.newInstance();
-				newId.setValue(profile);
-
-				newList.add(newId);
-				return newList;
 			}
+
+			List<T> newList = new ArrayList<>(theProfiles);
+
+			BaseRuntimeElementDefinition<?> idElement = myContext.getElementDefinition("id");
+			@SuppressWarnings("unchecked")
+			T newId = (T) idElement.newInstance();
+			newId.setValue(profile);
+
+			newList.add(newId);
+			return newList;
 		}
 
 		return theProfiles;
 	}
 
+	protected String getServerBaseUrl() {
+		return myServerBaseUrl;
+	}
+
+	@Override
+	public Boolean getStripVersionsFromReferences() {
+		return myStripVersionsFromReferences;
+	}
+
 	/**
 	 * If set to <code>true</code> (default is <code>false</code>), narratives will not be included in the encoded
 	 * values.
-	 * 
+	 *
 	 * @deprecated Use {@link #isSuppressNarratives()}
 	 */
 	@Deprecated
@@ -585,9 +589,22 @@ public abstract class BaseParser implements IParser {
 		return mySuppressNarratives;
 	}
 
-	protected boolean isChildContained(BaseRuntimeElementDefinition<?> childDef, boolean theIncludedResource) {
-		return (childDef.getChildType() == ChildTypeEnum.CONTAINED_RESOURCES || childDef.getChildType() == ChildTypeEnum.CONTAINED_RESOURCE_LIST) && getContainedResources().isEmpty() == false
+	protected boolean isChildContained(
+			BaseRuntimeElementDefinition<?> childDef, boolean theIncludedResource, EncodeContext theContext) {
+		return (childDef.getChildType() == ChildTypeEnum.CONTAINED_RESOURCES
+						|| childDef.getChildType() == ChildTypeEnum.CONTAINED_RESOURCE_LIST)
+				&& theContext.getContainedResources().isEmpty() == false
 				&& theIncludedResource == false;
+	}
+
+	@Override
+	public boolean isEncodeElementsAppliesToChildResourcesOnly() {
+		return myEncodeElementsAppliesToChildResourcesOnly;
+	}
+
+	@Override
+	public void setEncodeElementsAppliesToChildResourcesOnly(boolean theEncodeElementsAppliesToChildResourcesOnly) {
+		myEncodeElementsAppliesToChildResourcesOnly = theEncodeElementsAppliesToChildResourcesOnly;
 	}
 
 	@Override
@@ -595,9 +612,48 @@ public abstract class BaseParser implements IParser {
 		return myOmitResourceId;
 	}
 
-	@Override
-	public Boolean getStripVersionsFromReferences() {
-		return myStripVersionsFromReferences;
+	private boolean isOverrideResourceIdWithBundleEntryFullUrl() {
+		Boolean overrideResourceIdWithBundleEntryFullUrl = myOverrideResourceIdWithBundleEntryFullUrl;
+		if (overrideResourceIdWithBundleEntryFullUrl != null) {
+			return overrideResourceIdWithBundleEntryFullUrl;
+		}
+
+		return myContext.getParserOptions().isOverrideResourceIdWithBundleEntryFullUrl();
+	}
+
+	private boolean isStripVersionsFromReferences(
+			CompositeChildElement theCompositeChildElement, IBaseResource theResource) {
+
+		if (theResource != null) {
+			Set<String> autoVersionReferencesAtPathExtensions = MetaUtil.getAutoVersionReferencesAtPath(
+					theResource.getMeta(), myContext.getResourceType(theResource));
+
+			if (!autoVersionReferencesAtPathExtensions.isEmpty()
+					&& theCompositeChildElement.anyPathMatches(autoVersionReferencesAtPathExtensions)) {
+				return false;
+			}
+		}
+
+		Boolean stripVersionsFromReferences = myStripVersionsFromReferences;
+		if (stripVersionsFromReferences != null) {
+			return stripVersionsFromReferences;
+		}
+
+		if (!myContext.getParserOptions().isStripVersionsFromReferences()) {
+			return false;
+		}
+
+		Set<String> dontStripVersionsFromReferencesAtPaths = getDontStripVersionsFromReferencesAtPaths();
+		if (dontStripVersionsFromReferencesAtPaths != null
+				&& !dontStripVersionsFromReferencesAtPaths.isEmpty()
+				&& theCompositeChildElement.anyPathMatches(dontStripVersionsFromReferencesAtPaths)) {
+			return false;
+		}
+
+		dontStripVersionsFromReferencesAtPaths =
+				myContext.getParserOptions().getDontStripVersionsFromReferencesAtPaths();
+		return dontStripVersionsFromReferencesAtPaths.isEmpty()
+				|| !theCompositeChildElement.anyPathMatches(dontStripVersionsFromReferencesAtPaths);
 	}
 
 	@Override
@@ -608,7 +664,7 @@ public abstract class BaseParser implements IParser {
 	/**
 	 * If set to <code>true</code> (default is <code>false</code>), narratives will not be included in the encoded
 	 * values.
-	 * 
+	 *
 	 * @since 1.2
 	 */
 	public boolean isSuppressNarratives() {
@@ -616,70 +672,93 @@ public abstract class BaseParser implements IParser {
 	}
 
 	@Override
-	public Bundle parseBundle(Reader theReader) {
-		if (myContext.getVersion().getVersion() == FhirVersionEnum.DSTU2_HL7ORG) {
-			throw new IllegalStateException("Can't parse DSTU1 (Atom) bundle in HL7.org DSTU2 mode. Use parseResource(Bundle.class, foo) instead.");
-		}
-		return parseBundle(null, theReader);
+	public IBaseResource parseResource(InputStream theInputStream) throws DataFormatException {
+		return parseResource(new InputStreamReader(theInputStream, Charsets.UTF_8));
 	}
 
 	@Override
-	public Bundle parseBundle(String theXml) throws ConfigurationException, DataFormatException {
-		StringReader reader = new StringReader(theXml);
-		return parseBundle(reader);
+	public <T extends IBaseResource> T parseResource(Class<T> theResourceType, InputStream theInputStream)
+			throws DataFormatException {
+		return parseResource(theResourceType, new InputStreamReader(theInputStream, Constants.CHARSET_UTF8));
 	}
 
 	@Override
-	public <T extends IBaseResource> T parseResource(Class<T> theResourceType, Reader theReader) throws DataFormatException {
+	public <T extends IBaseResource> T parseResource(Class<T> theResourceType, Reader theReader)
+			throws DataFormatException {
 
 		/*
 		 * We do this so that the context can verify that the structure is for
 		 * the correct FHIR version
 		 */
+		Reader readerToUse = theReader;
 		if (theResourceType != null) {
 			myContext.getResourceDefinition(theResourceType);
+			if (myContext.isStoreResourceJson()) {
+				readerToUse = new PreserveStringReader(theReader);
+			}
 		}
 
 		// Actually do the parse
-		T retVal = doParseResource(theResourceType, theReader);
+		T retVal = doParseResource(theResourceType, readerToUse);
+
+		if (theResourceType != null && myContext.isStoreResourceJson()) {
+			PreserveStringReader psr = (PreserveStringReader) readerToUse;
+			if (psr.hasString()) {
+				try {
+					ResourceUtil.addRawDataToResource(retVal, getEncoding(), psr.toString());
+					psr.close();
+				} catch (IOException ex) {
+					ourLog.warn(
+							"Unable to store raw JSON on resource. This won't affect functionality, but validation will use the resource itself, which may result in different validation results than a $validation operation.",
+							ex);
+				}
+			}
+		}
 
 		RuntimeResourceDefinition def = myContext.getResourceDefinition(retVal);
 		if ("Bundle".equals(def.getName())) {
 
-			BaseRuntimeChildDefinition entryChild = def.getChildByName("entry");
-			BaseRuntimeElementCompositeDefinition<?> entryDef = (BaseRuntimeElementCompositeDefinition<?>) entryChild.getChildByName("entry");
-			List<IBase> entries = entryChild.getAccessor().getValues(retVal);
-			if (entries != null) {
-				for (IBase nextEntry : entries) {
-
-					/**
-					 * If Bundle.entry.fullUrl is populated, set the resource ID to that
-					 */
-					// TODO: should emit a warning and maybe notify the error handler if the resource ID doesn't match the
-					// fullUrl idPart
-					BaseRuntimeChildDefinition fullUrlChild = entryDef.getChildByName("fullUrl");
-					if (fullUrlChild == null) {
-						continue; // TODO: remove this once the data model in tinder plugin catches up to 1.2
-					}
-					List<IBase> fullUrl = fullUrlChild.getAccessor().getValues(nextEntry);
-					if (fullUrl != null && !fullUrl.isEmpty()) {
-						IPrimitiveType<?> value = (IPrimitiveType<?>) fullUrl.get(0);
-						if (value.isEmpty() == false) {
-							List<IBase> entryResources = entryDef.getChildByName("resource").getAccessor().getValues(nextEntry);
-							if (entryResources != null && entryResources.size() > 0) {
-								IBaseResource res = (IBaseResource) entryResources.get(0);
-								String versionId = res.getIdElement().getVersionIdPart();
-								res.setId(value.getValueAsString());
-								if (isNotBlank(versionId) && res.getIdElement().hasVersionIdPart() == false) {
-									res.setId(res.getIdElement().withVersion(versionId));
+			if (isOverrideResourceIdWithBundleEntryFullUrl()) {
+				BundleUtil.processEntries(myContext, (IBaseBundle) retVal, t -> {
+					String fullUrl = t.getFullUrl();
+					if (fullUrl != null) {
+						IBaseResource resource = t.getResource();
+						if (resource != null) {
+							IIdType resourceId = resource.getIdElement();
+							if (isBlank(resourceId.getValue())) {
+								resourceId.setValue(fullUrl);
+							} else {
+								if (fullUrl.startsWith("urn:")
+										&& fullUrl.length()
+												> resourceId.getIdPart().length()
+										&& fullUrl.charAt(fullUrl.length()
+														- resourceId.getIdPart().length()
+														- 1)
+												== ':'
+										&& fullUrl.endsWith(resourceId.getIdPart())) {
+									resourceId.setValue(fullUrl);
+								} else {
+									IIdType fullUrlId = myContext.getVersion().newIdType();
+									fullUrlId.setValue(fullUrl);
+									if (myContext.getVersion().getVersion().isOlderThan(FhirVersionEnum.DSTU3)) {
+										IIdType newId = fullUrlId;
+										if (!newId.hasVersionIdPart() && resourceId.hasVersionIdPart()) {
+											newId = newId.withVersion(resourceId.getVersionIdPart());
+										}
+										resourceId.setValue(newId.getValue());
+									} else if (StringUtils.equals(fullUrlId.getIdPart(), resourceId.getIdPart())) {
+										if (fullUrlId.hasBaseUrl()) {
+											IIdType newResourceId = resourceId.withServerBase(
+													fullUrlId.getBaseUrl(), resourceId.getResourceType());
+											resourceId.setValue(newResourceId.getValue());
+										}
+									}
 								}
 							}
 						}
 					}
-
-				}
+				});
 			}
-
 		}
 
 		return retVal;
@@ -688,8 +767,9 @@ public abstract class BaseParser implements IParser {
 	@SuppressWarnings("cast")
 	@Override
 	public <T extends IBaseResource> T parseResource(Class<T> theResourceType, String theMessageString) {
+		Validate.notNull(theMessageString, "theMessageString must not be null");
 		StringReader reader = new StringReader(theMessageString);
-		return (T) parseResource(theResourceType, reader);
+		return parseResource(theResourceType, reader);
 	}
 
 	@Override
@@ -702,13 +782,12 @@ public abstract class BaseParser implements IParser {
 		return parseResource(null, theMessageString);
 	}
 
-	@Override
-	public TagList parseTagList(String theString) {
-		return parseTagList(new StringReader(theString));
-	}
-
-	protected List<? extends IBase> preProcessValues(BaseRuntimeChildDefinition theMetaChildUncast, IBaseResource theResource, List<? extends IBase> theValues,
-			CompositeChildElement theCompositeChildElement) {
+	protected List<? extends IBase> preProcessValues(
+			BaseRuntimeChildDefinition theMetaChildUncast,
+			IBaseResource theResource,
+			List<? extends IBase> theValues,
+			CompositeChildElement theCompositeChildElement,
+			EncodeContext theEncodeContext) {
 		if (myContext.getVersion().getVersion().isRi()) {
 
 			/*
@@ -728,9 +807,10 @@ public abstract class BaseParser implements IParser {
 
 				IBaseMetaType metaValue = (IBaseMetaType) theValues.get(0);
 				try {
-					metaValue = (IBaseMetaType) metaValue.getClass().getMethod("copy").invoke(metaValue);
+					metaValue = (IBaseMetaType)
+							metaValue.getClass().getMethod("copy").invoke(metaValue);
 				} catch (Exception e) {
-					throw new InternalErrorException("Failed to duplicate meta", e);
+					throw new InternalErrorException(Msg.code(1830) + "Failed to duplicate meta", e);
 				}
 
 				if (isBlank(metaValue.getVersionId())) {
@@ -742,7 +822,8 @@ public abstract class BaseParser implements IParser {
 				filterCodingsWithNoCodeOrSystem(metaValue.getTag());
 				filterCodingsWithNoCodeOrSystem(metaValue.getSecurity());
 
-				List<? extends IPrimitiveType<String>> newProfileList = getProfileTagsForEncoding(theResource, metaValue.getProfile());
+				List<? extends IPrimitiveType<String>> newProfileList =
+						getProfileTagsForEncoding(theResource, metaValue.getProfile());
 				List<? extends IPrimitiveType<String>> oldProfileList = metaValue.getProfile();
 				if (oldProfileList != newProfileList) {
 					oldProfileList.clear();
@@ -753,10 +834,10 @@ public abstract class BaseParser implements IParser {
 					}
 				}
 
-				if (shouldAddSubsettedTag()) {
+				if (shouldAddSubsettedTag(theEncodeContext)) {
 					IBaseCoding coding = metaValue.addTag();
 					coding.setCode(Constants.TAG_SUBSETTED_CODE);
-					coding.setSystem(Constants.TAG_SUBSETTED_SYSTEM);
+					coding.setSystem(getSubsettedCodeSystem());
 					coding.setDisplay(subsetDescription());
 				}
 
@@ -777,17 +858,19 @@ public abstract class BaseParser implements IParser {
 			 */
 			if (next instanceof IBaseReference) {
 				IBaseReference nextRef = (IBaseReference) next;
-				String refText = determineReferenceText(nextRef, theCompositeChildElement);
+				String refText =
+						determineReferenceText(nextRef, theCompositeChildElement, theResource, theEncodeContext);
 				if (!StringUtils.equals(refText, nextRef.getReferenceElement().getValue())) {
 
 					if (retVal == theValues) {
-						retVal = new ArrayList<IBase>(theValues);
+						retVal = new ArrayList<>(theValues);
 					}
-					IBaseReference newRef = (IBaseReference) myContext.getElementDefinition(nextRef.getClass()).newInstance();
+					IBaseReference newRef = (IBaseReference)
+							myContext.getElementDefinition(nextRef.getClass()).newInstance();
 					myContext.newTerser().cloneInto(nextRef, newRef, true);
 					newRef.setReference(refText);
-					retVal.set(i, newRef);
 
+					retVal.set(i, newRef);
 				}
 			}
 		}
@@ -795,79 +878,12 @@ public abstract class BaseParser implements IParser {
 		return retVal;
 	}
 
-	@Override
-	public void setDontEncodeElements(Set<String> theDontEncodeElements) {
-		myDontEncodeElementsIncludesStars = false;
-		if (theDontEncodeElements == null || theDontEncodeElements.isEmpty()) {
-			myDontEncodeElements = null;
+	private String getSubsettedCodeSystem() {
+		if (myContext.getVersion().getVersion().isEqualOrNewerThan(FhirVersionEnum.R4)) {
+			return Constants.TAG_SUBSETTED_SYSTEM_R4;
 		} else {
-			myDontEncodeElements = theDontEncodeElements;
-			for (String next : theDontEncodeElements) {
-				if (next.startsWith("*.")) {
-					myDontEncodeElementsIncludesStars = true;
-				}
-			}
+			return Constants.TAG_SUBSETTED_SYSTEM_DSTU3;
 		}
-	}
-
-	@Override
-	public void setEncodeElements(Set<String> theEncodeElements) {
-		myEncodeElementsIncludesStars = false;
-		if (theEncodeElements == null || theEncodeElements.isEmpty()) {
-			myEncodeElements = null;
-		} else {
-			myEncodeElements = theEncodeElements;
-			for (String next : theEncodeElements) {
-				if (next.startsWith("*.")) {
-					myEncodeElementsIncludesStars = true;
-				}
-			}
-		}
-	}
-
-	@Override
-	public void setEncodeElementsAppliesToResourceTypes(Set<String> theEncodeElementsAppliesToResourceTypes) {
-		if (theEncodeElementsAppliesToResourceTypes == null || theEncodeElementsAppliesToResourceTypes.isEmpty()) {
-			myEncodeElementsAppliesToResourceTypes = null;
-		} else {
-			myEncodeElementsAppliesToResourceTypes = theEncodeElementsAppliesToResourceTypes;
-		}
-	}
-
-	@Override
-	public BaseParser setEncodeForceResourceId(IIdType theEncodeForceResourceId) {
-		myEncodeForceResourceId = theEncodeForceResourceId;
-		return this;
-	}
-
-	@Override
-	public IParser setOmitResourceId(boolean theOmitResourceId) {
-		myOmitResourceId = theOmitResourceId;
-		return this;
-	}
-
-	@Override
-	public IParser setParserErrorHandler(IParserErrorHandler theErrorHandler) {
-		Validate.notNull(theErrorHandler, "theErrorHandler must not be null");
-		myErrorHandler = theErrorHandler;
-		return this;
-	}
-
-	@Override
-	public void setPreferTypes(List<Class<? extends IBaseResource>> thePreferTypes) {
-		myPreferTypes = thePreferTypes;
-	}
-
-	@Override
-	public IParser setServerBaseUrl(String theUrl) {
-		myServerBaseUrl = isNotBlank(theUrl) ? theUrl : null;
-		return this;
-	}
-
-	@Override
-	public IParser setStripVersionsFromReferences(Boolean theStripVersionsFromReferences) {
-		myStripVersionsFromReferences = theStripVersionsFromReferences;
-		return this;
 	}
 
 	@Override
@@ -888,14 +904,40 @@ public abstract class BaseParser implements IParser {
 		} else if (thePaths instanceof HashSet) {
 			myDontStripVersionsFromReferencesAtPaths = (Set<String>) ((HashSet<String>) thePaths).clone();
 		} else {
-			myDontStripVersionsFromReferencesAtPaths = new HashSet<String>(thePaths);
+			myDontStripVersionsFromReferencesAtPaths = new HashSet<>(thePaths);
 		}
 		return this;
 	}
 
 	@Override
-	public Set<String> getDontStripVersionsFromReferencesAtPaths() {
-		return myDontStripVersionsFromReferencesAtPaths;
+	public IParser setOmitResourceId(boolean theOmitResourceId) {
+		myOmitResourceId = theOmitResourceId;
+		return this;
+	}
+
+	@Override
+	public IParser setOverrideResourceIdWithBundleEntryFullUrl(Boolean theOverrideResourceIdWithBundleEntryFullUrl) {
+		myOverrideResourceIdWithBundleEntryFullUrl = theOverrideResourceIdWithBundleEntryFullUrl;
+		return this;
+	}
+
+	@Override
+	public IParser setParserErrorHandler(IParserErrorHandler theErrorHandler) {
+		Validate.notNull(theErrorHandler, "theErrorHandler must not be null");
+		myErrorHandler = theErrorHandler;
+		return this;
+	}
+
+	@Override
+	public IParser setServerBaseUrl(String theUrl) {
+		myServerBaseUrl = isNotBlank(theUrl) ? theUrl : null;
+		return this;
+	}
+
+	@Override
+	public IParser setStripVersionsFromReferences(Boolean theStripVersionsFromReferences) {
+		myStripVersionsFromReferences = theStripVersionsFromReferences;
+		return this;
 	}
 
 	@Override
@@ -910,20 +952,44 @@ public abstract class BaseParser implements IParser {
 		return this;
 	}
 
-	protected boolean shouldAddSubsettedTag() {
-		return isSummaryMode() || isSuppressNarratives() || getEncodeElements() != null;
+	protected boolean shouldAddSubsettedTag(EncodeContext theEncodeContext) {
+		if (isSummaryMode()) {
+			return true;
+		}
+		if (isSuppressNarratives()) {
+			return true;
+		}
+		if (theEncodeContext.myEncodeElementPaths != null) {
+			if (isEncodeElementsAppliesToChildResourcesOnly()
+					&& theEncodeContext.getResourcePath().size() < 2) {
+				return false;
+			}
+
+			String currentResourceName = theEncodeContext
+					.getResourcePath()
+					.get(theEncodeContext.getResourcePath().size() - 1)
+					.getName();
+			return theEncodeContext.myEncodeElementsAppliesToResourceTypes == null
+					|| theEncodeContext.myEncodeElementsAppliesToResourceTypes.contains(currentResourceName);
+		}
+
+		return false;
 	}
 
-	protected boolean shouldEncodeResourceId(IBaseResource theResource) {
+	protected boolean shouldEncodeResourceId(IBaseResource theResource, EncodeContext theEncodeContext) {
 		boolean retVal = true;
-		if (isOmitResourceId()) {
+		if (isOmitResourceId() && theEncodeContext.getPath().size() == 1) {
 			retVal = false;
 		} else {
-			if (myDontEncodeElements != null) {
-				String resourceName = myContext.getResourceDefinition(theResource).getName();
-				if (myDontEncodeElements.contains(resourceName + ".id")) {
+			if (theEncodeContext.myDontEncodeElementPaths != null) {
+				String resourceName = myContext.getResourceType(theResource);
+				if (theEncodeContext.myDontEncodeElementPaths.stream()
+						.anyMatch(t -> t.equalsPath(resourceName + ".id"))) {
 					retVal = false;
-				} else if (myDontEncodeElements.contains("*.id")) {
+				} else if (theEncodeContext.myDontEncodeElementPaths.stream().anyMatch(t -> t.equalsPath("*.id"))) {
+					retVal = false;
+				} else if (theEncodeContext.getResourcePath().size() == 1
+						&& theEncodeContext.myDontEncodeElementPaths.stream().anyMatch(t -> t.equalsPath("id"))) {
 					retVal = false;
 				}
 			}
@@ -934,13 +1000,21 @@ public abstract class BaseParser implements IParser {
 	/**
 	 * Used for DSTU2 only
 	 */
-	protected boolean shouldEncodeResourceMeta(IResource theResource) {
-		if (myDontEncodeElements != null) {
-			String resourceName = myContext.getResourceDefinition(theResource).getName();
-			if (myDontEncodeElements.contains(resourceName + ".meta")) {
+	protected boolean shouldEncodeResourceMeta(IResource theResource, EncodeContext theEncodeContext) {
+		return shouldEncodePath(theResource, "meta", theEncodeContext);
+	}
+
+	/**
+	 * Used for DSTU2 only
+	 */
+	protected boolean shouldEncodePath(IResource theResource, String thePath, EncodeContext theEncodeContext) {
+		if (theEncodeContext.myDontEncodeElementPaths != null) {
+			String resourceName = myContext.getResourceType(theResource);
+			if (theEncodeContext.myDontEncodeElementPaths.stream()
+					.anyMatch(t -> t.equalsPath(resourceName + "." + thePath))) {
 				return false;
-			} else if (myDontEncodeElements.contains("*.meta")) {
-				return false;
+			} else {
+				return theEncodeContext.myDontEncodeElementPaths.stream().noneMatch(t -> t.equalsPath("*." + thePath));
 			}
 		}
 		return true;
@@ -950,53 +1024,63 @@ public abstract class BaseParser implements IParser {
 		return "Resource encoded in summary mode";
 	}
 
-	protected void throwExceptionForUnknownChildType(BaseRuntimeChildDefinition nextChild, Class<? extends IBase> theType) {
+	protected void throwExceptionForUnknownChildType(
+			BaseRuntimeChildDefinition nextChild, Class<? extends IBase> theType) {
 		if (nextChild instanceof BaseRuntimeDeclaredChildDefinition) {
 			StringBuilder b = new StringBuilder();
-			b.append(((BaseRuntimeDeclaredChildDefinition) nextChild).getElementName());
+			b.append(nextChild.getElementName());
 			b.append(" has type ");
 			b.append(theType.getName());
 			b.append(" but this is not a valid type for this element");
 			if (nextChild instanceof RuntimeChildChoiceDefinition) {
 				RuntimeChildChoiceDefinition choice = (RuntimeChildChoiceDefinition) nextChild;
-				b.append(" - Expected one of: " + choice.getValidChildTypes());
+				b.append(" - Expected one of: ").append(choice.getValidChildTypes());
 			}
-			throw new DataFormatException(b.toString());
+			throw new DataFormatException(Msg.code(1831) + b);
 		}
-		throw new DataFormatException(nextChild + " has no child of type " + theType);
+		throw new DataFormatException(Msg.code(1832) + nextChild + " has no child of type " + theType);
 	}
 
-	protected static <T> List<T> extractMetadataListNotNull(IResource resource, ResourceMetadataKeyEnum<List<T>> key) {
-		List<? extends T> securityLabels = key.get(resource);
-		if (securityLabels == null) {
-			securityLabels = Collections.emptyList();
+	protected boolean shouldEncodeResource(String theName, EncodeContext theEncodeContext) {
+		if (theEncodeContext.myDontEncodeElementPaths != null) {
+			for (EncodeContextPath next : theEncodeContext.myDontEncodeElementPaths) {
+				if (next.equalsPath(theName)) {
+					return false;
+				}
+			}
 		}
-		return new ArrayList<T>(securityLabels);
+		return true;
 	}
 
-	static boolean hasExtensions(IBase theElement) {
-		if (theElement instanceof ISupportsUndeclaredExtensions) {
-			ISupportsUndeclaredExtensions res = (ISupportsUndeclaredExtensions) theElement;
-			if (res.getUndeclaredExtensions().size() > 0 || res.getUndeclaredModifierExtensions().size() > 0) {
-				return true;
+	protected void containResourcesInReferences(IBaseResource theResource, EncodeContext theContext) {
+
+		/*
+		 * If a UUID is present in Bundle.entry.fullUrl but no value is present
+		 * in Bundle.entry.resource.id, the resource has a discrete identity which
+		 * should be copied into the resource ID. It will not be serialized in
+		 * Resource.id because it's a placeholder/UUID value, but its presence there
+		 * informs the serializer that we don't need to contain this resource.
+		 */
+		if (theResource instanceof IBaseBundle) {
+			List<Pair<String, IBaseResource>> entries =
+					BundleUtil.getBundleEntryFullUrlsAndResources(getContext(), (IBaseBundle) theResource);
+			for (Pair<String, IBaseResource> nextEntry : entries) {
+				String fullUrl = nextEntry.getKey();
+				IBaseResource resource = nextEntry.getValue();
+				if (startsWith(fullUrl, "urn:")) {
+					if (resource != null && resource.getIdElement().getValue() == null) {
+						resource.getIdElement().setValue(fullUrl);
+					}
+				}
 			}
 		}
-		if (theElement instanceof IBaseHasExtensions) {
-			IBaseHasExtensions res = (IBaseHasExtensions) theElement;
-			if (res.hasExtension()) {
-				return true;
-			}
-		}
-		if (theElement instanceof IBaseHasModifierExtensions) {
-			IBaseHasModifierExtensions res = (IBaseHasModifierExtensions) theElement;
-			if (res.hasModifierExtension()) {
-				return true;
-			}
-		}
-		return false;
+
+		FhirTerser.ContainedResources containedResources =
+				getContext().newTerser().containResources(theResource, theContext.getContainedResources(), false);
+		theContext.setContainedResources(containedResources);
 	}
 
-	class ChildNameAndDef {
+	static class ChildNameAndDef {
 
 		private final BaseRuntimeElementDefinition<?> myChildDef;
 		private final String myChildName;
@@ -1013,38 +1097,103 @@ public abstract class BaseParser implements IParser {
 		public String getChildName() {
 			return myChildName;
 		}
+	}
 
+	/**
+	 * EncodeContext is a shared state object that is passed around the
+	 * encode process
+	 */
+	class EncodeContext extends EncodeContextPath {
+		private final Map<Key, List<BaseParser.CompositeChildElement>> myCompositeChildrenCache = new HashMap<>();
+		private final List<EncodeContextPath> myEncodeElementPaths;
+		private final Set<String> myEncodeElementsAppliesToResourceTypes;
+		private final List<EncodeContextPath> myDontEncodeElementPaths;
+		private FhirTerser.ContainedResources myContainedResources;
+
+		public EncodeContext(
+				BaseParser theParser,
+				ParserOptions theParserOptions,
+				FhirTerser.ContainedResources theContainedResources) {
+			Collection<String> encodeElements = theParser.myEncodeElements;
+			Collection<String> dontEncodeElements = theParser.myDontEncodeElements;
+			if (isSummaryMode()) {
+				encodeElements = CollectionUtil.nullSafeUnion(
+						encodeElements, theParserOptions.getEncodeElementsForSummaryMode());
+				dontEncodeElements = CollectionUtil.nullSafeUnion(
+						dontEncodeElements, theParserOptions.getDontEncodeElementsForSummaryMode());
+			}
+
+			if (encodeElements == null || encodeElements.isEmpty()) {
+				myEncodeElementPaths = null;
+			} else {
+				myEncodeElementPaths =
+						encodeElements.stream().map(EncodeContextPath::new).collect(Collectors.toList());
+			}
+			if (dontEncodeElements == null || dontEncodeElements.isEmpty()) {
+				myDontEncodeElementPaths = null;
+			} else {
+				myDontEncodeElementPaths =
+						dontEncodeElements.stream().map(EncodeContextPath::new).collect(Collectors.toList());
+			}
+
+			myContainedResources = theContainedResources;
+
+			myEncodeElementsAppliesToResourceTypes =
+					ParserUtil.determineApplicableResourceTypesForTerserPaths(myEncodeElementPaths);
+		}
+
+		private Map<Key, List<BaseParser.CompositeChildElement>> getCompositeChildrenCache() {
+			return myCompositeChildrenCache;
+		}
+
+		public FhirTerser.ContainedResources getContainedResources() {
+			return myContainedResources;
+		}
+
+		public void setContainedResources(FhirTerser.ContainedResources theContainedResources) {
+			myContainedResources = theContainedResources;
+		}
 	}
 
 	protected class CompositeChildElement {
 		private final BaseRuntimeChildDefinition myDef;
 		private final CompositeChildElement myParent;
 		private final RuntimeResourceDefinition myResDef;
+		private final EncodeContext myEncodeContext;
 
-		public CompositeChildElement(CompositeChildElement theParent, BaseRuntimeChildDefinition theDef) {
+		public CompositeChildElement(
+				CompositeChildElement theParent,
+				@Nullable BaseRuntimeChildDefinition theDef,
+				EncodeContext theEncodeContext) {
 			myDef = theDef;
 			myParent = theParent;
 			myResDef = null;
+			myEncodeContext = theEncodeContext;
 
 			if (ourLog.isTraceEnabled()) {
 				if (theParent != null) {
 					StringBuilder path = theParent.buildPath();
 					if (path != null) {
 						path.append('.');
-						path.append(myDef.getElementName());
-						ourLog.trace(" * Next path: {}", path.toString());
+						if (myDef != null) {
+							path.append(myDef.getElementName());
+						}
+						ourLog.trace(" * Next path: {}", path);
 					}
 				}
 			}
-
 		}
 
-		public boolean anyPathMatches(Set<String> thePaths) {
-			StringBuilder b = new StringBuilder();
-			addParent(this, b);
+		public CompositeChildElement(RuntimeResourceDefinition theResDef, EncodeContext theEncodeContext) {
+			myResDef = theResDef;
+			myDef = null;
+			myParent = null;
+			myEncodeContext = theEncodeContext;
+		}
 
-			String path = b.toString();
-			return thePaths.contains(path);
+		@Override
+		public String toString() {
+			return myDef.getElementName();
 		}
 
 		private void addParent(CompositeChildElement theParent, StringBuilder theB) {
@@ -1067,10 +1216,12 @@ public abstract class BaseParser implements IParser {
 			}
 		}
 
-		public CompositeChildElement(RuntimeResourceDefinition theResDef) {
-			myResDef = theResDef;
-			myDef = null;
-			myParent = null;
+		public boolean anyPathMatches(Set<String> thePaths) {
+			StringBuilder b = new StringBuilder();
+			addParent(this, b);
+
+			String path = b.toString();
+			return thePaths.contains(path);
 		}
 
 		private StringBuilder buildPath() {
@@ -1090,56 +1241,90 @@ public abstract class BaseParser implements IParser {
 			}
 		}
 
-		private boolean checkIfParentShouldBeEncodedAndBuildPath(StringBuilder thePathBuilder, boolean theStarPass) {
-			return checkIfPathMatchesForEncoding(thePathBuilder, theStarPass, myEncodeElementsAppliesToResourceTypes, myEncodeElements, true);
-		}
+		private boolean checkIfParentShouldBeEncodedAndBuildPath() {
+			List<EncodeContextPath> encodeElements = myEncodeContext.myEncodeElementPaths;
 
-		private boolean checkIfParentShouldNotBeEncodedAndBuildPath(StringBuilder thePathBuilder, boolean theStarPass) {
-			return checkIfPathMatchesForEncoding(thePathBuilder, theStarPass, null, myDontEncodeElements, false);
-		}
+			String currentResourceName = myEncodeContext
+					.getResourcePath()
+					.get(myEncodeContext.getResourcePath().size() - 1)
+					.getName();
+			if (myEncodeContext.myEncodeElementsAppliesToResourceTypes != null
+					&& !myEncodeContext.myEncodeElementsAppliesToResourceTypes.contains(currentResourceName)) {
+				encodeElements = null;
+			}
 
-		private boolean checkIfPathMatchesForEncoding(StringBuilder thePathBuilder, boolean theStarPass, Set<String> theResourceTypes, Set<String> theElements, boolean theCheckingForWhitelist) {
-			if (myResDef != null) {
-				if (theResourceTypes != null) {
-					if (!theResourceTypes.contains(myResDef.getName())) {
-						return true;
-					}
-				}
-				if (theStarPass) {
-					thePathBuilder.append('*');
-				} else {
-					thePathBuilder.append(myResDef.getName());
-				}
-				if (theElements.contains(thePathBuilder.toString())) {
-					return true;
-				} else {
-					return false;
-				}
-			} else if (myParent != null) {
-				boolean parentCheck;
-				if (theCheckingForWhitelist) {
-					parentCheck = myParent.checkIfParentShouldBeEncodedAndBuildPath(thePathBuilder, theStarPass);
-				} else {
-					parentCheck = myParent.checkIfParentShouldNotBeEncodedAndBuildPath(thePathBuilder, theStarPass);
-				}
-				if (parentCheck) {
-					return true;
-				}
+			boolean retVal = checkIfPathMatchesForEncoding(encodeElements, true);
 
-				if (myDef != null) {
-					if (myDef.getMin() > 0) {
-						if (theElements.contains("*.(mandatory)")) {
-							return true;
-						}
-					}
-
-					thePathBuilder.append('.');
-					thePathBuilder.append(myDef.getElementName());
-					return theElements.contains(thePathBuilder.toString());
+			/*
+			 * We force the meta tag to be encoded even if it's not specified as an element in the
+			 * elements filter, specifically because we'll need it in order to automatically add
+			 * the SUBSETTED tag
+			 */
+			if (!retVal) {
+				if ("meta".equals(myEncodeContext.getLeafResourcePathFirstField())
+						&& shouldAddSubsettedTag(myEncodeContext)) {
+					// The next element is a child of the <meta> element
+					retVal = true;
+				} else if ("meta".equals(myDef.getElementName()) && shouldAddSubsettedTag(myEncodeContext)) {
+					// The next element is the <meta> element
+					retVal = true;
 				}
 			}
 
-			return true;
+			return retVal;
+		}
+
+		private boolean checkIfParentShouldNotBeEncodedAndBuildPath() {
+			return checkIfPathMatchesForEncoding(myEncodeContext.myDontEncodeElementPaths, false);
+		}
+
+		private boolean checkIfPathMatchesForEncoding(
+				List<EncodeContextPath> theElements, boolean theCheckingForEncodeElements) {
+
+			boolean retVal = false;
+			if (myDef != null) {
+				myEncodeContext.pushPath(myDef.getElementName(), false);
+			}
+
+			if (theCheckingForEncodeElements
+					&& isEncodeElementsAppliesToChildResourcesOnly()
+					&& myEncodeContext.getResourcePath().size() < 2) {
+				retVal = true;
+			} else if (theElements == null) {
+				retVal = true;
+			} else {
+				EncodeContextPath currentResourcePath = myEncodeContext.getCurrentResourcePath();
+				ourLog.trace("Current resource path: {}", currentResourcePath);
+				for (EncodeContextPath next : theElements) {
+
+					if (next.startsWith(currentResourcePath, true)) {
+						if (theCheckingForEncodeElements
+								|| next.getPath().size()
+										== currentResourcePath.getPath().size()) {
+							retVal = true;
+							break;
+						}
+					}
+
+					if (next.getPath().get(next.getPath().size() - 1).getName().equals("(mandatory)")) {
+						if (myDef.getMin() > 0) {
+							retVal = true;
+							break;
+						}
+						if (currentResourcePath.getPath().size()
+								> next.getPath().size()) {
+							retVal = true;
+							break;
+						}
+					}
+				}
+			}
+
+			if (myDef != null) {
+				myEncodeContext.popPath();
+			}
+
+			return retVal;
 		}
 
 		public BaseRuntimeChildDefinition getDef() {
@@ -1150,75 +1335,137 @@ public abstract class BaseParser implements IParser {
 			return myParent;
 		}
 
-		public RuntimeResourceDefinition getResDef() {
-			return myResDef;
-		}
-
-		public boolean shouldBeEncoded() {
+		public boolean shouldBeEncoded(boolean theContainedResource) {
 			boolean retVal = true;
-			if (myEncodeElements != null) {
-				retVal = checkIfParentShouldBeEncodedAndBuildPath(new StringBuilder(), false);
-				if (retVal == false && myEncodeElementsIncludesStars) {
-					retVal = checkIfParentShouldBeEncodedAndBuildPath(new StringBuilder(), true);
+			if (isSummaryMode() && (getDef() == null || !getDef().isSummary())) {
+				String resourceName = myEncodeContext.getLeafResourceName();
+				// Technically the spec says we shouldn't include extensions in CapabilityStatement
+				// but we will do so because there are people who depend on this behaviour, at least
+				// as of 2019-07. See
+				// https://github.com/smart-on-fhir/Swift-FHIR/issues/26
+				// for example.
+				if (("Conformance".equals(resourceName) || "CapabilityStatement".equals(resourceName))
+						&& ("extension".equals(myDef.getElementName())
+								|| "extension".equals(myEncodeContext.getLeafElementName()))) {
+					// skip
+				} else {
+					retVal = false;
 				}
 			}
-			if (retVal && myDontEncodeElements != null) {
-				retVal = !checkIfParentShouldNotBeEncodedAndBuildPath(new StringBuilder(), false);
-				if (retVal && myDontEncodeElementsIncludesStars) {
-					retVal = !checkIfParentShouldNotBeEncodedAndBuildPath(new StringBuilder(), true);
-				}
+			if (myEncodeContext.myEncodeElementPaths != null) {
+				retVal = checkIfParentShouldBeEncodedAndBuildPath();
 			}
-			// if (retVal == false && myEncodeElements.contains("*.(mandatory)")) {
-			// if (myDef.getMin() > 0) {
-			// retVal = true;
-			// }
-			// }
+			if (retVal && myEncodeContext.myDontEncodeElementPaths != null) {
+				retVal = !checkIfParentShouldNotBeEncodedAndBuildPath();
+			}
+			if (theContainedResource) {
+				retVal = !notEncodeForContainedResource.contains(myDef.getElementName());
+			}
 
 			return retVal;
 		}
+
+		@Override
+		public int hashCode() {
+			final int prime = 31;
+			int result = 1;
+			result = prime * result + ((myDef == null) ? 0 : myDef.hashCode());
+			result = prime * result + ((myParent == null) ? 0 : myParent.hashCode());
+			result = prime * result + ((myResDef == null) ? 0 : myResDef.hashCode());
+			result = prime * result + ((myEncodeContext == null) ? 0 : myEncodeContext.hashCode());
+			return result;
+		}
+
+		@Override
+		public boolean equals(Object obj) {
+			if (this == obj) return true;
+
+			if (obj instanceof CompositeChildElement) {
+				final CompositeChildElement that = (CompositeChildElement) obj;
+				return Objects.equals(this.getEnclosingInstance(), that.getEnclosingInstance())
+						&& Objects.equals(this.myDef, that.myDef)
+						&& Objects.equals(this.myParent, that.myParent)
+						&& Objects.equals(this.myResDef, that.myResDef)
+						&& Objects.equals(this.myEncodeContext, that.myEncodeContext);
+			}
+			return false;
+		}
+
+		private BaseParser getEnclosingInstance() {
+			return BaseParser.this;
+		}
 	}
 
-	static class ContainedResources {
-		private long myNextContainedId = 1;
+	private static class Key {
+		private final BaseRuntimeElementCompositeDefinition<?> resDef;
+		private final boolean theContainedResource;
+		private final BaseParser.CompositeChildElement theParent;
+		private final BaseParser.EncodeContext theEncodeContext;
 
-		private List<IBaseResource> myResources = new ArrayList<IBaseResource>();
-		private IdentityHashMap<IBaseResource, IIdType> myResourceToId = new IdentityHashMap<IBaseResource, IIdType>();
+		public Key(
+				BaseRuntimeElementCompositeDefinition<?> resDef,
+				final boolean theContainedResource,
+				final BaseParser.CompositeChildElement theParent,
+				BaseParser.EncodeContext theEncodeContext) {
+			this.resDef = resDef;
+			this.theContainedResource = theContainedResource;
+			this.theParent = theParent;
+			this.theEncodeContext = theEncodeContext;
+		}
 
-		public void addContained(IBaseResource theResource) {
-			if (myResourceToId.containsKey(theResource)) {
-				return;
+		@Override
+		public int hashCode() {
+			final int prime = 31;
+			int result = 1;
+			result = prime * result + ((resDef == null) ? 0 : resDef.hashCode());
+			result = prime * result + (theContainedResource ? 1231 : 1237);
+			result = prime * result + ((theParent == null) ? 0 : theParent.hashCode());
+			result = prime * result + ((theEncodeContext == null) ? 0 : theEncodeContext.hashCode());
+			return result;
+		}
+
+		@Override
+		public boolean equals(final Object obj) {
+			if (this == obj) {
+				return true;
 			}
-
-			IIdType newId;
-			if (theResource.getIdElement().isLocal()) {
-				newId = theResource.getIdElement();
-			} else {
-				// TODO: make this configurable between the two below (and something else?)
-				// newId = new IdDt(UUID.randomUUID().toString());
-				newId = new IdDt(myNextContainedId++);
+			if (obj instanceof Key) {
+				final Key that = (Key) obj;
+				return Objects.equals(this.resDef, that.resDef)
+						&& this.theContainedResource == that.theContainedResource
+						&& Objects.equals(this.theParent, that.theParent)
+						&& Objects.equals(this.theEncodeContext, that.theEncodeContext);
 			}
-
-			myResourceToId.put(theResource, newId);
-			myResources.add(theResource);
+			return false;
 		}
-
-		public void addContained(IIdType theId, IBaseResource theResource) {
-			myResourceToId.put(theResource, theId);
-			myResources.add(theResource);
-		}
-
-		public List<IBaseResource> getContainedResources() {
-			return myResources;
-		}
-
-		public IIdType getResourceId(IBaseResource theNext) {
-			return myResourceToId.get(theNext);
-		}
-
-		public boolean isEmpty() {
-			return myResourceToId.isEmpty();
-		}
-
 	}
 
+	protected static <T> List<T> extractMetadataListNotNull(IResource resource, ResourceMetadataKeyEnum<List<T>> key) {
+		List<? extends T> securityLabels = key.get(resource);
+		if (securityLabels == null) {
+			securityLabels = Collections.emptyList();
+		}
+		return new ArrayList<>(securityLabels);
+	}
+
+	static boolean hasNoExtensions(IBase theElement) {
+		if (theElement instanceof ISupportsUndeclaredExtensions) {
+			ISupportsUndeclaredExtensions res = (ISupportsUndeclaredExtensions) theElement;
+			if (res.getUndeclaredExtensions().size() > 0
+					|| res.getUndeclaredModifierExtensions().size() > 0) {
+				return false;
+			}
+		}
+		if (theElement instanceof IBaseHasExtensions) {
+			IBaseHasExtensions res = (IBaseHasExtensions) theElement;
+			if (res.hasExtension()) {
+				return false;
+			}
+		}
+		if (theElement instanceof IBaseHasModifierExtensions) {
+			IBaseHasModifierExtensions res = (IBaseHasModifierExtensions) theElement;
+			return !res.hasModifierExtension();
+		}
+		return true;
+	}
 }

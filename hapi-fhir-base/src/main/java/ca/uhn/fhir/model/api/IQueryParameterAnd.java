@@ -1,17 +1,15 @@
-package ca.uhn.fhir.model.api;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,36 +17,37 @@ package ca.uhn.fhir.model.api;
  * limitations under the License.
  * #L%
  */
-
-import java.util.List;
+package ca.uhn.fhir.model.api;
 
 import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.rest.method.QualifiedParamList;
+import ca.uhn.fhir.rest.api.QualifiedParamList;
 import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
 
-public interface IQueryParameterAnd<T extends IQueryParameterOr<?>> {
+import java.io.Serializable;
+import java.util.List;
+
+public interface IQueryParameterAnd<T extends IQueryParameterOr<?>> extends Serializable {
 
 	/**
-	 * 
+	 *
 	 * <p>
-	 * See FHIR specification 
+	 * See FHIR specification
 	 *    <a href="http://www.hl7.org/implement/standards/fhir/search.html#ptypes">2.2.2 Search SearchParameter Types</a>
 	 *    for information on the <b>token</b> format
 	 * </p>
 	 * @param theContext TODO
 	 * @param theParamName TODO
 	 */
-	public void setValuesAsQueryTokens(FhirContext theContext, String theParamName, List<QualifiedParamList> theParameters) throws InvalidRequestException;
+	void setValuesAsQueryTokens(FhirContext theContext, String theParamName, List<QualifiedParamList> theParameters)
+			throws InvalidRequestException;
 
 	/**
-	 * 
+	 *
 	 * <p>
-	 * See FHIR specification 
+	 * See FHIR specification
 	 *    <a href="http://www.hl7.org/implement/standards/fhir/search.html#ptypes">2.2.2 Search SearchParameter Types</a>
 	 *    for information on the <b>token</b> format
 	 * </p>
 	 */
-	public List<T> getValuesAsQueryTokens();
-
-	
+	List<T> getValuesAsQueryTokens();
 }

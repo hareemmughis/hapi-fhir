@@ -1,46 +1,45 @@
 package ca.uhn.fhir.jaxrs.server;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.jaxrs.server.test.TestJaxRsDummyPatientProviderDstu3;
+import ca.uhn.fhir.jaxrs.server.test.TestJaxRsMockPatientRestProviderDstu3;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.server.IResourceProvider;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
+import org.jboss.resteasy.specimpl.ResteasyHttpHeaders;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 
-import javax.ws.rs.HttpMethod;
-import javax.ws.rs.core.MultivaluedHashMap;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.UriInfo;
-
-import org.glassfish.jersey.internal.MapPropertiesDelegate;
-import org.glassfish.jersey.server.ContainerRequest;
-import org.junit.Before;
-import org.junit.Test;
-
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.jaxrs.server.test.TestJaxRsDummyPatientProvider;
-import ca.uhn.fhir.jaxrs.server.test.TestJaxRsMockPatientRestProviderDstu3;
-import ca.uhn.fhir.rest.server.Constants;
-import ca.uhn.fhir.rest.server.IResourceProvider;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class AbstractJaxRsConformanceProviderDstu3Test {
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(AbstractJaxRsConformanceProviderDstu3Test.class);
+
 
 	private static final String BASEURI = "http://basiuri";
 	private static final String REQUESTURI = BASEURI + "/metadata";
 	AbstractJaxRsConformanceProvider provider;
 	private ConcurrentHashMap<Class<? extends IResourceProvider>, IResourceProvider> providers;
-	private ContainerRequest headers;
+	private ResteasyHttpHeaders headers;
 	private MultivaluedHashMap<String, String> queryParameters;
 	
-	@Before
+	@BeforeEach
 	public void setUp() throws Exception {
-		// headers
-		headers = new ContainerRequest(new URI(BASEURI), new URI(REQUESTURI), HttpMethod.GET, null,
-				new MapPropertiesDelegate());
 		// uri info
-		queryParameters = new MultivaluedHashMap<String, String>();
+		queryParameters = new MultivaluedHashMap<>();
+		// headers
+//		headers = new ContainerRequest(new URI(BASEURI), new URI(REQUESTURI), HttpMethod.GET, null,
+//				new MapPropertiesDelegate());
+		headers = new ResteasyHttpHeaders(queryParameters);
 		
 		
 		providers = new ConcurrentHashMap<Class<? extends IResourceProvider>, IResourceProvider>();
@@ -50,17 +49,17 @@ public class AbstractJaxRsConformanceProviderDstu3Test {
 	@Test
 	public void testConformance() throws Exception {
 		providers.put(AbstractJaxRsConformanceProvider.class, provider);
-		providers.put(TestJaxRsDummyPatientProvider.class, new TestJaxRsDummyPatientProvider());
+		providers.put(TestJaxRsDummyPatientProviderDstu3.class, new TestJaxRsDummyPatientProviderDstu3());
 		Response response = createConformanceProvider(providers).conformance();
-		System.out.println(response);
+		ourLog.info(response.toString());
 	}
 	
 	@Test
 	public void testConformanceUsingOptions() throws Exception {
 		providers.put(AbstractJaxRsConformanceProvider.class, provider);
-		providers.put(TestJaxRsDummyPatientProvider.class, new TestJaxRsDummyPatientProvider());
+		providers.put(TestJaxRsDummyPatientProviderDstu3.class, new TestJaxRsDummyPatientProviderDstu3());
 		Response response = createConformanceProvider(providers).conformanceUsingOptions();
-		System.out.println(response);
+		ourLog.info(response.toString());
 	}
 
 	@Test
@@ -69,10 +68,10 @@ public class AbstractJaxRsConformanceProviderDstu3Test {
 		providers.put(TestJaxRsMockPatientRestProviderDstu3.class, new TestJaxRsMockPatientRestProviderDstu3());
 		Response response = createConformanceProvider(providers).conformance();
 		assertEquals(Constants.STATUS_HTTP_200_OK, response.getStatus());
-		assertTrue(response.getEntity().toString().contains("\"type\": \"Patient\""));
-		assertTrue(response.getEntity().toString().contains("\"someCustomOperation"));
-		System.out.println(response);
-		System.out.println(response.getEntity());
+		assertThat(response.getEntity().toString()).contains("\"type\": \"Patient\"");
+		assertThat(response.getEntity().toString()).contains("\"someCustomOperation");
+		ourLog.info(response.toString());
+		ourLog.info(response.getEntity().toString());
 	}
 	
 	@Test
@@ -82,10 +81,10 @@ public class AbstractJaxRsConformanceProviderDstu3Test {
 		providers.put(TestJaxRsMockPatientRestProviderDstu3.class, new TestJaxRsMockPatientRestProviderDstu3());
 		Response response = createConformanceProvider(providers).conformance();
 		assertEquals(Constants.STATUS_HTTP_200_OK, response.getStatus());
-		System.out.println(response.getEntity());
-		assertTrue(response.getEntity().toString().contains(" <type value=\"Patient\"/>"));
-		assertTrue(response.getEntity().toString().contains("\"someCustomOperation"));
-		System.out.println(response.getEntity());
+		ourLog.info(response.getEntity().toString());
+		assertThat(response.getEntity().toString()).contains(" <type value=\"Patient\"/>");
+		assertThat(response.getEntity().toString()).contains("\"someCustomOperation");
+		ourLog.info(response.getEntity().toString());
 	}
 	
 	private AbstractJaxRsConformanceProvider createConformanceProvider(final ConcurrentHashMap<Class<? extends IResourceProvider>, IResourceProvider> providers) 
@@ -103,7 +102,7 @@ public class AbstractJaxRsConformanceProviderDstu3Test {
 		when(uriInfo.getRequestUri()).thenReturn(new URI(BASEURI + "/foo"));		
 		result.setUriInfo(uriInfo);
 		result.setHeaders(headers);
-		result.setUpPostConstruct();
+		result.buildCapabilityStatement();
 		return result;
 	}	
 

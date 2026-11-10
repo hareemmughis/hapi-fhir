@@ -1,0 +1,431 @@
+package ca.uhn.fhir.jpa.partition;
+
+import ca.uhn.fhir.context.RuntimeResourceDefinition;
+import ca.uhn.fhir.interceptor.api.Hook;
+import ca.uhn.fhir.interceptor.api.Interceptor;
+import ca.uhn.fhir.interceptor.api.Pointcut;
+import ca.uhn.fhir.interceptor.model.ReadPartitionIdRequestDetails;
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.dao.data.IPartitionDao;
+import ca.uhn.fhir.jpa.entity.PartitionEntity;
+import ca.uhn.fhir.jpa.interceptor.PatientIdPartitionInterceptor;
+import ca.uhn.fhir.jpa.model.config.PartitionSettings;
+import ca.uhn.fhir.jpa.searchparam.extractor.ISearchParamExtractor;
+import ca.uhn.fhir.jpa.test.BaseJpaR4Test;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.api.server.SystemRequestDetails;
+import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException;
+import ca.uhn.fhir.rest.server.servlet.ServletRequestDetails;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Patient;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Stream;
+
+import static ca.uhn.fhir.jpa.model.util.JpaConstants.DEFAULT_PARTITION_NAME;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+@ExtendWith(MockitoExtension.class)
+class RequestPartitionHelperSvcTest extends BaseJpaR4Test {
+
+	static final int PARTITION_ID_1 = 1;
+	static final String PARTITION_NAME_1 = "SOME-PARTITION-1";
+
+	static final int PARTITION_ID_2 = 2;
+	static final String PARTITION_NAME_2 = "SOME-PARTITION-2";
+
+	static final int UNKNOWN_PARTITION_ID = 1_000_000;
+	static final String UNKNOWN_PARTITION_NAME = "UNKNOWN";
+
+	static final Integer DEFAULT_PARTITION_ID = null;
+
+	@Autowired
+	IPartitionDao myPartitionDao;
+	@Autowired
+	PartitionSettings myPartitionSettings;
+	@Autowired
+	RequestPartitionHelperSvc mySvc;
+	@Autowired
+	ISearchParamExtractor mySearchParamExtractor;
+
+	Patient myPatient;
+
+	@BeforeEach
+	public void before(){
+		myPartitionDao.deleteAll();
+		myPartitionSettings.setDefaultPartitionId(null);
+		myPartitionSettings.setPartitioningEnabled(true);
+
+		myPatient = new Patient();
+		myPatient.setId(new IdType("Patient", "123", "1"));
+	}
+
+	@AfterEach
+	public void afterEach(){
+		myPartitionSettings.setDefaultPartitionId(null);
+	}
+
+	@Test
+	public void testDetermineReadPartitionForSystemRequest_withPartitionIdOnly_returnsCorrectPartition() {
+		// setup
+		PartitionEntity partitionEntity = createPartition1();
+		SystemRequestDetails srd = new SystemRequestDetails();
+		srd.setRequestPartitionId(RequestPartitionId.fromPartitionId(partitionEntity.getId()));
+
+		// execute
+		RequestPartitionId result = mySvc.determineReadPartitionForRequestForRead(srd, myPatient.fhirType(), myPatient.getIdElement());
+
+		// verify
+		assertEquals(PARTITION_ID_1, result.getFirstPartitionIdOrNull());
+		assertEquals(PARTITION_NAME_1, result.getFirstPartitionNameOrNull());
+	}
+
+
+	@Test
+	public void testDetermineReadPartitionForServletRequest_whenResourceIsNonPartitionable() {
+		PartitionEntity partition1 = createPartition1();
+		ServletRequestDetails servletRequestDetails = new ServletRequestDetails();
+		servletRequestDetails.setTenantId(partition1.getName());
+
+		// execute
+		RequestPartitionId result = mySvc.determineReadPartitionForRequestForSearchType(servletRequestDetails, "Library");
+
+		// verify
+		assertThat(result.hasDefaultPartitionId(DEFAULT_PARTITION_ID)).isTrue();
+	}
+
+	@Test
+	public void testDetermineReadPartitionForSystemRequest_whenResourceIsNonPartitionable() {
+		PartitionEntity partitionEntity = createPartition1();
+		SystemRequestDetails srd = new SystemRequestDetails();
+		srd.setTenantId(partitionEntity.getName());
+		srd.setRequestPartitionId(RequestPartitionId.fromPartitionId(partitionEntity.getId()));
+
+		// execute
+		RequestPartitionId result = mySvc.determineReadPartitionForRequestForSearchType(srd, "Library");
+
+		// verify
+		assertThat(result.hasDefaultPartitionId(DEFAULT_PARTITION_ID)).isTrue();
+	}
+
+	@Test
+	public void testDetermineCreatePartitionForRequest_withPartitionIdOnly_returnsCorrectPartition() {
+		// setup
+		PartitionEntity partitionEntity = createPartition1();
+		SystemRequestDetails srd = new SystemRequestDetails();
+		srd.setRequestPartitionId(RequestPartitionId.fromPartitionId(partitionEntity.getId()));
+
+		// execute
+		Patient patient = new Patient();
+		RequestPartitionId result = mySvc.determineCreatePartitionForRequest(srd, patient, patient.fhirType());
+
+		// verify
+		assertEquals(PARTITION_ID_1, result.getFirstPartitionIdOrNull());
+		assertEquals(PARTITION_NAME_1, result.getFirstPartitionNameOrNull());
+	}
+
+	@Test
+	public void testValidateAndNormalizePartitionIds_withPartitionIdOnly_populatesPartitionName(){
+		PartitionEntity partitionEntity = createPartition1();
+		RequestPartitionId partitionId = RequestPartitionId.fromPartitionId(partitionEntity.getId());
+		RequestPartitionId result = mySvc.validateAndNormalizePartitionIds(partitionId);
+
+		assertEquals(PARTITION_ID_1, result.getFirstPartitionIdOrNull());
+		assertEquals(PARTITION_NAME_1, result.getFirstPartitionNameOrNull());
+	}
+
+	@Test
+	public void testValidateAndNormalizePartitionIds_withUnknownId_throwsException(){
+		RequestPartitionId partitionId = RequestPartitionId.fromPartitionId(UNKNOWN_PARTITION_ID);
+
+		try{
+			mySvc.validateAndNormalizePartitionIds(partitionId);
+			fail();
+		} catch (ResourceNotFoundException e){
+			assertTrue(e.getMessage().contains("No partition exists with ID 1,000,000"));
+		}
+	}
+
+	@Test
+	public void testValidateAndNormalizePartitionIds_withIdAndInvalidName_throwsException(){
+		createPartition1();
+		RequestPartitionId partitionId = RequestPartitionId.fromPartitionIdAndName(PARTITION_ID_1, UNKNOWN_PARTITION_NAME);
+
+		try{
+			mySvc.validateAndNormalizePartitionIds(partitionId);
+			fail();
+		} catch (IllegalArgumentException e){
+			assertTrue(e.getMessage().contains("Partition name UNKNOWN does not match ID 1"));
+		}
+	}
+
+	@Test
+	public void testValidateAndNormalizePartitionIds_withMultiplePartitionIdOnly_populatesPartitionNames(){
+		PartitionEntity partitionEntity1 = createPartition1();
+		PartitionEntity partitionEntity2 = createPartition2();
+
+		RequestPartitionId partitionId = RequestPartitionId.fromPartitionIds(partitionEntity1.getId(), partitionEntity2.getId());
+		RequestPartitionId result = mySvc.validateAndNormalizePartitionIds(partitionId);
+
+		assertTrue(result.getPartitionIds().containsAll(Set.of(PARTITION_ID_1, PARTITION_ID_2)));
+		assertNotNull(result.getPartitionNames());
+		assertTrue(result.getPartitionNames().containsAll(Set.of(PARTITION_NAME_1, PARTITION_NAME_2)));
+	}
+
+	@Test
+	public void testValidateAndNormalizePartitionNames_withPartitionNameOnly_populatesPartitionId(){
+		PartitionEntity partitionEntity = createPartition1();
+		RequestPartitionId partitionId = RequestPartitionId.fromPartitionName(partitionEntity.getName());
+		RequestPartitionId result = mySvc.validateAndNormalizePartitionNames(partitionId);
+
+		assertEquals(PARTITION_ID_1, result.getFirstPartitionIdOrNull());
+		assertEquals(PARTITION_NAME_1, result.getFirstPartitionNameOrNull());
+	}
+
+	@Test
+	public void testValidateAndNormalizePartitionNames_withMultiplePartitionNamesOnly_populatesPartitionIds(){
+		PartitionEntity partitionEntity1 = createPartition1();
+		PartitionEntity partitionEntity2 = createPartition2();
+
+		RequestPartitionId partitionId = RequestPartitionId.fromPartitionNames(partitionEntity1.getName(), partitionEntity2.getName());
+		RequestPartitionId result = mySvc.validateAndNormalizePartitionNames(partitionId);
+
+		assertTrue(result.getPartitionIds().containsAll(Set.of(PARTITION_ID_1, PARTITION_ID_2)));
+		assertNotNull(result.getPartitionNames());
+		assertTrue(result.getPartitionNames().containsAll(Set.of(PARTITION_NAME_1, PARTITION_NAME_2)));
+	}
+
+	@Test
+	public void testValidateAndNormalizePartitionNames_withUnknownName_throwsException(){
+		RequestPartitionId partitionId = RequestPartitionId.fromPartitionName(UNKNOWN_PARTITION_NAME);
+
+		try{
+			mySvc.validateAndNormalizePartitionNames(partitionId);
+			fail();
+		} catch (ResourceNotFoundException e){
+			assertTrue(e.getMessage().contains("Partition name \"UNKNOWN\" is not valid"));
+		}
+	}
+
+	@Test
+	public void testValidateAndNormalizePartitionNames_withNameAndInvalidId_throwsException(){
+		createPartition1();
+		RequestPartitionId partitionId = RequestPartitionId.fromPartitionIdAndName(UNKNOWN_PARTITION_ID, PARTITION_NAME_1);
+
+		try{
+			mySvc.validateAndNormalizePartitionNames(partitionId);
+			fail();
+		} catch (IllegalArgumentException e){
+			assertTrue(e.getMessage().contains("Partition ID 1000000 does not match name SOME-PARTITION-1"));
+		}
+	}
+
+	@ParameterizedTest
+	@MethodSource("withPartitionIds")
+	public void testDefaultPartition_whenDefaultPartitionIsNotNull(Integer theRequestPartitionId) {
+		final Integer defaultPartitionId = 0;
+		myPartitionSettings.setDefaultPartitionId(defaultPartitionId);
+
+		{
+			RequestPartitionId requestPartitionId = RequestPartitionId.fromPartitionId(defaultPartitionId);
+			assertThat(mySvc.isDefaultPartition(requestPartitionId)).isTrue();
+		}
+
+		{
+			RequestPartitionId requestPartitionId = RequestPartitionId.fromPartitionId(theRequestPartitionId);
+			assertThat(mySvc.isDefaultPartition(requestPartitionId)).isFalse();
+		}
+	}
+
+	@ParameterizedTest
+	@MethodSource("withPartitionIds")
+	public void testValidateAndNormalizePartitionNames_willResolveDefaultPartitionNameToCorrectPartitionId(Integer theDefaultPartitionId) {
+		myPartitionSettings.setDefaultPartitionId(theDefaultPartitionId);
+
+		RequestPartitionId requestPartitionId = RequestPartitionId.fromPartitionName(DEFAULT_PARTITION_NAME);
+
+		RequestPartitionId normalizedRequestPartitionId = mySvc.validateAndNormalizePartitionNames(requestPartitionId);
+
+		assertThat(normalizedRequestPartitionId.isPartition(theDefaultPartitionId)).isTrue();
+
+	}
+
+	private static Stream<Integer> withPartitionIds(){
+		return Stream.of(null, 1,2,3);
+	}
+
+	/**
+	 * A SystemRequestDetails with a blank tenant ID should not bypass the
+	 * interceptor chain. In unnamed partition mode, the blank tenant ID should
+	 * be treated as if no tenant was set, allowing the interceptors to correctly
+	 * resolve the partition.
+	 */
+	@Test
+	void testDetermineReadPartition_withBlankTenantId_shouldNotBypassInterceptors() {
+		// setup
+		myPartitionSettings.setUnnamedPartitionMode(true);
+		myPartitionSettings.setDefaultPartitionId(0);
+
+		PatientIdPartitionInterceptor interceptor = new PatientIdPartitionInterceptor(
+				myFhirContext, mySearchParamExtractor, myPartitionSettings, myDaoRegistry, myTransactionBundleNormalizer);
+		myInterceptorRegistry.registerInterceptor(interceptor);
+		try {
+			// Create a SystemRequestDetails with ONLY a blank tenant ID (no explicit partition)
+			SystemRequestDetails srd = new SystemRequestDetails();
+			srd.setTenantId("");
+
+			// Act: determine partition for an Organization search (non-patient-compartment resource)
+			RequestPartitionId result = mySvc.determineReadPartitionForRequestForSearchType(srd, "Organization");
+
+			// Assert: should resolve to default partition (0), NOT throw "Partition IDs have not been set"
+			assertThat(result.hasPartitionIds()).isTrue();
+			assertThat(result.getFirstPartitionIdOrNull()).isEqualTo(0);
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+			myPartitionSettings.setUnnamedPartitionMode(false);
+		}
+	}
+
+	/**
+	 * A SystemRequestDetails with a null tenant ID should use the interceptor
+	 * chain and correctly resolve the partition.
+	 */
+	@Test
+	void testDetermineReadPartition_withNullTenantId_shouldUseInterceptors() {
+		// setup
+		myPartitionSettings.setUnnamedPartitionMode(true);
+		myPartitionSettings.setDefaultPartitionId(0);
+
+		PatientIdPartitionInterceptor interceptor = new PatientIdPartitionInterceptor(
+				myFhirContext, mySearchParamExtractor, myPartitionSettings, myDaoRegistry, myTransactionBundleNormalizer);
+		myInterceptorRegistry.registerInterceptor(interceptor);
+		try {
+			// Create a SystemRequestDetails with null tenant ID (the default)
+			SystemRequestDetails srd = new SystemRequestDetails();
+
+			// Act
+			RequestPartitionId result = mySvc.determineReadPartitionForRequestForSearchType(srd, "Organization");
+
+			// Assert
+			assertThat(result.hasPartitionIds()).isTrue();
+			assertThat(result.getFirstPartitionIdOrNull()).isEqualTo(0);
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+			myPartitionSettings.setUnnamedPartitionMode(false);
+		}
+	}
+
+	/**
+	 * Partition-selecting resolutions that carry no resource type (system-level history, page
+	 * fetches, server-level operations) still run against a caller-chosen partition, so the
+	 * {@link Pointcut#STORAGE_PARTITION_SELECTED} security hook must fire for them too, with a
+	 * null {@link RuntimeResourceDefinition}.
+	 */
+	@ParameterizedTest(name = "{0}")
+	@MethodSource("readDetailsWithoutResourceType")
+	void testDetermineReadPartitionForRequest_noResourceType_invokesPartitionSelectedHook(String theName, ReadPartitionIdRequestDetails theDetails) {
+		createPartition1();
+		MyReadPartitionInterceptor readInterceptor = new MyReadPartitionInterceptor(RequestPartitionId.fromPartitionId(PARTITION_ID_1));
+		MyPartitionSelectedInterceptor selectedInterceptor = new MyPartitionSelectedInterceptor();
+		myInterceptorRegistry.registerInterceptor(readInterceptor);
+		myInterceptorRegistry.registerInterceptor(selectedInterceptor);
+		try {
+			ServletRequestDetails srd = new ServletRequestDetails();
+
+			RequestPartitionId result = mySvc.determineReadPartitionForRequest(srd, theDetails);
+
+			assertThat(result.getPartitionIds()).containsExactly(PARTITION_ID_1);
+			assertThat(result.getPartitionNames()).containsExactly(PARTITION_NAME_1);
+			assertThat(selectedInterceptor.myPartitionIds).hasSize(1);
+			assertThat(selectedInterceptor.myPartitionIds.get(0).getPartitionNames()).containsExactly(PARTITION_NAME_1);
+			assertThat(selectedInterceptor.myRequestDetails).containsExactly(srd);
+			assertThat(selectedInterceptor.myResourceDefinitions).containsExactly((RuntimeResourceDefinition) null);
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(readInterceptor);
+			myInterceptorRegistry.unregisterInterceptor(selectedInterceptor);
+		}
+	}
+
+	static Stream<Arguments> readDetailsWithoutResourceType() {
+		return Stream.of(
+			Arguments.of("system history", ReadPartitionIdRequestDetails.forHistory(null, null)),
+			Arguments.of("server operation", ReadPartitionIdRequestDetails.forServerOperation("$expunge")),
+			Arguments.of("page fetch", ReadPartitionIdRequestDetails.forSearchUuid("some-search-uuid"))
+		);
+	}
+
+	@Test
+	void testDetermineGenericPartitionForRequest_noResourceName_invokesPartitionSelectedHook() {
+		createPartition1();
+		MyReadPartitionInterceptor readInterceptor = new MyReadPartitionInterceptor(RequestPartitionId.fromPartitionId(PARTITION_ID_1));
+		MyPartitionSelectedInterceptor selectedInterceptor = new MyPartitionSelectedInterceptor();
+		myInterceptorRegistry.registerInterceptor(readInterceptor);
+		myInterceptorRegistry.registerInterceptor(selectedInterceptor);
+		try {
+			// A server-level request (e.g. a transaction) has no resource name
+			ServletRequestDetails srd = new ServletRequestDetails();
+			assertThat(srd.getResourceName()).isNull();
+
+			RequestPartitionId result = mySvc.determineGenericPartitionForRequest(srd);
+
+			assertThat(result.getPartitionNames()).containsExactly(PARTITION_NAME_1);
+			assertThat(selectedInterceptor.myPartitionIds).hasSize(1);
+			assertThat(selectedInterceptor.myRequestDetails).containsExactly(srd);
+			assertThat(selectedInterceptor.myResourceDefinitions).containsExactly((RuntimeResourceDefinition) null);
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(readInterceptor);
+			myInterceptorRegistry.unregisterInterceptor(selectedInterceptor);
+		}
+	}
+
+	@Interceptor
+	private static class MyReadPartitionInterceptor {
+		private final RequestPartitionId myPartitionId;
+
+		private MyReadPartitionInterceptor(RequestPartitionId thePartitionId) {
+			myPartitionId = thePartitionId;
+		}
+
+		@Hook(Pointcut.STORAGE_PARTITION_IDENTIFY_READ)
+		public RequestPartitionId identifyForRead(RequestDetails theRequestDetails) {
+			return myPartitionId;
+		}
+	}
+
+	@Interceptor
+	private static class MyPartitionSelectedInterceptor {
+		private final List<RequestPartitionId> myPartitionIds = new ArrayList<>();
+		private final List<RequestDetails> myRequestDetails = new ArrayList<>();
+		private final List<RuntimeResourceDefinition> myResourceDefinitions = new ArrayList<>();
+
+		@Hook(Pointcut.STORAGE_PARTITION_SELECTED)
+		public void partitionSelected(RequestDetails theRequestDetails, RequestPartitionId theRequestPartitionId, RuntimeResourceDefinition theRuntimeResourceDefinition) {
+			myRequestDetails.add(theRequestDetails);
+			myPartitionIds.add(theRequestPartitionId);
+			myResourceDefinitions.add(theRuntimeResourceDefinition);
+		}
+	}
+
+	private PartitionEntity createPartition1() {
+		return myPartitionDao.save(new PartitionEntity().setId(PARTITION_ID_1).setName(PARTITION_NAME_1));
+	}
+
+	private PartitionEntity createPartition2() {
+		return myPartitionDao.save(new PartitionEntity().setId(PARTITION_ID_2).setName(PARTITION_NAME_2));
+	}
+}

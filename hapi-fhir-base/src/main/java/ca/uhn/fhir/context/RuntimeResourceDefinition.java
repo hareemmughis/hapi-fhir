@@ -1,17 +1,15 @@
-package ca.uhn.fhir.context;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,6 +17,15 @@ package ca.uhn.fhir.context;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.context;
+
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.api.annotation.ResourceDef;
+import ca.uhn.fhir.util.UrlUtil;
+import org.hl7.fhir.instance.model.api.IAnyResource;
+import org.hl7.fhir.instance.model.api.IBase;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IDomainResource;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -27,14 +34,6 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-
-import org.hl7.fhir.instance.model.api.IAnyResource;
-import org.hl7.fhir.instance.model.api.IBase;
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.hl7.fhir.instance.model.api.IDomainResource;
-
-import ca.uhn.fhir.model.api.annotation.ResourceDef;
-import ca.uhn.fhir.util.UrlUtil;
 
 public class RuntimeResourceDefinition extends BaseRuntimeElementCompositeDefinition<IBaseResource> {
 
@@ -48,8 +47,14 @@ public class RuntimeResourceDefinition extends BaseRuntimeElementCompositeDefini
 	private List<RuntimeSearchParam> mySearchParams;
 	private final FhirVersionEnum myStructureVersion;
 	private volatile RuntimeResourceDefinition myBaseDefinition;
-	
-	public RuntimeResourceDefinition(FhirContext theContext, String theResourceName, Class<? extends IBaseResource> theClass, ResourceDef theResourceAnnotation, boolean theStandardType, Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
+
+	public RuntimeResourceDefinition(
+			FhirContext theContext,
+			String theResourceName,
+			Class<? extends IBaseResource> theClass,
+			ResourceDef theResourceAnnotation,
+			boolean theStandardType,
+			Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
 		super(theResourceName, theClass, theStandardType, theContext, theClassToElementDefinitions);
 		myContext = theContext;
 		myResourceProfile = theResourceAnnotation.profile();
@@ -57,15 +62,35 @@ public class RuntimeResourceDefinition extends BaseRuntimeElementCompositeDefini
 
 		IBaseResource instance;
 		try {
-			instance = theClass.newInstance();
+			instance = theClass.getConstructor().newInstance();
 		} catch (Exception e) {
-			throw new ConfigurationException(myContext.getLocalizer().getMessage(getClass(), "nonInstantiableType", theClass.getName(), e.toString()), e);
+			throw new ConfigurationException(
+					Msg.code(1730)
+							+ myContext
+									.getLocalizer()
+									.getMessage(getClass(), "nonInstantiableType", theClass.getName(), e.toString()),
+					e);
 		}
 		myStructureVersion = instance.getStructureFhirVersionEnum();
 		if (myStructureVersion != theContext.getVersion().getVersion()) {
-			throw new ConfigurationException(myContext.getLocalizer().getMessage(getClass(), "typeWrongVersion", theContext.getVersion().getVersion(), theClass.getName(), myStructureVersion));
+			if (myStructureVersion == FhirVersionEnum.R5
+					&& theContext.getVersion().getVersion() == FhirVersionEnum.R4B) {
+				// TODO: remove this exception once we've bumped FHIR core to a new version
+				// TODO: also fix the TODO in ModelScanner
+				// TODO: also fix the TODO in RestfulServerUtils
+				// TODO: also fix the TODO in BaseParser
+			} else {
+				throw new ConfigurationException(Msg.code(1731)
+						+ myContext
+								.getLocalizer()
+								.getMessage(
+										getClass(),
+										"typeWrongVersion",
+										theContext.getVersion().getVersion(),
+										theClass.getName(),
+										myStructureVersion));
+			}
 		}
-
 	}
 
 	public void addSearchParam(RuntimeSearchParam theParam) {
@@ -104,7 +129,8 @@ public class RuntimeResourceDefinition extends BaseRuntimeElementCompositeDefini
 	@SuppressWarnings("unchecked")
 	public <T> Class<T> getImplementingClass(Class<T> theClass) {
 		if (!theClass.isAssignableFrom(getImplementingClass())) {
-			throw new ConfigurationException("Unable to convert " + getImplementingClass() + " to " + theClass);
+			throw new ConfigurationException(
+					Msg.code(1732) + "Unable to convert " + getImplementingClass() + " to " + theClass);
 		}
 		return (Class<T>) getImplementingClass();
 	}
@@ -127,9 +153,6 @@ public class RuntimeResourceDefinition extends BaseRuntimeElementCompositeDefini
 
 		if (!UrlUtil.isValid(profile)) {
 			String resourceName = "/StructureDefinition/";
-			if (myContext.getVersion().getVersion() == FhirVersionEnum.DSTU1) {
-				resourceName = "/Profile/";
-			}
 			String profileWithUrl = theServerBase + resourceName + profile;
 			if (UrlUtil.isValid(profileWithUrl)) {
 				return profileWithUrl;
@@ -170,30 +193,56 @@ public class RuntimeResourceDefinition extends BaseRuntimeElementCompositeDefini
 
 	@SuppressWarnings("unchecked")
 	@Override
-	public void sealAndInitialize(FhirContext theContext, Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
+	public void sealAndInitialize(
+			FhirContext theContext,
+			Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
 		super.sealAndInitialize(theContext, theClassToElementDefinitions);
 
 		myNameToSearchParam = Collections.unmodifiableMap(myNameToSearchParam);
 
-		ArrayList<RuntimeSearchParam> searchParams = new ArrayList<RuntimeSearchParam>(myNameToSearchParam.values());
-		Collections.sort(searchParams, new Comparator<RuntimeSearchParam>() {
-			@Override
-			public int compare(RuntimeSearchParam theArg0, RuntimeSearchParam theArg1) {
-				return theArg0.getName().compareTo(theArg1.getName());
-			}
-		});
+		ArrayList<RuntimeSearchParam> searchParams = new ArrayList<>(myNameToSearchParam.values());
+		Collections.sort(searchParams, Comparator.comparing(RuntimeSearchParam::getName));
 		mySearchParams = Collections.unmodifiableList(searchParams);
 
-		Map<String, List<RuntimeSearchParam>> compartmentNameToSearchParams = new HashMap<String, List<RuntimeSearchParam>>();
+		Map<String, List<RuntimeSearchParam>> compartmentNameToSearchParams = new HashMap<>();
 		for (RuntimeSearchParam next : searchParams) {
 			if (next.getProvidesMembershipInCompartments() != null) {
 				for (String nextCompartment : next.getProvidesMembershipInCompartments()) {
-					if (!compartmentNameToSearchParams.containsKey(nextCompartment)) {
-						compartmentNameToSearchParams.put(nextCompartment, new ArrayList<RuntimeSearchParam>());
+
+					if (nextCompartment.startsWith("Base FHIR compartment definition for ")) {
+						nextCompartment = nextCompartment.substring("Base FHIR compartment definition for ".length());
 					}
-					compartmentNameToSearchParams.get(nextCompartment).add(next);
+
+					if (!compartmentNameToSearchParams.containsKey(nextCompartment)) {
+						compartmentNameToSearchParams.put(nextCompartment, new ArrayList<>());
+					}
+					List<RuntimeSearchParam> searchParamsForCompartment =
+							compartmentNameToSearchParams.get(nextCompartment);
+					searchParamsForCompartment.add(next);
+
+					/*
+					 * If one search parameter marks an SP as making a resource
+					 * a part of a compartment, let's also denote all other
+					 * SPs with the same path the same way. This behaviour is
+					 * used by AuthorizationInterceptor
+					 */
+					String nextPath = massagePathForCompartmentSimilarity(next.getPath());
+					for (RuntimeSearchParam nextAlternate : searchParams) {
+						String nextAlternatePath = massagePathForCompartmentSimilarity(nextAlternate.getPath());
+						if (nextAlternatePath.equals(nextPath)) {
+							if (!nextAlternate.getName().equals(next.getName())) {
+								searchParamsForCompartment.add(nextAlternate);
+							}
+						}
+					}
 				}
 			}
+		}
+
+		// Make the map of lists completely unmodifiable
+		for (String nextKey : new ArrayList<>(compartmentNameToSearchParams.keySet())) {
+			List<RuntimeSearchParam> nextList = compartmentNameToSearchParams.get(nextKey);
+			compartmentNameToSearchParams.put(nextKey, Collections.unmodifiableList(nextList));
 		}
 		myCompartmentNameToSearchParams = Collections.unmodifiableMap(compartmentNameToSearchParams);
 
@@ -205,7 +254,7 @@ public class RuntimeResourceDefinition extends BaseRuntimeElementCompositeDefini
 				myBaseType = (Class<? extends IBaseResource>) target;
 			}
 		} while (target.equals(Object.class) == false);
-		
+
 		/*
 		 * See #504:
 		 * Bundle types may not have extensions
@@ -213,11 +262,19 @@ public class RuntimeResourceDefinition extends BaseRuntimeElementCompositeDefini
 		if (hasExtensions()) {
 			if (IAnyResource.class.isAssignableFrom(getImplementingClass())) {
 				if (!IDomainResource.class.isAssignableFrom(getImplementingClass())) {
-					throw new ConfigurationException("Class \"" + getImplementingClass() + "\" is invalid. This resource type is not a DomainResource, it must not have extensions");
+					throw new ConfigurationException(Msg.code(1733) + "Class \"" + getImplementingClass()
+							+ "\" is invalid. This resource type is not a DomainResource, it must not have extensions");
 				}
 			}
 		}
+	}
 
+	private String massagePathForCompartmentSimilarity(String thePath) {
+		String path = thePath;
+		if (path.matches(".*\\.where\\(resolve\\(\\) is [a-zA-Z]+\\)")) {
+			path = path.substring(0, path.indexOf(".where"));
+		}
+		return path;
 	}
 
 	@Deprecated
@@ -244,5 +301,4 @@ public class RuntimeResourceDefinition extends BaseRuntimeElementCompositeDefini
 
 		return retVal;
 	}
-
 }

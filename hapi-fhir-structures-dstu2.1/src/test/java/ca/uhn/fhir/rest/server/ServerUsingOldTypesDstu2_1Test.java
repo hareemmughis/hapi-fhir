@@ -1,16 +1,5 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.fail;
-
-import javax.servlet.ServletException;
-
-import org.hamcrest.core.StringContains;
-import org.hl7.fhir.dstu2016may.model.Patient;
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.junit.AfterClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.model.primitive.IdDt;
 import ca.uhn.fhir.model.primitive.IntegerDt;
@@ -19,13 +8,23 @@ import ca.uhn.fhir.rest.annotation.Operation;
 import ca.uhn.fhir.rest.annotation.OperationParam;
 import ca.uhn.fhir.rest.annotation.Read;
 import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.dstu2016may.model.Patient;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+
+import jakarta.servlet.ServletException;
+
+import static org.assertj.core.api.AssertionsForInterfaceTypes.assertThat;
+import static org.junit.jupiter.api.Assertions.fail;
+
 
 public class ServerUsingOldTypesDstu2_1Test {
 
 	private static FhirContext ourCtx = FhirContext.forDstu2_1();
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 	@Test
@@ -36,9 +35,8 @@ public class ServerUsingOldTypesDstu2_1Test {
 
 		try {
 			srv.init();
-			fail();
-		} catch (ServletException e) {
-			assertThat(e.getCause().toString(), StringContains.containsString("ConfigurationException"));
+			fail();		} catch (ServletException e) {
+			assertThat(e.getCause().toString()).contains("ConfigurationException");
 		}
 	}
 
@@ -50,9 +48,8 @@ public class ServerUsingOldTypesDstu2_1Test {
 
 		try {
 			srv.init();
-			fail();
-		} catch (ServletException e) {
-			assertThat(e.getCause().toString(), StringContains.containsString("ConfigurationException"));
+			fail();		} catch (ServletException e) {
+			assertThat(e.getCause().toString()).contains("ConfigurationException");
 		}
 	}
 
@@ -64,9 +61,8 @@ public class ServerUsingOldTypesDstu2_1Test {
 
 		try {
 			srv.init();
-			fail();
-		} catch (ServletException e) {
-			assertThat(e.getCause().toString(), StringContains.containsString("Incorrect use of type"));
+			fail();		} catch (ServletException e) {
+			assertThat(e.getCause().toString()).contains("Incorrect use of type");
 		}
 	}
 

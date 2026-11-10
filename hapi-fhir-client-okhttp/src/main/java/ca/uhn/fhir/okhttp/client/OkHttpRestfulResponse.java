@@ -1,17 +1,15 @@
-package ca.uhn.fhir.okhttp.client;
-
 /*
  * #%L
  * HAPI FHIR OkHttp Client
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,15 +17,24 @@ package ca.uhn.fhir.okhttp.client;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.okhttp.client;
 
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.rest.api.Constants;
 import ca.uhn.fhir.rest.client.api.IHttpResponse;
-import ca.uhn.fhir.rest.server.Constants;
+import ca.uhn.fhir.rest.client.impl.BaseHttpResponse;
 import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.util.StopWatch;
 import okhttp3.MediaType;
 import okhttp3.Response;
 import org.apache.commons.io.IOUtils;
 
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.io.StringReader;
 import java.util.List;
 import java.util.Map;
 
@@ -36,19 +43,15 @@ import java.util.Map;
  *
  * @author Matthew Clarke | matthew.clarke@orionhealth.com | Orion Health
  */
-public class OkHttpRestfulResponse implements IHttpResponse {
+public class OkHttpRestfulResponse extends BaseHttpResponse implements IHttpResponse {
 
 	private boolean myEntityBuffered = false;
 	private byte[] myEntityBytes;
 	private Response myResponse;
 
-	public OkHttpRestfulResponse(Response theResponse) {
+	public OkHttpRestfulResponse(Response theResponse, StopWatch theResponseStopWatch) {
+		super(theResponseStopWatch);
 		this.myResponse = theResponse;
-	}
-
-	@Override
-	public void bufferEntitity() throws IOException {
-		bufferEntity();
 	}
 
 	@Override
@@ -56,13 +59,14 @@ public class OkHttpRestfulResponse implements IHttpResponse {
 		if (myEntityBuffered) {
 			return;
 		}
-		InputStream responseEntity = readEntity();
-		if (responseEntity != null) {
-			myEntityBuffered = true;
-			try {
-				myEntityBytes = IOUtils.toByteArray(responseEntity);
-			} catch (IllegalStateException e) {
-				throw new InternalErrorException(e);
+		try (InputStream responseEntity = readEntity()) {
+			if (responseEntity != null) {
+				myEntityBuffered = true;
+				try {
+					myEntityBytes = IOUtils.toByteArray(responseEntity);
+				} catch (IllegalStateException e) {
+					throw new InternalErrorException(Msg.code(465) + e);
+				}
 			}
 		}
 	}
@@ -84,6 +88,11 @@ public class OkHttpRestfulResponse implements IHttpResponse {
 	@Override
 	public Map<String, List<String>> getAllHeaders() {
 		return myResponse.headers().toMultimap();
+	}
+
+	@Override
+	public List<String> getHeaders(String theName) {
+		return myResponse.headers(theName);
 	}
 
 	@Override
@@ -134,5 +143,4 @@ public class OkHttpRestfulResponse implements IHttpResponse {
 	private MediaType typeAndSubtypeOnly(MediaType input) {
 		return MediaType.parse(input.type() + "/" + input.subtype());
 	}
-
 }

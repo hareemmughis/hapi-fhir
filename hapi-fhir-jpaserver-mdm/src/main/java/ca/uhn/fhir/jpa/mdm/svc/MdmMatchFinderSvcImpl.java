@@ -1,0 +1,191 @@
+/*-
+ * #%L
+ * HAPI FHIR JPA Server - Master Data Management
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.mdm.svc;
+
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.api.dao.DaoRegistry;
+import ca.uhn.fhir.jpa.api.dao.IFhirResourceDao;
+import ca.uhn.fhir.jpa.mdm.config.MdmCommonConfig;
+import ca.uhn.fhir.jpa.mdm.svc.candidate.MdmCandidateSearchSvc;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
+import ca.uhn.fhir.mdm.api.IMdmMatchFinderSvc;
+import ca.uhn.fhir.mdm.api.IMdmSettings;
+import ca.uhn.fhir.mdm.api.MatchedTarget;
+import ca.uhn.fhir.mdm.api.MdmMatchOutcome;
+import ca.uhn.fhir.mdm.api.MdmRuleSetEnum;
+import ca.uhn.fhir.mdm.log.Logs;
+import ca.uhn.fhir.mdm.model.CanonicalEID;
+import ca.uhn.fhir.mdm.model.MdmTransactionContext;
+import ca.uhn.fhir.mdm.rules.svc.MdmResourceMatcherSvc;
+import ca.uhn.fhir.mdm.util.EIDHelper;
+import ca.uhn.fhir.mdm.util.MdmSearchParamBuildingUtils;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.api.server.SystemRequestDetails;
+import ca.uhn.fhir.rest.param.TokenOrListParam;
+import jakarta.annotation.Nonnull;
+import org.hl7.fhir.instance.model.api.IAnyResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.slf4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import static ca.uhn.fhir.jpa.mdm.svc.candidate.CandidateSearcher.idOrType;
+import static ca.uhn.fhir.storage.PlaceholderResourceUtil.isPlaceholderResource;
+import static org.hl7.fhir.dstu2016may.model.Basic.SP_IDENTIFIER;
+
+@Service
+public class MdmMatchFinderSvcImpl implements IMdmMatchFinderSvc {
+
+	private static final Logger ourLog = Logs.getMdmTroubleshootingLog();
+
+	@Autowired
+	private DaoRegistry myDaoRegistry;
+
+	@Autowired
+	private MdmCandidateSearchSvc myMdmCandidateSearchSvc;
+
+	@Autowired
+	private MdmResourceMatcherSvc myMdmResourceMatcherSvc;
+
+	@Autowired
+	@Qualifier(MdmCommonConfig.MATCH_ONLY_MDM_RESOURCE_MATCHER_SVC)
+	private MdmResourceMatcherSvc myMatchOnlyMdmResourceMatcherSvc;
+
+	@Autowired
+	private EIDHelper myEIDHelper;
+
+	@Autowired
+	private IMdmSettings myMdmSettings;
+
+	@Override
+	@Nonnull
+	@Transactional
+	public List<MatchedTarget> getMatchedTargets(
+			String theResourceType,
+			IAnyResource theResource,
+			RequestPartitionId theRequestPartitionId,
+			MdmRuleSetEnum theRuleSet,
+			@Nonnull MdmTransactionContext theContext) {
+
+		// we match on EID even if placeholder resources are set to be ignored
+		List<MatchedTarget> retval =
+				matchBasedOnEid(theResourceType, theResource, theRequestPartitionId, theRuleSet, theContext);
+		if (!retval.isEmpty()) {
+			return retval;
+		}
+
+		if (shouldIgnoreResource(theResource)) {
+			// source is a placeholder (set to be ignored)
+			// return nothing
+			return Collections.emptyList();
+		}
+
+		Collection<IAnyResource> targetCandidates = myMdmCandidateSearchSvc.findCandidates(
+				theResourceType, theResource, theRequestPartitionId, theRuleSet, theContext);
+
+		MdmResourceMatcherSvc matcherSvc = getMatcherSvc(theRuleSet);
+		List<MatchedTarget> matches = targetCandidates.stream()
+				.filter(candidate -> !shouldIgnoreResource(candidate))
+				.map(candidate -> new MatchedTarget(candidate, matcherSvc.getMatchResult(theResource, candidate)))
+				.collect(Collectors.toList());
+
+		ourLog.trace("Found {} matched targets for {}.", matches.size(), idOrType(theResource, theResourceType));
+		return matches;
+	}
+
+	private MdmResourceMatcherSvc getMatcherSvc(MdmRuleSetEnum theRuleSet) {
+		return switch (theRuleSet) {
+			case MATCH_AND_LINK -> myMdmResourceMatcherSvc;
+			case MATCH_ONLY -> myMatchOnlyMdmResourceMatcherSvc;
+		};
+	}
+
+	private List<MatchedTarget> matchBasedOnEid(
+			String theResourceType,
+			IAnyResource theResource,
+			RequestPartitionId theRequestPartitionId,
+			MdmRuleSetEnum theRuleSet,
+			MdmTransactionContext theContext) {
+
+		List<CanonicalEID> eidsFromResource = myEIDHelper.getExternalEid(theResource, theRuleSet);
+		if (eidsFromResource.isEmpty()) {
+			return Collections.emptyList();
+		}
+
+		return searchForResourceByEIDs(
+				theResource.getIdElement().toUnqualifiedVersionless(),
+				eidsFromResource,
+				theResourceType,
+				theRequestPartitionId,
+				theContext);
+	}
+
+	private List<MatchedTarget> searchForResourceByEIDs(
+			IIdType theResourceIdToExclude,
+			List<CanonicalEID> theEids,
+			String theResourceType,
+			RequestPartitionId theRequestPartitionId,
+			MdmTransactionContext theContext) {
+		// Each EID is searched against its own system: a resource type may be identified by several EID
+		// systems, and the same value issued by two of them is not the same identifier.
+		Optional<TokenOrListParam> eidsToSearch = MdmSearchParamBuildingUtils.buildEidTokenParam(theEids);
+		if (eidsToSearch.isEmpty()) {
+			return Collections.emptyList();
+		}
+
+		final SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(SP_IDENTIFIER, eidsToSearch.get());
+
+		IFhirResourceDao<?> resourceDao = myDaoRegistry.getResourceDao(theResourceType);
+		SystemRequestDetails systemRequestDetails = new SystemRequestDetails();
+		systemRequestDetails.setRequestPartitionId(theRequestPartitionId);
+		IBundleProvider search = resourceDao.search(map, systemRequestDetails);
+		List<MatchedTarget> retval = new ArrayList<>();
+		// We can't use toList() here since it returns an unmodifiable list and we will be sorting it later
+		search.getAllResources().stream()
+				.map(IAnyResource.class::cast)
+				// Exclude the incoming resource from the matched results
+				.filter(resource ->
+						!theResourceIdToExclude.equals(resource.getIdElement().toUnqualifiedVersionless()))
+				.map(resource -> new MatchedTarget(resource, MdmMatchOutcome.EID_MATCH))
+				.forEach(retval::add);
+		return retval;
+	}
+
+	/**
+	 * Whether or not the resource should be ignored for mdm matching purposes
+	 */
+	private boolean shouldIgnoreResource(IAnyResource theResource) {
+		if (!myMdmSettings.isIgnorePlaceholderResources()) {
+			return false;
+		}
+
+		return isPlaceholderResource(theResource);
+	}
+}

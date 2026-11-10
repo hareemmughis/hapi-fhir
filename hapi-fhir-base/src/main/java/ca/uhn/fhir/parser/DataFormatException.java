@@ -1,17 +1,15 @@
-package ca.uhn.fhir.parser;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,13 +17,24 @@ package ca.uhn.fhir.parser;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.parser;
 
-public class DataFormatException extends RuntimeException {
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+
+/**
+ * Thrown when client-supplied data cannot be parsed (invalid date, malformed JSON/XML, etc.).
+ * Extends {@link InvalidRequestException} so the HTTP 400 status code is preserved by
+ * status-aware exception interceptors — including those that wrap or replace exceptions before
+ * HAPI's {@code ExceptionHandlingInterceptor} runs (e.g. CDR's
+ * {@code ExceptionDetailsSuppressingInterceptor}). Without this hierarchy such interceptors had
+ * no status code to read and fell back to HTTP 500 for invalid client input.
+ */
+public class DataFormatException extends InvalidRequestException {
 
 	private static final long serialVersionUID = 1L;
 
 	public DataFormatException() {
-		super();
+		super((String) null);
 	}
 
 	public DataFormatException(String theMessage) {
@@ -39,5 +48,4 @@ public class DataFormatException extends RuntimeException {
 	public DataFormatException(Throwable theCause) {
 		super(theCause);
 	}
-
 }

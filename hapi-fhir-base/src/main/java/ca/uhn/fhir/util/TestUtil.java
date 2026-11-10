@@ -1,17 +1,15 @@
-package ca.uhn.fhir.util;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,81 +17,40 @@ package ca.uhn.fhir.util;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.util;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
-import java.util.Arrays;
+import ca.uhn.fhir.i18n.HapiLocalizer;
+import ca.uhn.fhir.i18n.Msg;
+
 import java.util.Locale;
 import java.util.TimeZone;
+import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicInteger;
 
-import org.slf4j.LoggerFactory;
-
-import ca.uhn.fhir.context.FhirContext;
-import ch.qos.logback.classic.Level;
-import ch.qos.logback.classic.Logger;
-import ch.qos.logback.classic.LoggerContext;
+import static org.apache.commons.lang3.StringUtils.defaultString;
 
 public class TestUtil {
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(TestUtil.class);
 
+	private static SleepUtil ourSleepUtil = new SleepUtil();
+
+	private static boolean ourShouldRandomizeTimezones = true;
+
+	public static void setShouldRandomizeTimezones(boolean theShouldRandomizeTimezones) {
+		ourShouldRandomizeTimezones = theShouldRandomizeTimezones;
+	}
+
 	/**
 	 * <b>THIS IS FOR UNIT TESTS ONLY - DO NOT CALL THIS METHOD FROM USER CODE</b>
-	 * 
+	 * <p>
 	 * When we run the unit tests in cobertura, JUnit doesn't seem to clean up static fields which leads to
 	 * tons of memory being used by the end and the JVM crashes in Travis. Manually clearing all of the
 	 * static fields seems to solve this.
 	 */
-	public static void clearAllStaticFieldsForUnitTest() {
+	public static void randomizeLocaleAndTimezone() {
+		HapiLocalizer.setOurFailOnMissingMessage(true);
 
-		Class<?> theType;
-		try {
-			throw new Exception();
-		} catch (Exception e) {
-			StackTraceElement[] st = e.getStackTrace();
-			StackTraceElement elem = st[1];
-			String clazzName = elem.getClassName();
-			try {
-				theType = Class.forName(clazzName);
-			} catch (ClassNotFoundException e1) {
-				throw new Error(e);
-			}
-		}
-
-		for (Field next : Arrays.asList(theType.getDeclaredFields())) {
-			if (Modifier.isStatic(next.getModifiers())) {
-				if (!Modifier.isFinal(next.getModifiers()) && !next.getType().isPrimitive()) {
-					ourLog.info("Clearing value of field: {}", next.toString());
-					try {
-						next.setAccessible(true);
-						next.set(theType, null);
-					} catch (Exception e) {
-						throw new Error(e);
-					}
-				}
-				if (Modifier.isFinal(next.getModifiers())) {
-					if (next.getType().equals(FhirContext.class)) {
-						throw new Error("Test has final field of type FhirContext: " + next);
-					}
-				}
-			}
-
-		}
-
-		randomizeLocale();
-
-		/*
-		 * If we're running a CI build, set all loggers to TRACE level to ensure coverage
-		 * on trace blocks
-		 */
-		try {
-			if ("true".equals(System.getProperty("ci"))) {
-				for (Logger next : ((LoggerContext) LoggerFactory.getILoggerFactory()).getLoggerList()) {
-					next.setLevel(Level.TRACE);
-				}
-			}
-		} catch (NoClassDefFoundError e) {
-			// ignore
-		}
+		doRandomizeLocaleAndTimezone();
 	}
 
 	/**
@@ -101,8 +58,9 @@ public class TestUtil {
 	 * but it helps us make sure we don't have any tests that depend on a particular
 	 * environment
 	 */
-	public static void randomizeLocale() {
-		Locale[] availableLocales = { Locale.CANADA, Locale.GERMANY, Locale.TAIWAN };
+	public static void doRandomizeLocaleAndTimezone() {
+		//		Locale[] availableLocales = {Locale.CANADA, Locale.GERMANY, Locale.TAIWAN};
+		Locale[] availableLocales = {Locale.US};
 		Locale.setDefault(availableLocales[(int) (Math.random() * availableLocales.length)]);
 		ourLog.info("Tests are running in locale: " + Locale.getDefault().getDisplayName());
 		if (Math.random() < 0.5) {
@@ -114,10 +72,88 @@ public class TestUtil {
 			System.setProperty("file.encoding", "UTF-8");
 			System.setProperty("line.separator", "\n");
 		}
-		String availableTimeZones[] = { "GMT+08:00", "GMT-05:00", "GMT+00:00", "GMT+03:30" };
-		String timeZone = availableTimeZones[(int) (Math.random() * availableTimeZones.length)];
-		TimeZone.setDefault(TimeZone.getTimeZone(timeZone));
+
+		if (ourShouldRandomizeTimezones) {
+			String availableTimeZones[] = {"GMT+08:00", "GMT-05:00", "GMT+00:00", "GMT+03:30"};
+			String timeZone = availableTimeZones[(int) (Math.random() * availableTimeZones.length)];
+			TimeZone.setDefault(TimeZone.getTimeZone(timeZone));
+		}
+
 		ourLog.info("Tests are using time zone: {}", TimeZone.getDefault().getID());
 	}
 
+	/**
+	 * <b>THIS IS FOR UNIT TESTS ONLY - DO NOT CALL THIS METHOD FROM USER CODE</b>
+	 * <p>
+	 * Wait for an atomicinteger to hit a given site and fail if it never does
+	 */
+	public static void waitForSize(int theTarget, AtomicInteger theInteger) {
+		long start = System.currentTimeMillis();
+		while (theInteger.get() != theTarget && (System.currentTimeMillis() - start) <= 15000) {
+			try {
+				Thread.sleep(50);
+			} catch (InterruptedException theE) {
+				throw new Error(Msg.code(1778) + theE);
+			}
+		}
+		if ((System.currentTimeMillis() - start) >= 15000) {
+			throw new IllegalStateException(Msg.code(1779) + "Size " + theInteger.get() + " is != target " + theTarget);
+		}
+	}
+
+	/**
+	 * <b>THIS IS FOR UNIT TESTS ONLY - DO NOT CALL THIS METHOD FROM USER CODE</b>
+	 * <p>
+	 * Wait for an atomicinteger to hit a given site and fail if it never does
+	 */
+	public static void waitForSize(int theTarget, Callable<Integer> theSource) throws Exception {
+		long start = System.currentTimeMillis();
+		while (theSource.call() != theTarget && (System.currentTimeMillis() - start) <= 15000) {
+			try {
+				Thread.sleep(50);
+			} catch (InterruptedException theE) {
+				throw new Error(Msg.code(1780) + theE);
+			}
+		}
+		if ((System.currentTimeMillis() - start) >= 15000) {
+			throw new IllegalStateException(Msg.code(1781) + "Size " + theSource.call() + " is != target " + theTarget);
+		}
+	}
+
+	/**
+	 * <b>THIS IS FOR UNIT TESTS ONLY - DO NOT CALL THIS METHOD FROM USER CODE</b>
+	 * <p>
+	 * Strip \r chars from a string to account for line ending platform differences
+	 */
+	public static String stripReturns(String theString) {
+		return defaultString(theString).replace("\r", "");
+	}
+
+	/**
+	 * <b>THIS IS FOR UNIT TESTS ONLY - DO NOT CALL THIS METHOD FROM USER CODE</b>
+	 * <p>
+	 * Strip \r chars from a string to account for line ending platform differences
+	 */
+	public static String stripWhitespace(String theString) {
+		return stripReturns(theString).replace(" ", "");
+	}
+
+	/**
+	 *
+	 * In production code, instead of this static method, it is better to use an instance of SleepUtil.
+	 * Since SleepUtil isn't using static methods, it is easier to mock for unit test and avoid unnecessary waits in
+	 * unit tests
+	 */
+	public static void sleepAtLeast(long theMillis) {
+		ourSleepUtil.sleepAtLeast(theMillis);
+	}
+
+	/**
+	 * In production code, instead of this static method, it is better to use an instance of SleepUtil.
+	 * Since SleepUtil isn't using static methods, it is easier to mock for unit test and avoid unnecessary waits in
+	 * unit tests
+	 */
+	public static void sleepAtLeast(long theMillis, boolean theLogProgress) {
+		ourSleepUtil.sleepAtLeast(theMillis, theLogProgress);
+	}
 }

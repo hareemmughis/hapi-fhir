@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.server.exceptions;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,15 +17,18 @@ package ca.uhn.fhir.rest.server.exceptions;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.server.exceptions;
 
-import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
-import org.hl7.fhir.instance.model.api.IIdType;
-
+import ca.uhn.fhir.i18n.Msg;
 import ca.uhn.fhir.model.api.IResource;
 import ca.uhn.fhir.model.base.composite.BaseIdentifierDt;
 import ca.uhn.fhir.model.primitive.IdDt;
-import ca.uhn.fhir.rest.server.Constants;
+import ca.uhn.fhir.rest.api.Constants;
 import ca.uhn.fhir.util.CoverageIgnore;
+import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
+import org.hl7.fhir.instance.model.api.IIdType;
+
+import java.io.Serial;
 
 /**
  * Represents an <b>HTTP 404 Resource Not Found</b> response, which means that the request is pointing to a resource that does not exist.
@@ -35,6 +36,7 @@ import ca.uhn.fhir.util.CoverageIgnore;
 @CoverageIgnore
 public class ResourceNotFoundException extends BaseServerResponseException {
 
+	@Serial
 	private static final long serialVersionUID = 1L;
 
 	public static final int STATUS_CODE = Constants.STATUS_HTTP_404_NOT_FOUND;
@@ -43,7 +45,8 @@ public class ResourceNotFoundException extends BaseServerResponseException {
 		super(STATUS_CODE, createErrorMessage(theClass, theId));
 	}
 
-	public ResourceNotFoundException(Class<? extends IResource> theClass, IdDt theId, IBaseOperationOutcome theOperationOutcome) {
+	public ResourceNotFoundException(
+			Class<? extends IResource> theClass, IdDt theId, IBaseOperationOutcome theOperationOutcome) {
 		super(STATUS_CODE, createErrorMessage(theClass, theId), theOperationOutcome);
 	}
 
@@ -51,13 +54,14 @@ public class ResourceNotFoundException extends BaseServerResponseException {
 		super(STATUS_CODE, createErrorMessage(theClass, theId));
 	}
 
-	public ResourceNotFoundException(Class<? extends IResource> theClass, IIdType theId, IBaseOperationOutcome theOperationOutcome) {
+	public ResourceNotFoundException(
+			Class<? extends IResource> theClass, IIdType theId, IBaseOperationOutcome theOperationOutcome) {
 		super(STATUS_CODE, createErrorMessage(theClass, theId), theOperationOutcome);
 	}
 
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @param theMessage
 	 *            The message
 	 *  @param theOperationOutcome The OperationOutcome resource to return to the client
@@ -82,7 +86,7 @@ public class ResourceNotFoundException extends BaseServerResponseException {
 		super(STATUS_CODE, createErrorMessage(theId));
 	}
 
-	public ResourceNotFoundException(IdDt theId, IBaseOperationOutcome theOperationOutcome) {
+	public ResourceNotFoundException(IIdType theId, IBaseOperationOutcome theOperationOutcome) {
 		super(STATUS_CODE, createErrorMessage(theId), theOperationOutcome);
 	}
 
@@ -91,11 +95,10 @@ public class ResourceNotFoundException extends BaseServerResponseException {
 	}
 
 	private static String createErrorMessage(Class<? extends IResource> theClass, IIdType theId) {
-		return "Resource of type " + theClass.getSimpleName() + " with ID " + theId + " is not known";
+		return Msg.code(970) + "Resource of type " + theClass.getSimpleName() + " with ID " + theId + " is not known";
 	}
 
 	private static String createErrorMessage(IIdType theId) {
-		return "Resource " + (theId != null ? theId.getValue() : "") + " is not known";
+		return Msg.code(971) + "Resource " + (theId != null ? theId.getValue() : "") + " is not known";
 	}
-
 }

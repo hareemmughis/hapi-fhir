@@ -1,6 +1,6 @@
 package ca.uhn.fhir.validation;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 public class PlaceholderTest {
 
@@ -11,5 +11,4 @@ public class PlaceholderTest {
 	public void testPass() {
 		// nothing
 	}
-	
 }

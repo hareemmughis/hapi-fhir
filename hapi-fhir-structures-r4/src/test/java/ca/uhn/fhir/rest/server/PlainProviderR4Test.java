@@ -1,0 +1,284 @@
+package ca.uhn.fhir.rest.server;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.model.api.ResourceMetadataKeyEnum;
+import ca.uhn.fhir.model.valueset.BundleEntrySearchModeEnum;
+import ca.uhn.fhir.rest.annotation.Count;
+import ca.uhn.fhir.rest.annotation.History;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.annotation.Read;
+import ca.uhn.fhir.rest.annotation.RequiredParam;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.annotation.Since;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.param.TokenParam;
+import ca.uhn.fhir.rest.server.provider.HashMapResourceProvider;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.HumanName;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Identifier;
+import org.hl7.fhir.r4.model.InstantType;
+import org.hl7.fhir.r4.model.IntegerType;
+import org.hl7.fhir.r4.model.Observation;
+import org.hl7.fhir.r4.model.OperationOutcome;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Resource;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+
+public class PlainProviderR4Test {
+
+	private static final FhirContext ourCtx = FhirContext.forR4Cached();
+
+	@RegisterExtension
+	public RestfulServerExtension ourServer = new RestfulServerExtension(ourCtx)
+		 .registerProvider(new HashMapResourceProvider<>(ourCtx, Observation.class))
+		 .withPagingProvider(new FifoMemoryPagingProvider(100))
+		 .setDefaultResponseEncoding(EncodingEnum.XML)
+		 .withServletPath("/fhir/context/*");
+
+	@Test
+	public void providersThatReturnListOfResources_willNotHaveNonMATCH() {
+		// setup
+		List<Patient> patients = new ArrayList<>();
+		IResourceProvider testProvider = new IResourceProvider() {
+
+			@Override
+			public Class<? extends IBaseResource> getResourceType() {
+				return Patient.class;
+			}
+
+			@Search
+			public List<IBaseResource> findPatients() {
+				LinkedList<IBaseResource> retVal = new LinkedList<>();
+				OperationOutcome outcome = new OperationOutcome();
+				outcome.addIssue().setCode(OperationOutcome.IssueType.INVALID);
+
+				//This line sets the "search mode" in the response entry
+				ResourceMetadataKeyEnum.ENTRY_SEARCH_MODE.put(outcome, BundleEntrySearchModeEnum.OUTCOME);
+
+				for (Patient nextPatient : patients) {
+					retVal.add(nextPatient);
+					retVal.add(outcome);
+				}
+
+				return retVal;
+			}
+		};
+		ourServer.registerProvider(testProvider);
+
+		Patient extraPatient = new Patient();
+		extraPatient.addName()
+			 .setFamily("simpson")
+			 .addGiven("Homer");
+		extraPatient.setId("Patient/extra");
+		patients.add(extraPatient);
+
+		// test
+		Bundle bundle = ourServer.fhirRequest("/Patient").get().getBodyAsResource(Bundle.class);
+
+		// validate
+		assertNotNull(bundle);
+
+		// we expect 2 resources; but 1 is an OperationOutcome (and is thus not part of the total)
+		assertEquals(2, bundle.getEntry().size());
+		assertEquals(1, bundle.getTotal());
+	}
+
+	@Test
+	public void testGlobalHistory() {
+		GlobalHistoryProvider provider = new GlobalHistoryProvider();
+		ourServer.registerProvider(provider);
+
+		Bundle bundle = ourServer.fhirRequest("/_history?_since=2012-01-02T00%3A01%3A02&_count=12")
+				.get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+		assertThat(bundle.getEntry()).hasSize(3);
+		
+		assertThat(provider.myLastSince.getValueAsString()).startsWith("2012-01-02T00:01:02");
+		assertEquals("12", provider.myLastCount.getValueAsString());
+
+		bundle = ourServer.fhirRequest("/_history?&_count=12")
+				.get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+		assertThat(bundle.getEntry()).hasSize(3);
+		assertNull(provider.myLastSince);
+		assertEquals("12", provider.myLastCount.getValueAsString());
+		
+		bundle = ourServer.fhirRequest("/_history?_since=2012-01-02T00%3A01%3A02")
+				.get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+		assertThat(bundle.getEntry()).hasSize(3);
+		assertThat(provider.myLastSince.getValueAsString()).startsWith("2012-01-02T00:01:02");
+		assertNull(provider.myLastCount);
+	}
+
+	@Test
+	public void testGlobalHistoryNoParams() {
+		GlobalHistoryProvider provider = new GlobalHistoryProvider();
+		ourServer.registerProvider(provider);
+
+		Bundle bundle = ourServer.fhirRequest("/_history")
+				.get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+		assertThat(bundle.getEntry()).hasSize(3);
+		assertNull(provider.myLastSince);
+		assertNull(provider.myLastCount);
+	}
+
+	@Test
+	public void testSearchByParamIdentifier() {
+		ourServer.registerProvider(new SearchProvider());
+
+		String baseUri = ourServer.getBaseUrl();
+		String path = "/Patient?identifier=urn:hapitest:mrns%7C00001";
+		String uri = baseUri + path;
+		Bundle bundle = ourServer.fhirRequest(path)
+				.get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+
+		assertThat(bundle.getEntry()).hasSize(1);
+
+		Patient patient = (Patient) bundle.getEntry().get(0).getResource();
+		assertThat(patient.getName().get(0).getGiven().get(0).getValue()).isEqualTo("PatientOne");
+
+		assertThat(bundle.getLink("self").getUrl()).isEqualTo(uri.replace(":hapitest:", "%3Ahapitest%3A"));
+
+	}
+	
+	@AfterAll
+	public static void afterClassClearContext() {
+		TestUtil.randomizeLocaleAndTimezone();
+	}
+
+	private static Organization createOrganization() {
+		Organization retVal = new Organization();
+		retVal.setId("1");
+		retVal.addIdentifier();
+		retVal.getIdentifier().get(0).setUse(Identifier.IdentifierUse.OFFICIAL);
+		retVal.getIdentifier().get(0).setSystem(("urn:hapitest:mrns"));
+		retVal.getIdentifier().get(0).setValue("00001");
+		retVal.setName("Test Org");
+		return retVal;
+	}
+
+	private static Patient createPatient() {
+		Patient patient = new Patient();
+		patient.setId("1");
+		patient.addIdentifier();
+		patient.getIdentifier().get(0).setUse(Identifier.IdentifierUse.OFFICIAL);
+		patient.getIdentifier().get(0).setSystem(("urn:hapitest:mrns"));
+		patient.getIdentifier().get(0).setValue("00001");
+		patient.addName();
+		patient.getName().get(0).setFamily("Test");
+		patient.getName().get(0).addGiven("PatientOne");
+		patient.getGenderElement().setValueAsString("male");
+		return patient;
+	}
+
+	public static class GlobalHistoryProvider {
+
+		private IntegerType myLastCount;
+		private InstantType myLastSince;
+
+		@History
+		public List<IBaseResource> getGlobalHistory(@Since InstantType theSince, @Count IntegerType theCount) {
+			myLastSince = theSince;
+			myLastCount = theCount;
+			ArrayList<IBaseResource> retVal = new ArrayList<>();
+
+			Resource p = createPatient();
+			p.setId(new IdType("1"));
+			p.getMeta().setVersionId("A");
+			p.getMeta().getLastUpdatedElement().setValueAsString("2012-01-01T01:00:01");
+			retVal.add(p);
+
+			p = createPatient();
+			p.setId(new IdType("1"));
+			p.getMeta().setVersionId("B");
+			p.getMeta().getLastUpdatedElement().setValueAsString("2012-01-01T01:00:03");
+			retVal.add(p);
+
+			p = createOrganization();
+			p.setId(new IdType("1"));
+			p.getMeta().setVersionId("A");
+			p.getMeta().getLastUpdatedElement().setValueAsString("2013-01-01T01:00:01");
+			retVal.add(p);
+
+			return retVal;
+		}
+
+	}
+
+
+	public static class SearchProvider {
+
+		@Search(type = Patient.class)
+		public Patient findPatient(@RequiredParam(name = Patient.SP_IDENTIFIER) TokenParam theIdentifier) {
+			for (Patient next : getIdToPatient().values()) {
+				for (Identifier nextId : next.getIdentifier()) {
+					if (nextId.getSystem().equals(theIdentifier.getSystem()) && nextId.getValue().equals(theIdentifier.getValue())) {
+						return next;
+					}
+				}
+			}
+			return null;
+		}
+
+		public Map<String, Patient> getIdToPatient() {
+			Map<String, Patient> idToPatient = new HashMap<>();
+			{
+				Patient patient = createPatient();
+				idToPatient.put("1", patient);
+			}
+			{
+				Patient patient = new Patient();
+				patient.getIdentifier().add(new Identifier());
+				patient.getIdentifier().get(0).setUse(Identifier.IdentifierUse.OFFICIAL);
+				patient.getIdentifier().get(0).setSystem(("urn:hapitest:mrns"));
+				patient.getIdentifier().get(0).setValue("00002");
+				patient.getName().add(new HumanName());
+				patient.getName().get(0).setFamily("Test");
+				patient.getName().get(0).addGiven("PatientTwo");
+				patient.getGenderElement().setValueAsString("female");
+				idToPatient.put("2", patient);
+			}
+			return idToPatient;
+		}
+
+		/**
+		 * Retrieve the resource by its identifier
+		 * 
+		 * @param theId
+		 *            The resource identity
+		 * @return The resource
+		 */
+		@Read(type = Patient.class)
+		public Patient getPatientById(@IdParam IdType theId) {
+			return getIdToPatient().get(theId.getValue());
+		}
+
+	}
+
+}

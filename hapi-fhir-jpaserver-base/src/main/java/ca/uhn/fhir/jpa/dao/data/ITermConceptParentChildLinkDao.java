@@ -1,17 +1,15 @@
-package ca.uhn.fhir.jpa.dao.data;
-
 /*
  * #%L
  * HAPI FHIR JPA Server
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,18 +17,32 @@ package ca.uhn.fhir.jpa.dao.data;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.jpa.dao.data;
 
+import ca.uhn.fhir.jpa.entity.TermConceptParentChildLink;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
-import ca.uhn.fhir.jpa.entity.TermConceptParentChildLink;
+import java.util.Collection;
 
-public interface ITermConceptParentChildLinkDao extends JpaRepository<TermConceptParentChildLink, Long> {
+public interface ITermConceptParentChildLinkDao
+		extends JpaRepository<TermConceptParentChildLink, TermConceptParentChildLink.TermConceptParentChildLinkPk>,
+				IHapiFhirJpaRepository {
 
-	@Query("DELETE FROM TermConceptParentChildLink t WHERE t.myCodeSystem.myId = :cs_pid")
+	@Query("SELECT t.myParentPid FROM TermConceptParentChildLink t WHERE t.myChildPid = :child_pid")
+	Collection<Long> findAllWithChild(@Param("child_pid") Long theConceptPid);
+
+	/**
+	 * Returns the distinct codes of all concepts that have at least one child (i.e. that appear as a
+	 * parent in a parent/child link) within the given CodeSystem version.
+	 */
+	@Query(
+			"SELECT DISTINCT t.myParent.myCode FROM TermConceptParentChildLink t WHERE t.myCodeSystemVersionPid = :csv_pid")
+	Collection<String> findDistinctParentCodesByCodeSystemVersion(@Param("csv_pid") Long theCodeSystemVersionPid);
+
 	@Modifying
-	void deleteByCodeSystemVersion(@Param("cs_pid") Long thePid);
-	
+	@Query("DELETE FROM TermConceptParentChildLink WHERE myCodeSystemVersionPid = :cs_pid")
+	int deleteByCodeSystemVersion(@Param("cs_pid") Long thePid);
 }

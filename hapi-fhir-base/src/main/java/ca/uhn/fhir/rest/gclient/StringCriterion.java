@@ -1,28 +1,15 @@
-package ca.uhn.fhir.rest.gclient;
-
-import static org.apache.commons.lang3.StringUtils.isBlank;
-
-import java.util.Collection;
-import java.util.List;
-
-import org.apache.commons.lang3.StringUtils;
-
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.rest.param.ParamPrefixEnum;
-import ca.uhn.fhir.rest.param.ParameterUtil;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -30,6 +17,16 @@ import ca.uhn.fhir.rest.param.ParameterUtil;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.gclient;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.param.ParamPrefixEnum;
+import ca.uhn.fhir.rest.param.ParameterUtil;
+import org.apache.commons.lang3.StringUtils;
+
+import java.util.Collection;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
 
 class StringCriterion<A extends IParam> implements ICriterion<A>, ICriterionInternal {
 
@@ -38,18 +35,18 @@ class StringCriterion<A extends IParam> implements ICriterion<A>, ICriterionInte
 	private ParamPrefixEnum myPrefix;
 
 	public StringCriterion(String theName, String theValue) {
-		myName=theName;
+		myName = theName;
 		myValue = ParameterUtil.escapeWithDefault(theValue);
 	}
 
 	public StringCriterion(String theName, ParamPrefixEnum thePrefix, String theValue) {
-		myName=theName;
+		myName = theName;
 		myPrefix = thePrefix;
 		myValue = ParameterUtil.escapeWithDefault(theValue);
 	}
 
 	public StringCriterion(String theName, Collection<String> theValue) {
-		myName=theName;
+		myName = theName;
 		StringBuilder b = new StringBuilder();
 		for (String next : theValue) {
 			if (StringUtils.isBlank(next)) {
@@ -74,9 +71,8 @@ class StringCriterion<A extends IParam> implements ICriterion<A>, ICriterionInte
 			return "";
 		}
 		if (myPrefix != null) {
-			return myPrefix.getValueForContext(theContext) + myValue;
+			return myPrefix.getValue() + myValue;
 		}
 		return myValue;
 	}
-
 }

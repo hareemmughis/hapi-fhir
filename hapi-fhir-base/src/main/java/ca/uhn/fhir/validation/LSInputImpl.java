@@ -1,17 +1,15 @@
-package ca.uhn.fhir.validation;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,11 +17,12 @@ package ca.uhn.fhir.validation;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.validation;
+
+import org.w3c.dom.ls.LSInput;
 
 import java.io.InputStream;
 import java.io.Reader;
-
-import org.w3c.dom.ls.LSInput;
 
 class LSInputImpl implements LSInput {
 
@@ -43,7 +42,7 @@ class LSInputImpl implements LSInput {
 
 	@Override
 	public void setCharacterStream(Reader theCharacterStream) {
-		myCharacterStream=theCharacterStream;
+		myCharacterStream = theCharacterStream;
 	}
 
 	@Override
@@ -53,7 +52,7 @@ class LSInputImpl implements LSInput {
 
 	@Override
 	public void setByteStream(InputStream theByteStream) {
-		myByteStream=theByteStream;
+		myByteStream = theByteStream;
 	}
 
 	@Override
@@ -63,7 +62,7 @@ class LSInputImpl implements LSInput {
 
 	@Override
 	public void setStringData(String theStringData) {
-		myStringData=theStringData;
+		myStringData = theStringData;
 	}
 
 	@Override
@@ -73,7 +72,7 @@ class LSInputImpl implements LSInput {
 
 	@Override
 	public void setSystemId(String theSystemId) {
-		mySystemId=theSystemId;
+		mySystemId = theSystemId;
 	}
 
 	@Override
@@ -83,7 +82,7 @@ class LSInputImpl implements LSInput {
 
 	@Override
 	public void setPublicId(String thePublicId) {
-		myPublicId=thePublicId;
+		myPublicId = thePublicId;
 	}
 
 	@Override
@@ -93,7 +92,7 @@ class LSInputImpl implements LSInput {
 
 	@Override
 	public void setBaseURI(String theBaseURI) {
-		myBaseURI=theBaseURI;
+		myBaseURI = theBaseURI;
 	}
 
 	@Override
@@ -103,7 +102,7 @@ class LSInputImpl implements LSInput {
 
 	@Override
 	public void setEncoding(String theEncoding) {
-		myEncoding=theEncoding;
+		myEncoding = theEncoding;
 	}
 
 	@Override
@@ -113,7 +112,6 @@ class LSInputImpl implements LSInput {
 
 	@Override
 	public void setCertifiedText(boolean theCertifiedText) {
-		myCertifiedText=theCertifiedText;
+		myCertifiedText = theCertifiedText;
 	}
-
 }

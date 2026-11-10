@@ -1,0 +1,1316 @@
+package org.hl7.fhir.common.hapi.validation.support;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.context.support.ConceptValidationOptions;
+import ca.uhn.fhir.context.support.DefaultProfileValidationSupport;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.LookupCodeRequest;
+import ca.uhn.fhir.context.support.TranslateConceptResults;
+import ca.uhn.fhir.context.support.ValidateCodeRequest;
+import ca.uhn.fhir.context.support.ValidationSupportContext;
+import ca.uhn.fhir.context.support.ValidationSupportUnavailableException;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.rest.api.SummaryEnum;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import ca.uhn.fhir.rest.client.api.IRestfulClientFactory;
+import ca.uhn.fhir.rest.gclient.IQuery;
+import ca.uhn.fhir.rest.gclient.StringClientParam;
+import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException;
+import ca.uhn.fhir.util.BundleUtil;
+import ca.uhn.fhir.util.Logs;
+import ca.uhn.fhir.util.ParametersUtil;
+import ca.uhn.fhir.util.UrlUtil;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Strings;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.dstu3.model.OperationOutcome.OperationOutcomeIssueComponent;
+import org.hl7.fhir.instance.model.api.IBaseBundle;
+import org.hl7.fhir.instance.model.api.IBaseDatatype;
+import org.hl7.fhir.instance.model.api.IBaseExtension;
+import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
+import org.hl7.fhir.instance.model.api.IBaseParameters;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+import org.hl7.fhir.r4.model.Base;
+import org.hl7.fhir.r4.model.BooleanType;
+import org.hl7.fhir.r4.model.CodeSystem;
+import org.hl7.fhir.r4.model.CodeType;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.DateTimeType;
+import org.hl7.fhir.r4.model.DecimalType;
+import org.hl7.fhir.r4.model.IntegerType;
+import org.hl7.fhir.r4.model.OperationOutcome;
+import org.hl7.fhir.r4.model.Parameters;
+import org.hl7.fhir.r4.model.Parameters.ParametersParameterComponent;
+import org.hl7.fhir.r4.model.Property;
+import org.hl7.fhir.r4.model.StringType;
+import org.hl7.fhir.r4.model.Type;
+import org.slf4j.Logger;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import static ca.uhn.fhir.util.ParametersUtil.getNamedParameterResource;
+import static ca.uhn.fhir.util.ParametersUtil.getNamedParameterValueAsString;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+/**
+ * This class is an implementation of {@link IValidationSupport} that fetches validation codes
+ * from a remote FHIR based terminology server. It will invoke the FHIR
+ * <a href="http://hl7.org/fhir/valueset-operation-validate-code.html">ValueSet/$validate-code</a>
+ * operation in order to validate codes.
+ */
+public class RemoteTerminologyServiceValidationSupport extends BaseTerminologyServerValidationSupport {
+	private static final Logger ourLog = Logs.getTerminologyTroubleshootingLog();
+	private static final String SNOMED_CT_URL = "http://snomed.info/sct";
+	private static final String SNOMED_CT_RELEASE_SEPARATOR = "/version/";
+
+	public static final String ERROR_CODE_UNKNOWN_CODE_IN_CODE_SYSTEM = "unknownCodeInSystem";
+	public static final String ERROR_CODE_UNKNOWN_CODE_IN_VALUE_SET = "unknownCodeInValueSet";
+	private static final String REMOTE_FAILURE_VALIDATING_CODE_IN_SYSTEM = "remoteServerFailureValidatingCodeInSystem";
+	private static final String REMOTE_FAILURE_VALIDATING_CODE_IN_VALUE_SET =
+			"remoteServerFailureValidatingCodeInValueSet";
+	private static final String REMOTE_FAILURE_LOOKING_UP_CODE = "remoteServerFailureLookingUpCode";
+	private static final String REMOTE_FAILURE_SEARCHING = "remoteServerFailureSearching";
+
+	private String myBaseUrl;
+	private final List<Object> myClientInterceptors = new ArrayList<>();
+
+	/**
+	 * Override for sending {@code inferSystem} on remote {@code $validate-code}:
+	 * {@code null} (default) sends it only for R5+, {@code TRUE} always sends it, {@code FALSE} never does.
+	 */
+	@Nullable
+	private Boolean myInferSystemEnabled = null;
+
+	@Nullable
+	private final IRestfulClientFactory myRestfulClientFactory;
+
+	/**
+	 * Constructor
+	 *
+	 * @param theFhirContext The FhirContext. Will be used to create a FHIR client for remote terminology requests.
+	 */
+	public RemoteTerminologyServiceValidationSupport(FhirContext theFhirContext) {
+		this(theFhirContext, null);
+	}
+
+	/**
+	 * Constructor
+	 *
+	 * @param theFhirContext The FhirContext. Will be used to create a FHIR client for remote terminology requests.
+	 * @param theBaseUrl The url used for the remote terminology FHIR client.
+	 */
+	public RemoteTerminologyServiceValidationSupport(FhirContext theFhirContext, String theBaseUrl) {
+		this(theFhirContext, theBaseUrl, null);
+	}
+
+	/**
+	 * Constructor
+	 *
+	 * @param theFhirContext The FhirContext.
+	 * @param theBaseUrl The url used for the remote terminology FHIR client.
+	 * @param theRestfulClientFactory Used to create the remote terminology FHIR client. If this is not supplied, a client will be created from the FhirContext
+	 */
+	public RemoteTerminologyServiceValidationSupport(
+			FhirContext theFhirContext, String theBaseUrl, @Nullable IRestfulClientFactory theRestfulClientFactory) {
+		super(theFhirContext);
+		myBaseUrl = theBaseUrl;
+		myRestfulClientFactory = theRestfulClientFactory;
+	}
+
+	@Override
+	public String getName() {
+		return getFhirContext().getVersion().getVersion() + " Remote Terminology Service Validation Support";
+	}
+
+	@Override
+	public CodeValidationResult validateCode(
+			ValidationSupportContext theValidationSupportContext,
+			ConceptValidationOptions theOptions,
+			String theCodeSystem,
+			String theCode,
+			String theDisplay,
+			String theValueSetUrl) {
+
+		return invokeRemoteValidateCode(theCodeSystem, null, theCode, theDisplay, theValueSetUrl, null);
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	@Nullable
+	public CodeValidationResult validateCode(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nonnull ConceptValidationOptions theOptions,
+			@Nonnull ValidateCodeRequest theRequest) {
+
+		return invokeRemoteValidateCode(
+				theRequest.getCodeSystem(),
+				theRequest.getCodeSystemVersion(),
+				theRequest.getCode(),
+				theRequest.getDisplay(),
+				theRequest.getValueSetUrl(),
+				null);
+	}
+
+	@Override
+	public CodeValidationResult validateCodeInValueSet(
+			ValidationSupportContext theValidationSupportContext,
+			ConceptValidationOptions theOptions,
+			String theCodeSystem,
+			String theCode,
+			String theDisplay,
+			@Nonnull IBaseResource theValueSet) {
+
+		IBaseResource valueSet = theValueSet;
+
+		// some external validators require the system when the code is passed
+		// so let's try to get it from the VS if is not present
+		String codeSystem = theCodeSystem;
+		if (isNotBlank(theCode) && isBlank(codeSystem)) {
+			codeSystem = ValidationSupportUtils.extractCodeSystemForCode(theValueSet, theCode);
+		}
+
+		String valueSetUrl = DefaultProfileValidationSupport.getConformanceResourceUrl(myCtx, valueSet);
+		if (isNotBlank(valueSetUrl)) {
+			valueSet = null;
+		} else {
+			valueSetUrl = null;
+		}
+		return invokeRemoteValidateCode(codeSystem, theCode, theDisplay, valueSetUrl, valueSet);
+	}
+
+	@Override
+	public IBaseResource fetchCodeSystem(String theSystem) {
+		UrlUtil.CanonicalUrlParts codeSystem = UrlUtil.parseCanonicalUrl(theSystem);
+		return fetchCodeSystem(codeSystem.url(), codeSystem.versionId().orElse(null));
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	@Nullable
+	public IBaseResource fetchCodeSystem(@Nonnull String theSystem, @Nullable String theVersion) {
+		// callers of this want the whole resource.
+		return searchForCodeSystem(theSystem, theVersion, SummaryEnum.FALSE);
+	}
+
+	/**
+	 * Search for a CodeSystem by url and version via IGenericClient.
+	 * <p>
+	 * The version is sent as its own search parameter: a CodeSystem resource's <code>url</code> element
+	 * never contains a pipe, so a packed <code>url|version</code> canonical matches nothing.
+	 * </p>
+	 *
+	 * @param theSystem the code system url, without a version
+	 * @param theVersion the code system version, or null for whichever version the server considers current
+	 * @param theSummaryParam to force a summary mode - or null to allow server default.
+	 * @return the CodeSystem, or null if none match
+	 * @throws ValidationSupportUnavailableException if the remote server fails or cannot be reached
+	 */
+	@Nullable
+	private IBaseResource searchForCodeSystem(
+			String theSystem, @Nullable String theVersion, @Nullable SummaryEnum theSummaryParam) {
+		IGenericClient client = provideClient();
+		Class<? extends IBaseBundle> bundleType =
+				myCtx.getResourceDefinition("Bundle").getImplementingClass(IBaseBundle.class);
+		IQuery<IBaseBundle> codeSystemQuery = client.search()
+				.forResource("CodeSystem")
+				.where(CodeSystem.URL.matches().value(theSystem));
+
+		if (isNotBlank(theVersion)) {
+			codeSystemQuery.where(new StringClientParam("version").matches().value(theVersion));
+		}
+
+		if (theSummaryParam != null) {
+			codeSystemQuery.summaryMode(theSummaryParam);
+		}
+
+		IBaseBundle results;
+		try {
+			results = codeSystemQuery.returnBundle(bundleType).execute();
+		} catch (BaseServerResponseException e) {
+			if (!isRemoteServerFailure(e)) {
+				throw e;
+			}
+			throw reportRemoteServerFailure(e, 3068, REMOTE_FAILURE_SEARCHING, "CodeSystem", theSystem);
+		}
+		List<IBaseResource> resultsList = BundleUtil.toListOfResources(myCtx, results);
+		if (!resultsList.isEmpty()) {
+			return resultsList.get(0);
+		}
+
+		return null;
+	}
+
+	@Override
+	public LookupCodeResult lookupCode(
+			ValidationSupportContext theValidationSupportContext, @Nonnull LookupCodeRequest theLookupCodeRequest) {
+		final String code = theLookupCodeRequest.getCode();
+		final String system = theLookupCodeRequest.getSystem();
+		final String version = theLookupCodeRequest.getVersion();
+		final String displayLanguage = theLookupCodeRequest.getDisplayLanguage();
+		Validate.notBlank(code, "theCode must be provided");
+
+		IGenericClient client = provideClient();
+		FhirContext fhirContext = client.getFhirContext();
+		FhirVersionEnum fhirVersion = fhirContext.getVersion().getVersion();
+
+		if (fhirVersion.isNewerThan(FhirVersionEnum.R4) || fhirVersion.isOlderThan(FhirVersionEnum.DSTU3)) {
+			throw new UnsupportedOperationException(Msg.code(710) + "Unsupported FHIR version '"
+					+ fhirVersion.getFhirVersionString() + "'. Only DSTU3 and R4 are supported.");
+		}
+
+		IBaseParameters params = ParametersUtil.newInstance(fhirContext);
+		ParametersUtil.addParameterToParametersString(fhirContext, params, "code", code);
+		if (!StringUtils.isEmpty(system)) {
+			ParametersUtil.addParameterToParametersString(fhirContext, params, "system", system);
+		}
+		// Without this the server answers from whichever version it treats as current, and the caller who
+		// named a version is told nothing about the substitution.
+		// Created by Claude Opus 5
+		if (!StringUtils.isEmpty(version)) {
+			ParametersUtil.addParameterToParametersString(fhirContext, params, "version", version);
+		}
+		if (!StringUtils.isEmpty(displayLanguage)) {
+			ParametersUtil.addParameterToParametersString(fhirContext, params, "language", displayLanguage);
+		}
+		for (String propertyName : theLookupCodeRequest.getPropertyNames()) {
+			ParametersUtil.addParameterToParametersCode(fhirContext, params, "property", propertyName);
+		}
+		Class<? extends IBaseResource> codeSystemClass =
+				myCtx.getResourceDefinition("CodeSystem").getImplementingClass();
+		IBaseParameters outcome;
+		try {
+			outcome = client.operation()
+					.onType(codeSystemClass)
+					.named("$lookup")
+					.withParameters(params)
+					.useHttpGet()
+					.execute();
+		} catch (ResourceNotFoundException | InvalidRequestException e) {
+			// this can potentially be moved to an interceptor and be reused in other areas
+			// where we call a remote server or by the client as a custom interceptor
+			// that interceptor would alter the status code of the response and the body into a different format
+			// e.g. ClientResponseInterceptorModificationTemplate
+			ourLog.error(e.getMessage(), e);
+			LookupCodeResult result = LookupCodeResult.notFound(system, code);
+			result.setErrorMessage(getErrorMessage(
+					ERROR_CODE_UNKNOWN_CODE_IN_CODE_SYSTEM, system, code, getBaseUrl(), e.getMessage()));
+			return result;
+		} catch (BaseServerResponseException e) {
+			if (!isRemoteServerFailure(e)) {
+				throw e;
+			}
+			// not-found would tell the caller the code does not exist, when the remote server failed to say
+			// inside a validation support chain, this lets a module that looks the code up report it unchecked
+			throw reportRemoteServerFailure(e, 3067, REMOTE_FAILURE_LOOKING_UP_CODE, system, code);
+		}
+		if (outcome != null && !outcome.isEmpty()) {
+			if (fhirVersion == FhirVersionEnum.DSTU3) {
+				return generateLookupCodeResultDstu3(code, system, (org.hl7.fhir.dstu3.model.Parameters) outcome);
+			}
+			if (fhirVersion == FhirVersionEnum.R4) {
+				return generateLookupCodeResultR4(code, system, (Parameters) outcome);
+			}
+		}
+		return LookupCodeResult.notFound(system, code);
+	}
+
+	protected String getErrorMessage(String errorCode, Object... theParams) {
+		return getFhirContext().getLocalizer().getMessage(getClass(), errorCode, theParams);
+	}
+
+	private LookupCodeResult generateLookupCodeResultDstu3(
+			String theCode, String theSystem, org.hl7.fhir.dstu3.model.Parameters outcomeDSTU3) {
+		// NOTE: I wanted to put all of this logic into the IValidationSupport Class, but it would've required adding
+		// several new dependencies on version-specific libraries and that is explicitly forbidden (see comment in
+		// POM).
+		LookupCodeResult result = new LookupCodeResult();
+		result.setSearchedForCode(theCode);
+		result.setSearchedForSystem(theSystem);
+		result.setFound(true);
+		for (org.hl7.fhir.dstu3.model.Parameters.ParametersParameterComponent parameterComponent :
+				outcomeDSTU3.getParameter()) {
+			String parameterTypeAsString = Objects.toString(parameterComponent.getValue(), null);
+			switch (parameterComponent.getName()) {
+				case "property":
+					BaseConceptProperty conceptProperty = createConceptPropertyDstu3(parameterComponent);
+					if (conceptProperty != null) {
+						result.getProperties().add(conceptProperty);
+					}
+					break;
+				case "designation":
+					ConceptDesignation conceptDesignation = createConceptDesignationDstu3(parameterComponent);
+					result.getDesignations().add(conceptDesignation);
+					break;
+				case "name":
+					result.setCodeSystemDisplayName(parameterTypeAsString);
+					break;
+				case "version":
+					result.setCodeSystemVersion(parameterTypeAsString);
+					break;
+				case "display":
+					result.setCodeDisplay(parameterTypeAsString);
+					break;
+				case "abstract":
+					result.setCodeIsAbstract(Boolean.parseBoolean(parameterTypeAsString));
+					break;
+				default:
+			}
+		}
+		return result;
+	}
+
+	private static BaseConceptProperty createConceptPropertyDstu3(
+			org.hl7.fhir.dstu3.model.Parameters.ParametersParameterComponent theParameterComponent) {
+		org.hl7.fhir.dstu3.model.Property property = theParameterComponent.getChildByName("part");
+
+		// The assumption here is that we may at east 2 elements in this part
+		if (property == null || property.getValues().size() < 2) {
+			return null;
+		}
+
+		List<org.hl7.fhir.dstu3.model.Base> values = property.getValues();
+		org.hl7.fhir.dstu3.model.Parameters.ParametersParameterComponent firstPart =
+				(org.hl7.fhir.dstu3.model.Parameters.ParametersParameterComponent) values.get(0);
+		String propertyName = ((org.hl7.fhir.dstu3.model.CodeType) firstPart.getValue()).getValue();
+
+		org.hl7.fhir.dstu3.model.Parameters.ParametersParameterComponent secondPart =
+				(org.hl7.fhir.dstu3.model.Parameters.ParametersParameterComponent) values.get(1);
+		org.hl7.fhir.dstu3.model.Type value = secondPart.getValue();
+
+		if (value != null) {
+			return createConceptPropertyDstu3(propertyName, value);
+		}
+
+		String groupName = secondPart.getName();
+		if (!"subproperty".equals(groupName)) {
+			return null;
+		}
+
+		// handle property group (a property containing sub-properties)
+		GroupConceptProperty groupConceptProperty = new GroupConceptProperty(propertyName);
+
+		// we already retrieved the property name (group name) as first element, next will be the sub-properties.
+		// there is no dedicated value for a property group as it is an aggregate
+		for (int i = 1; i < values.size(); i++) {
+			org.hl7.fhir.dstu3.model.Parameters.ParametersParameterComponent nextPart =
+					(org.hl7.fhir.dstu3.model.Parameters.ParametersParameterComponent) values.get(i);
+			BaseConceptProperty subProperty = createConceptPropertyDstu3(nextPart);
+			if (subProperty != null) {
+				groupConceptProperty.addSubProperty(subProperty);
+			}
+		}
+		return groupConceptProperty;
+	}
+
+	public static BaseConceptProperty createConceptProperty(final String theName, final IBaseDatatype theValue) {
+		if (theValue instanceof Type) {
+			return createConceptPropertyR4(theName, (Type) theValue);
+		}
+		if (theValue instanceof org.hl7.fhir.dstu3.model.Type) {
+			return createConceptPropertyDstu3(theName, (org.hl7.fhir.dstu3.model.Type) theValue);
+		}
+		return null;
+	}
+
+	private static BaseConceptProperty createConceptPropertyDstu3(
+			final String theName, final org.hl7.fhir.dstu3.model.Type theValue) {
+		if (theValue == null) {
+			return null;
+		}
+		BaseConceptProperty conceptProperty;
+		String fhirType = theValue.fhirType();
+		switch (fhirType) {
+			case IValidationSupport.TYPE_STRING:
+				org.hl7.fhir.dstu3.model.StringType stringType = (org.hl7.fhir.dstu3.model.StringType) theValue;
+				conceptProperty = new StringConceptProperty(theName, stringType.getValue());
+				break;
+			case IValidationSupport.TYPE_CODING:
+				org.hl7.fhir.dstu3.model.Coding coding = (org.hl7.fhir.dstu3.model.Coding) theValue;
+				conceptProperty =
+						new CodingConceptProperty(theName, coding.getSystem(), coding.getCode(), coding.getDisplay());
+				break;
+				// TODO: add other property types as per FHIR spec https://github.com/hapifhir/hapi-fhir/issues/5699
+			default:
+				// other types will not fail for Remote Terminology
+				conceptProperty = new StringConceptProperty(theName, theValue.toString());
+		}
+		return conceptProperty;
+	}
+
+	private ConceptDesignation createConceptDesignationDstu3(
+			org.hl7.fhir.dstu3.model.Parameters.ParametersParameterComponent theParameterComponent) {
+		ConceptDesignation conceptDesignation = new ConceptDesignation();
+		for (org.hl7.fhir.dstu3.model.Parameters.ParametersParameterComponent designationComponent :
+				theParameterComponent.getPart()) {
+			org.hl7.fhir.dstu3.model.Type designationComponentValue = designationComponent.getValue();
+			if (designationComponentValue == null) {
+				continue;
+			}
+			switch (designationComponent.getName()) {
+				case "language":
+					conceptDesignation.setLanguage(designationComponentValue.toString());
+					break;
+				case "use":
+					org.hl7.fhir.dstu3.model.Coding coding =
+							(org.hl7.fhir.dstu3.model.Coding) designationComponentValue;
+					conceptDesignation.setUseSystem(coding.getSystem());
+					conceptDesignation.setUseCode(coding.getCode());
+					conceptDesignation.setUseDisplay(coding.getDisplay());
+					break;
+				case "value":
+					conceptDesignation.setValue(designationComponent.getValue().toString());
+					break;
+				default:
+			}
+		}
+		return conceptDesignation;
+	}
+
+	private LookupCodeResult generateLookupCodeResultR4(String theCode, String theSystem, Parameters outcomeR4) {
+		// NOTE: I wanted to put all of this logic into the IValidationSupport Class, but it would've required adding
+		//       several new dependencies on version-specific libraries and that is explicitly forbidden (see comment in
+		// POM).
+		LookupCodeResult result = new LookupCodeResult();
+		result.setSearchedForCode(theCode);
+		result.setSearchedForSystem(theSystem);
+		result.setFound(true);
+		for (ParametersParameterComponent parameterComponent : outcomeR4.getParameter()) {
+			String parameterTypeAsString = Objects.toString(parameterComponent.getValue(), null);
+			switch (parameterComponent.getName()) {
+				case "property":
+					BaseConceptProperty conceptProperty = createConceptPropertyR4(parameterComponent);
+					if (conceptProperty != null) {
+						result.getProperties().add(conceptProperty);
+					}
+					break;
+				case "designation":
+					ConceptDesignation conceptDesignation = createConceptDesignationR4(parameterComponent);
+					result.getDesignations().add(conceptDesignation);
+					break;
+				case "name":
+					result.setCodeSystemDisplayName(parameterTypeAsString);
+					break;
+				case "version":
+					result.setCodeSystemVersion(parameterTypeAsString);
+					break;
+				case "display":
+					result.setCodeDisplay(parameterTypeAsString);
+					break;
+				case "abstract":
+					result.setCodeIsAbstract(Boolean.parseBoolean(parameterTypeAsString));
+					break;
+				default:
+			}
+		}
+		return result;
+	}
+
+	private static BaseConceptProperty createConceptPropertyR4(ParametersParameterComponent thePropertyComponent) {
+		Property property = thePropertyComponent.getChildByName("part");
+
+		// The assumption here is that we may at east 2 elements in this part
+		if (property == null || property.getValues().size() < 2) {
+			return null;
+		}
+
+		List<Base> values = property.getValues();
+		ParametersParameterComponent firstPart = (ParametersParameterComponent) values.get(0);
+		String propertyName = ((CodeType) firstPart.getValue()).getValue();
+
+		ParametersParameterComponent secondPart = (ParametersParameterComponent) values.get(1);
+		Type value = secondPart.getValue();
+
+		if (value != null) {
+			return createConceptPropertyR4(propertyName, value);
+		}
+
+		String groupName = secondPart.getName();
+		if (!"subproperty".equals(groupName)) {
+			return null;
+		}
+
+		// handle property group (a property containing sub-properties)
+		GroupConceptProperty groupConceptProperty = new GroupConceptProperty(propertyName);
+
+		// we already retrieved the property name (group name) as first element, next will be the sub-properties.
+		// there is no dedicated value for a property group as it is an aggregate
+		for (int i = 1; i < values.size(); i++) {
+			ParametersParameterComponent nextPart = (ParametersParameterComponent) values.get(i);
+			BaseConceptProperty subProperty = createConceptPropertyR4(nextPart);
+			if (subProperty != null) {
+				groupConceptProperty.addSubProperty(subProperty);
+			}
+		}
+		return groupConceptProperty;
+	}
+
+	private static BaseConceptProperty createConceptPropertyR4(final String theName, final Type theValue) {
+		BaseConceptProperty conceptProperty;
+
+		String fhirType = theValue.fhirType();
+		switch (fhirType) {
+			case IValidationSupport.TYPE_CODE:
+				CodeType codeType = (CodeType) theValue;
+				conceptProperty = new CodeConceptProperty(theName, codeType.getValue());
+				break;
+			case IValidationSupport.TYPE_INTEGER:
+				IntegerType integerType = (IntegerType) theValue;
+				conceptProperty = new IntegerConceptProperty(theName, integerType.getValue());
+				break;
+			case IValidationSupport.TYPE_DECIMAL:
+				DecimalType decimalType = (DecimalType) theValue;
+				conceptProperty = new DecimalConceptProperty(theName, decimalType.getValue());
+				break;
+			case IValidationSupport.TYPE_DATETIME:
+				DateTimeType dateTimeType = (DateTimeType) theValue;
+				conceptProperty = new DateTimeConceptProperty(theName, dateTimeType.getValueAsString());
+				break;
+			case IValidationSupport.TYPE_STRING:
+				StringType stringType = (StringType) theValue;
+				conceptProperty = new StringConceptProperty(theName, stringType.getValue());
+				break;
+			case IValidationSupport.TYPE_BOOLEAN:
+				BooleanType booleanType = (BooleanType) theValue;
+				conceptProperty = new BooleanConceptProperty(theName, booleanType.getValue());
+				break;
+			case IValidationSupport.TYPE_CODING:
+				Coding coding = (Coding) theValue;
+				conceptProperty =
+						new CodingConceptProperty(theName, coding.getSystem(), coding.getCode(), coding.getDisplay());
+				break;
+				// TODO: add other property types as per FHIR spec https://github.com/hapifhir/hapi-fhir/issues/5699
+			default:
+				// other types will not fail for Remote Terminology
+				conceptProperty = new StringConceptProperty(theName, theValue.toString());
+		}
+		return conceptProperty;
+	}
+
+	private ConceptDesignation createConceptDesignationR4(ParametersParameterComponent theParameterComponent) {
+		ConceptDesignation conceptDesignation = new ConceptDesignation();
+		for (ParametersParameterComponent designationComponent : theParameterComponent.getPart()) {
+			Type designationComponentValue = designationComponent.getValue();
+			if (designationComponentValue == null) {
+				continue;
+			}
+			switch (designationComponent.getName()) {
+				case "language":
+					conceptDesignation.setLanguage(designationComponentValue.toString());
+					break;
+				case "use":
+					Coding coding = (Coding) designationComponentValue;
+					conceptDesignation.setUseSystem(coding.getSystem());
+					conceptDesignation.setUseCode(coding.getCode());
+					conceptDesignation.setUseDisplay(coding.getDisplay());
+					break;
+				case "value":
+					conceptDesignation.setValue(designationComponentValue.toString());
+					break;
+				default:
+			}
+		}
+		return conceptDesignation;
+	}
+
+	@Override
+	public IBaseResource fetchValueSet(String theValueSetUrl) {
+		UrlUtil.CanonicalUrlParts valueSet = UrlUtil.parseCanonicalUrl(theValueSetUrl);
+		String valueSetVersion = valueSet.versionId().orElse(null);
+		return fetchValueSet(valueSet.url(), valueSetVersion);
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	@Nullable
+	public IBaseResource fetchValueSet(@Nonnull String theValueSetUrl, @Nullable String theVersion) {
+		// force the remote server to send the whole resource.
+		SummaryEnum summaryParam = SummaryEnum.FALSE;
+		return searchForValueSet(theValueSetUrl, theVersion, summaryParam);
+	}
+
+	/**
+	 * Search for a ValueSet by url and version via IGenericClient.
+	 * <p>
+	 * The version is sent as its own search parameter: a ValueSet resource's <code>url</code> element
+	 * never contains a pipe, so a packed <code>url|version</code> canonical matches nothing.
+	 * </p>
+	 *
+	 * @param theValueSetUrl the value set url, without a version
+	 * @param theVersion the value set version, or null for whichever version the server considers current
+	 * @param theSummaryParam force a summary mode - null allows server default
+	 * @return the ValueSet or null if none match the url
+	 * @throws ValidationSupportUnavailableException if the remote server fails or cannot be reached
+	 */
+	@Nullable
+	private IBaseResource searchForValueSet(
+			String theValueSetUrl, @Nullable String theVersion, @Nullable SummaryEnum theSummaryParam) {
+		IGenericClient client = provideClient();
+		Class<? extends IBaseBundle> bundleType =
+				myCtx.getResourceDefinition("Bundle").getImplementingClass(IBaseBundle.class);
+
+		IQuery<IBaseBundle> valueSetQuery = client.search()
+				.forResource("ValueSet")
+				.where(CodeSystem.URL.matches().value(theValueSetUrl));
+
+		if (isNotBlank(theVersion)) {
+			valueSetQuery.where(new StringClientParam("version").matches().value(theVersion));
+		}
+
+		if (theSummaryParam != null) {
+			valueSetQuery.summaryMode(theSummaryParam);
+		}
+
+		IBaseBundle results;
+		try {
+			results = valueSetQuery.returnBundle(bundleType).execute();
+		} catch (BaseServerResponseException e) {
+			if (!isRemoteServerFailure(e)) {
+				throw e;
+			}
+			throw reportRemoteServerFailure(e, 3068, REMOTE_FAILURE_SEARCHING, "ValueSet", theValueSetUrl);
+		}
+
+		List<IBaseResource> resultsList = BundleUtil.toListOfResources(myCtx, results);
+		if (!resultsList.isEmpty()) {
+			return resultsList.get(0);
+		}
+
+		return null;
+	}
+
+	@Override
+	public boolean isCodeSystemSupported(ValidationSupportContext theValidationSupportContext, String theSystem) {
+		UrlUtil.CanonicalUrlParts codeSystem = UrlUtil.parseCanonicalUrl(theSystem);
+		String codeSystemVersion = codeSystem.versionId().orElse(null);
+		return isCodeSystemSupported(theValidationSupportContext, codeSystem.url(), codeSystemVersion);
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	public boolean isCodeSystemSupported(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nullable String theSystem,
+			@Nullable String theVersion) {
+		// a summary is ok if we are just checking the presence.
+		SummaryEnum summaryParam = null;
+
+		String version = shouldSearchByVersion(theSystem, theVersion) ? theVersion : null;
+		return searchForCodeSystem(theSystem, version, summaryParam) != null;
+	}
+
+	/**
+	 * Whether the remote CodeSystem search can match this version. A SNOMED CT version that names an edition alone,
+	 * <code>http://snomed.info/sct/[module]</code>, matches nothing: a server stores each release under its full
+	 * version, and picks the release itself when none is named.
+	 */
+	// Created by Claude Opus 5.5
+	private static boolean shouldSearchByVersion(@Nullable String theSystem, @Nullable String theVersion) {
+		return !(SNOMED_CT_URL.equals(theSystem)
+				&& theVersion != null
+				&& theVersion.startsWith(SNOMED_CT_URL + "/")
+				&& !theVersion.contains(SNOMED_CT_RELEASE_SEPARATOR));
+	}
+
+	@Override
+	public boolean isValueSetSupported(ValidationSupportContext theValidationSupportContext, String theValueSetUrl) {
+		UrlUtil.CanonicalUrlParts valueSet = UrlUtil.parseCanonicalUrl(theValueSetUrl);
+		String valueSetVersion = valueSet.versionId().orElse(null);
+		return isValueSetSupported(theValidationSupportContext, valueSet.url(), valueSetVersion);
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	public boolean isValueSetSupported(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nullable String theValueSetUrl,
+			@Nullable String theVersion) {
+		// a summary is ok if we are just checking the presence.
+		SummaryEnum summaryParam = null;
+
+		return searchForValueSet(theValueSetUrl, theVersion, summaryParam) != null;
+	}
+
+	@Override
+	public TranslateConceptResults translateConcept(TranslateCodeRequest theRequest) {
+		IGenericClient client = provideClient();
+		FhirContext fhirContext = client.getFhirContext();
+
+		IBaseParameters params = RemoteTerminologyUtil.buildTranslateInputParameters(fhirContext, theRequest);
+
+		IBaseParameters outcome = client.operation()
+				.onType("ConceptMap")
+				.named("$translate")
+				.withParameters(params)
+				.execute();
+
+		return RemoteTerminologyUtil.translateOutcomeToResults(fhirContext, outcome);
+	}
+
+	private IGenericClient provideClient() {
+		IGenericClient retVal;
+		if (myRestfulClientFactory != null) {
+			retVal = myRestfulClientFactory.newGenericClient(myBaseUrl);
+		} else {
+			retVal = myCtx.newRestfulGenericClient(myBaseUrl);
+		}
+		for (Object next : myClientInterceptors) {
+			retVal.registerInterceptor(next);
+		}
+		return retVal;
+	}
+
+	public String getBaseUrl() {
+		return myBaseUrl;
+	}
+
+	protected CodeValidationResult invokeRemoteValidateCode(
+			String theCodeSystem, String theCode, String theDisplay, String theValueSetUrl, IBaseResource theValueSet) {
+		return invokeRemoteValidateCode(theCodeSystem, null, theCode, theDisplay, theValueSetUrl, theValueSet);
+	}
+
+	protected CodeValidationResult invokeRemoteValidateCode(
+			String theCodeSystem,
+			String theCodeSystemVersion,
+			String theCode,
+			String theDisplay,
+			String theValueSetUrl,
+			IBaseResource theValueSet) {
+		if (isBlank(theCode)) {
+			return null;
+		}
+
+		IGenericClient client = provideClient();
+
+		// with no value set to validate in, the code is validated against the code system on its own
+		boolean isCodeSystemOperation = theValueSet == null && theValueSetUrl == null;
+		String resourceType = isCodeSystemOperation ? "CodeSystem" : "ValueSet";
+
+		// this message builder can be removed once we introduce a parameter object like CodeValidationRequest
+		ValidationErrorMessageBuilder errorMessageBuilder = theServerMessage -> {
+			if (isCodeSystemOperation) {
+				return getErrorMessage(
+						ERROR_CODE_UNKNOWN_CODE_IN_CODE_SYSTEM, theCodeSystem, theCode, getBaseUrl(), theServerMessage);
+			}
+			return getErrorMessage(
+					ERROR_CODE_UNKNOWN_CODE_IN_VALUE_SET,
+					theCodeSystem,
+					theCode,
+					theValueSetUrl,
+					getBaseUrl(),
+					theServerMessage);
+		};
+
+		// the operations take the code system version as its own parameter, not packed into the system
+		UrlUtil.CanonicalUrlParts codeSystem = UrlUtil.parseCanonicalUrl(theCodeSystem, theCodeSystemVersion);
+		IBaseParameters input =
+				buildValidateCodeInputParameters(codeSystem.url(), theCode, theDisplay, theValueSetUrl, theValueSet);
+		addCodeSystemVersionParameter(
+				input, codeSystem.url(), codeSystem.versionId().orElse(null), isCodeSystemOperation);
+
+		try {
+			IBaseParameters output = client.operation()
+					.onType(resourceType)
+					.named("validate-code")
+					.withParameters(input)
+					.execute();
+			return createCodeValidationResult(output, errorMessageBuilder, theCode, theDisplay);
+		} catch (ResourceNotFoundException | InvalidRequestException ex) {
+			ourLog.error(ex.getMessage(), ex);
+			String errorMessage = errorMessageBuilder.buildErrorMessage(ex.getMessage());
+			CodeValidationIssueCode issueCode = ex instanceof ResourceNotFoundException
+					? CodeValidationIssueCode.NOT_FOUND
+					: CodeValidationIssueCode.CODE_INVALID;
+			return createCodeValidationResult(new CodeValidationIssue(
+					errorMessage, IssueSeverity.ERROR, issueCode, CodeValidationIssueCoding.INVALID_CODE));
+		} catch (BaseServerResponseException ex) {
+			if (!isRemoteServerFailure(ex)) {
+				throw ex;
+			}
+			// the code could not be checked: the chain asks its other modules, and reports a warning if none can
+			throw isCodeSystemOperation
+					? reportRemoteServerFailure(
+							ex, 3068, REMOTE_FAILURE_VALIDATING_CODE_IN_SYSTEM, theCodeSystem, theCode)
+					: reportRemoteServerFailure(
+							ex,
+							3068,
+							REMOTE_FAILURE_VALIDATING_CODE_IN_VALUE_SET,
+							theCodeSystem,
+							theCode,
+							theValueSetUrl);
+		}
+	}
+
+	/**
+	 * Whether the remote server failed, rather than answered: it answered 5xx, or could not be reached at all, which
+	 * the client reports as a 500. Any other status is the server's answer, for the caller to handle.
+	 */
+	// Created by Claude Opus 5.5
+	private static boolean isRemoteServerFailure(BaseServerResponseException theException) {
+		return theException.getStatusCode() >= 500;
+	}
+
+	/**
+	 * Logs a remote server failure, naming this server and its error.
+	 *
+	 * @param theMsgCode the {@link Msg#code(int)} to prefix the message with
+	 * @return the exception to throw, carrying the logged message
+	 * @see #describeRemoteServerFailure(BaseServerResponseException, String, Object...)
+	 */
+	// Created by Claude Opus 5.5
+	private ValidationSupportUnavailableException reportRemoteServerFailure(
+			BaseServerResponseException theException, int theMsgCode, String theMessageKey, Object... theParams) {
+		String message = Msg.code(theMsgCode) + describeRemoteServerFailure(theException, theMessageKey, theParams);
+		ourLog.error(message, theException);
+		return new ValidationSupportUnavailableException(message, theException);
+	}
+
+	// Created by Claude Opus 5.5
+	private String describeRemoteServerFailure(
+			BaseServerResponseException theException, String theMessageKey, Object... theParams) {
+		// the remoteServerFailure* messages take this server's base URL first, then theParams, then the remote error
+		Object[] params = ArrayUtils.add(ArrayUtils.insert(0, theParams, getBaseUrl()), theException.getMessage());
+		return getErrorMessage(theMessageKey, params);
+	}
+
+	private static CodeValidationResult createCodeValidationResult(CodeValidationIssue theIssue) {
+		return new CodeValidationResult()
+				.setSeverity(theIssue.getSeverity())
+				.setMessage(theIssue.getDiagnostics())
+				.addIssue(theIssue);
+	}
+
+	private CodeValidationResult createCodeValidationResult(
+			IBaseParameters theOutput,
+			ValidationErrorMessageBuilder theMessageBuilder,
+			String theCode,
+			String theRequestedDisplay) {
+		final FhirContext fhirContext = getFhirContext();
+		Optional<String> resultValue = getNamedParameterValueAsString(fhirContext, theOutput, "result");
+
+		if (resultValue.isEmpty()) {
+			throw new IllegalArgumentException(
+					Msg.code(2560) + "Parameter `result` is missing from the $validate-code response.");
+		}
+
+		boolean success = resultValue.get().equalsIgnoreCase("true");
+
+		CodeValidationResult result = new CodeValidationResult();
+
+		// TODO MM: avoid passing the code and only retrieve it from the response
+		// that implies larger changes, like adding the result boolean to CodeValidationResult
+		// since CodeValidationResult#isOk() relies on code being populated to determine the result/success
+		if (success) {
+			result.setCode(theCode);
+		}
+
+		Optional<String> systemValue = getNamedParameterValueAsString(fhirContext, theOutput, "system");
+		systemValue.ifPresent(result::setCodeSystemName);
+		Optional<String> versionValue = getNamedParameterValueAsString(fhirContext, theOutput, "version");
+		versionValue.ifPresent(result::setCodeSystemVersion);
+		Optional<String> displayValue = getNamedParameterValueAsString(fhirContext, theOutput, "display");
+		displayValue.ifPresent(result::setDisplay);
+
+		// in theory the message and the issues should not be populated when result=false
+		if (success) {
+			return result;
+		}
+
+		Optional<String> messageValue = getNamedParameterValueAsString(fhirContext, theOutput, "message");
+		messageValue.ifPresent(value -> result.setMessage(theMessageBuilder.buildErrorMessage(value)));
+		ParametersUtil.getNamedParameterValuesAsString(
+						fhirContext, theOutput, CodeValidationResult.CAUSED_BY_UNKNOWN_SYSTEM)
+				.forEach(result::addUnknownSystem);
+
+		// Detect display mismatch: server returned result=false but echoed a canonical display that
+		// differs from the requested one. The code itself is known; only the requested display is wrong.
+		boolean isDisplayMismatch = isNotBlank(theRequestedDisplay)
+				&& displayValue.isPresent()
+				&& isNotBlank(displayValue.get())
+				&& !theRequestedDisplay.equals(displayValue.get());
+
+		IssueSeverity displaySeverity = getIssueSeverityForCodeDisplayMismatch();
+		List<CodeValidationIssue> issues = new ArrayList<>();
+		Optional<IBaseResource> issuesValue = getNamedParameterResource(fhirContext, theOutput, "issues");
+		if (issuesValue.isPresent()) {
+			// it seems to be safe to cast to IBaseOperationOutcome as any other type would not reach this point
+			createCodeValidationIssues(
+							(IBaseOperationOutcome) issuesValue.get(),
+							fhirContext.getVersion().getVersion(),
+							isDisplayMismatch,
+							displaySeverity)
+					.ifPresent(issues::addAll);
+		} else {
+			// Synthesized-from-message workaround for FHIR Validator library limitation
+			// @see https://github.com/hapifhir/org.hl7.fhir.core/issues/1766
+			// When the displays differ AND the message text mentions "display" (case-insensitive),
+			// the synthesized issue gets the configured display-mismatch severity. Otherwise ERROR.
+			boolean messageQualifies = isDisplayMismatch && containsDisplayWord(messageValue.orElse(null));
+			IssueSeverity synthesizedSeverity = messageQualifies ? displaySeverity : IssueSeverity.ERROR;
+			issues.add(createCodeValidationIssue(result.getMessage(), synthesizedSeverity));
+		}
+
+		issues.forEach(result::addIssue);
+		result.setSeverity(aggregateMaxSeverity(issues));
+		return result;
+	}
+
+	/**
+	 * Returns the highest-severity entry across the given issues using the precedence
+	 * {@code FATAL > ERROR > WARNING > INFORMATION}. Falls back to {@link IssueSeverity#ERROR} on
+	 * an empty list to preserve the previous default behaviour for {@code result=false} responses.
+	 */
+	private static IssueSeverity aggregateMaxSeverity(Collection<CodeValidationIssue> theIssues) {
+		IssueSeverity max = null;
+		for (CodeValidationIssue issue : theIssues) {
+			IssueSeverity severity = issue.getSeverity();
+			if (severity == null) {
+				continue;
+			}
+			if (max == null || severityRank(severity) > severityRank(max)) {
+				max = severity;
+			}
+		}
+		return max != null ? max : IssueSeverity.ERROR;
+	}
+
+	private static int severityRank(IssueSeverity theSeverity) {
+		switch (theSeverity) {
+			case FATAL:
+				return 4;
+			case ERROR:
+				return 3;
+			case WARNING:
+				return 2;
+			case INFORMATION:
+				return 1;
+			default:
+				return 0;
+		}
+	}
+
+	/**
+	 * Creates a list of {@link ca.uhn.fhir.context.support.IValidationSupport.CodeValidationIssue} from the issues
+	 * returned by the $validate-code operation.
+	 * Please note that this method should only be used for Remote Terminology for now as it only translates
+	 * issues text/message and assumes all other fields.
+	 * When issues will be supported across all validators in hapi-fhir, a proper generic conversion method should
+	 * be available and this method will be deleted.
+	 *
+	 * @param theOperationOutcome the outcome of the $validate-code operation
+	 * @param theFhirVersion the FHIR version
+	 * @return the list of {@link ca.uhn.fhir.context.support.IValidationSupport.CodeValidationIssue}
+	 */
+	public static Optional<Collection<CodeValidationIssue>> createCodeValidationIssues(
+			IBaseOperationOutcome theOperationOutcome, FhirVersionEnum theFhirVersion) {
+		// Backward-compat overload — delegates to the display-mismatch-aware method with no-op flags.
+		return createCodeValidationIssues(theOperationOutcome, theFhirVersion, false, IssueSeverity.ERROR);
+	}
+
+	private static Collection<CodeValidationIssue> createCodeValidationIssuesDstu3(
+			org.hl7.fhir.dstu3.model.OperationOutcome theOperationOutcome,
+			boolean theIsDisplayMismatch,
+			IssueSeverity theDisplaySeverity) {
+		List<IssueData> data = theOperationOutcome.getIssue().stream()
+				.map(RemoteTerminologyServiceValidationSupport::extractIssueDataDstu3)
+				.collect(Collectors.toList());
+		return buildCodeValidationIssues(data, theIsDisplayMismatch, theDisplaySeverity);
+	}
+
+	private static CodeValidationIssue createCodeValidationIssue(String theMessage, IssueSeverity theSeverity) {
+		return new CodeValidationIssue(
+				theMessage, theSeverity, CodeValidationIssueCode.INVALID, CodeValidationIssueCoding.INVALID_CODE);
+	}
+
+	/**
+	 * Display-mismatch-aware variant of {@link #createCodeValidationIssues(IBaseOperationOutcome, FhirVersionEnum)}.
+	 * When {@code theIsDisplayMismatch} is true (response-level gate fired), an issue qualifies for severity
+	 * override if the issue itself, or its {@code diagnostics} primitive element, carries an extension whose URL is
+	 * either
+	 * <ul>
+	 *   <li>exactly {@link #DISPLAY_MISMATCH_EXTENSION_URL}; or</li>
+	 *   <li>{@link #MESSAGE_ID_EXTENSION_URL} with a primitive value containing the substring "display"
+	 *       (case-insensitive).</li>
+	 * </ul>
+	 * Qualifying issues get their severity replaced with {@code theDisplaySeverity}. Issues without any
+	 * qualifying signal keep their server-reported severity. Supported for R4 and DSTU3.
+	 */
+	public static Optional<Collection<CodeValidationIssue>> createCodeValidationIssues(
+			IBaseOperationOutcome theOperationOutcome,
+			FhirVersionEnum theFhirVersion,
+			boolean theIsDisplayMismatch,
+			IssueSeverity theDisplaySeverity) {
+		if (theFhirVersion == FhirVersionEnum.R4) {
+			return Optional.of(createCodeValidationIssuesR4(
+					(OperationOutcome) theOperationOutcome, theIsDisplayMismatch, theDisplaySeverity));
+		}
+		if (theFhirVersion == FhirVersionEnum.DSTU3) {
+			return Optional.of(createCodeValidationIssuesDstu3(
+					(org.hl7.fhir.dstu3.model.OperationOutcome) theOperationOutcome,
+					theIsDisplayMismatch,
+					theDisplaySeverity));
+		}
+		return Optional.empty();
+	}
+
+	private static Collection<CodeValidationIssue> createCodeValidationIssuesR4(
+			OperationOutcome theOperationOutcome, boolean theIsDisplayMismatch, IssueSeverity theDisplaySeverity) {
+		List<IssueData> data = theOperationOutcome.getIssue().stream()
+				.map(RemoteTerminologyServiceValidationSupport::extractIssueDataR4)
+				.collect(Collectors.toList());
+		return buildCodeValidationIssues(data, theIsDisplayMismatch, theDisplaySeverity);
+	}
+
+	private static IssueData extractIssueDataR4(OperationOutcome.OperationOutcomeIssueComponent theIssue) {
+		CodeableConcept details = theIssue.getDetails();
+		List<CodingPair> codings = details.getCoding().stream()
+				.map(c -> new CodingPair(c.getSystem(), c.getCode()))
+				.collect(Collectors.toList());
+		List<? extends IBaseExtension<?, ?>> diagnosticsExtensions = theIssue.hasDiagnosticsElement()
+				? theIssue.getDiagnosticsElement().getExtension()
+				: null;
+		// FHIR requires severity and code, but servers can misbehave
+		String severityCode =
+				theIssue.getSeverity() != null ? theIssue.getSeverity().toCode() : null;
+		IssueSeverity severity = severityCode != null ? IssueSeverity.fromCode(severityCode) : IssueSeverity.ERROR;
+		String issueTypeCode = theIssue.getCode() != null ? theIssue.getCode().toCode() : null;
+		return new IssueData(
+				theIssue.getDiagnostics(),
+				severity,
+				issueTypeCode,
+				details.getText(),
+				codings,
+				isDisplayMismatchIssue(theIssue.getExtension(), diagnosticsExtensions));
+	}
+
+	private static IssueData extractIssueDataDstu3(OperationOutcomeIssueComponent theIssue) {
+		var details = theIssue.getDetails();
+		List<CodingPair> codings = details.getCoding().stream()
+				.map(c -> new CodingPair(c.getSystem(), c.getCode()))
+				.collect(Collectors.toList());
+		List<? extends IBaseExtension<?, ?>> diagnosticsExtensions = theIssue.hasDiagnosticsElement()
+				? theIssue.getDiagnosticsElement().getExtension()
+				: null;
+		// FHIR requires severity and code, but servers can misbehave
+		String severityCode =
+				theIssue.getSeverity() != null ? theIssue.getSeverity().toCode() : null;
+		IssueSeverity severity = severityCode != null ? IssueSeverity.fromCode(severityCode) : IssueSeverity.ERROR;
+		String issueTypeCode = theIssue.getCode() != null ? theIssue.getCode().toCode() : null;
+		return new IssueData(
+				theIssue.getDiagnostics(),
+				severity,
+				issueTypeCode,
+				details.getText(),
+				codings,
+				isDisplayMismatchIssue(theIssue.getExtension(), diagnosticsExtensions));
+	}
+
+	private static Collection<CodeValidationIssue> buildCodeValidationIssues(
+			List<IssueData> theIssues, boolean theIsDisplayMismatch, IssueSeverity theDisplaySeverity) {
+		List<CodeValidationIssue> out = new ArrayList<>(theIssues.size());
+		for (IssueData data : theIssues) {
+			boolean isDisplayIssue = theIsDisplayMismatch && data.isDisplaySignal();
+			IssueSeverity severity = isDisplayIssue ? theDisplaySeverity : data.serverSeverity();
+			CodeValidationIssue issue = new CodeValidationIssue(data.diagnostics(), severity, data.issueTypeCode());
+			CodeValidationIssueDetails issueDetails = new CodeValidationIssueDetails(data.detailsText());
+			data.codings().forEach(c -> issueDetails.addCoding(c.system(), c.code()));
+			issue.setDetails(issueDetails);
+			out.add(issue);
+		}
+		return out;
+	}
+
+	private record IssueData(
+			String diagnostics,
+			IssueSeverity serverSeverity,
+			String issueTypeCode,
+			String detailsText,
+			List<CodingPair> codings,
+			boolean isDisplaySignal) {}
+
+	private record CodingPair(String system, String code) {}
+
+	/**
+	 * Extension URL that indicates an OperationOutcome issue represents a display mismatch.
+	 */
+	public static final String DISPLAY_MISMATCH_EXTENSION_URL =
+			"http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-displayMismatched";
+
+	/**
+	 * Standard FHIR extension URL that carries the i18n message identifier for an OperationOutcome
+	 * issue. When the message-id value contains the substring "display" (case-insensitive — e.g. an
+	 * i18n key like {@code Display_Name_for__should_be_one_of__instead_of}) it is treated as a
+	 * display-mismatch signal (provided the response-level gate has fired).
+	 */
+	public static final String MESSAGE_ID_EXTENSION_URL =
+			"http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id";
+
+	/**
+	 * Per-issue detector for display-mismatch signals. Returns true if either of the supplied
+	 * extension lists carries an extension whose URL is {@link #DISPLAY_MISMATCH_EXTENSION_URL},
+	 * or {@link #MESSAGE_ID_EXTENSION_URL} with a primitive value containing "display"
+	 * (case-insensitive).
+	 * <p>
+	 * Pass the issue's own extensions and the {@code diagnostics} primitive element's extensions —
+	 * both are valid carriers per the FHIR spec. Callers must additionally check the response-level
+	 * gate before treating a positive result as a display mismatch.
+	 */
+	private static boolean isDisplayMismatchIssue(
+			List<? extends IBaseExtension<?, ?>> theIssueExtensions,
+			List<? extends IBaseExtension<?, ?>> theDiagnosticsExtensions) {
+		return hasDisplayMismatchSignal(theIssueExtensions) || hasDisplayMismatchSignal(theDiagnosticsExtensions);
+	}
+
+	private static boolean containsDisplayWord(String theText) {
+		return theText != null && Strings.CI.contains(theText, "display");
+	}
+
+	/**
+	 * Returns true if any of the supplied extensions matches the per-issue display-mismatch contract:
+	 * URL equals {@link #DISPLAY_MISMATCH_EXTENSION_URL}, or URL equals {@link #MESSAGE_ID_EXTENSION_URL}
+	 * with a primitive value whose string form contains "display" (case-insensitive).
+	 */
+	private static boolean hasDisplayMismatchSignal(List<? extends IBaseExtension<?, ?>> theExtensions) {
+		if (theExtensions == null || theExtensions.isEmpty()) {
+			return false;
+		}
+		for (IBaseExtension<?, ?> ext : theExtensions) {
+			if (DISPLAY_MISMATCH_EXTENSION_URL.equals(ext.getUrl())) {
+				return true;
+			}
+			if (MESSAGE_ID_EXTENSION_URL.equals(ext.getUrl())) {
+				Object value = ext.getValue();
+				if (value instanceof IPrimitiveType
+						&& containsDisplayWord(((IPrimitiveType<?>) value).getValueAsString())) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	public interface ValidationErrorMessageBuilder {
+		String buildErrorMessage(String theServerMessage);
+	}
+
+	/**
+	 * Adds the code system version to the parameters built by
+	 * {@link #buildValidateCodeInputParameters(String, String, String, String, IBaseResource)}, so that a
+	 * subclass which overrides that method keeps the version without having to add it itself.
+	 * <p>
+	 * <code>CodeSystem/$validate-code</code> names this parameter <code>version</code>. On
+	 * <code>ValueSet/$validate-code</code> that name belongs to the value set, and the code system version is
+	 * <code>systemVersion</code>. A version with no <code>system</code> beside it qualifies nothing, and strict
+	 * servers reject it, so it is not sent at all.
+	 * </p>
+	 */
+	// Created by Claude Opus 5
+	private void addCodeSystemVersionParameter(
+			IBaseParameters theParams,
+			String theCodeSystem,
+			String theCodeSystemVersion,
+			boolean theIsCodeSystemOperation) {
+		if (isBlank(theCodeSystem) || isBlank(theCodeSystemVersion)) {
+			return;
+		}
+
+		String parameterName = theIsCodeSystemOperation ? "version" : "systemVersion";
+		ParametersUtil.addParameterToParametersString(getFhirContext(), theParams, parameterName, theCodeSystemVersion);
+	}
+
+	protected IBaseParameters buildValidateCodeInputParameters(
+			String theCodeSystem, String theCode, String theDisplay, String theValueSetUrl, IBaseResource theValueSet) {
+		final FhirContext fhirContext = getFhirContext();
+		IBaseParameters params = ParametersUtil.newInstance(fhirContext);
+
+		if (theValueSet == null && theValueSetUrl == null) {
+			ParametersUtil.addParameterToParametersUri(fhirContext, params, "url", theCodeSystem);
+			ParametersUtil.addParameterToParametersString(fhirContext, params, "code", theCode);
+			if (isNotBlank(theDisplay)) {
+				ParametersUtil.addParameterToParametersString(fhirContext, params, "display", theDisplay);
+			}
+			return params;
+		}
+
+		if (isNotBlank(theValueSetUrl)) {
+			// the operation takes the value set version as its own parameter, not packed into the url
+			UrlUtil.CanonicalUrlParts valueSet = UrlUtil.parseCanonicalUrl(theValueSetUrl);
+			ParametersUtil.addParameterToParametersUri(fhirContext, params, "url", valueSet.url());
+			valueSet.versionId()
+					.ifPresent(version -> ParametersUtil.addParameterToParametersString(
+							fhirContext, params, "valueSetVersion", version));
+		}
+		ParametersUtil.addParameterToParametersString(fhirContext, params, "code", theCode);
+		if (isNotBlank(theCodeSystem)) {
+			ParametersUtil.addParameterToParametersUri(fhirContext, params, "system", theCodeSystem);
+		} else if (shouldInferSystem(fhirContext)) {
+			// system could not be determined locally — ask the remote server to infer it
+			ParametersUtil.addParameterToParametersBoolean(fhirContext, params, "inferSystem", true);
+		}
+		if (isNotBlank(theDisplay)) {
+			ParametersUtil.addParameterToParametersString(fhirContext, params, "display", theDisplay);
+		}
+		if (theValueSet != null) {
+			ParametersUtil.addParameterToParameters(fhirContext, params, "valueSet", theValueSet);
+		}
+		return params;
+	}
+
+	/**
+	 * {@code inferSystem} is an R5+ {@code $validate-code} parameter that strict R4/DSTU3 servers
+	 * (e.g. VSAC, CMS) reject, so by default it is only sent for R5+; see {@link #setInferSystemEnabled(Boolean)}.
+	 */
+	private boolean shouldInferSystem(FhirContext theFhirContext) {
+		if (myInferSystemEnabled != null) {
+			return myInferSystemEnabled;
+		}
+		return theFhirContext.getVersion().getVersion().isNewerThan(FhirVersionEnum.R4);
+	}
+
+	@Nullable
+	public Boolean getInferSystemEnabled() {
+		return myInferSystemEnabled;
+	}
+
+	public RemoteTerminologyServiceValidationSupport setInferSystemEnabled(@Nullable Boolean theInferSystemEnabled) {
+		myInferSystemEnabled = theInferSystemEnabled;
+		return this;
+	}
+
+	/**
+	 * Sets the FHIR Terminology Server base URL
+	 *
+	 * @param theBaseUrl The base URL, e.g. "<a href="https://hapi.fhir.org/baseR4">...</a>"
+	 */
+	public void setBaseUrl(String theBaseUrl) {
+		Validate.notBlank(theBaseUrl, "theBaseUrl must be provided");
+		myBaseUrl = theBaseUrl;
+	}
+
+	/**
+	 * Adds an interceptor that will be registered to all clients.
+	 * <p>
+	 * Note that this method is not thread-safe and should only be called prior to this module
+	 * being used.
+	 * </p>
+	 *
+	 * @param theClientInterceptor The interceptor (must not be null)
+	 */
+	public void addClientInterceptor(@Nonnull Object theClientInterceptor) {
+		Validate.notNull(theClientInterceptor, "theClientInterceptor must not be null");
+		myClientInterceptors.add(theClientInterceptor);
+	}
+}

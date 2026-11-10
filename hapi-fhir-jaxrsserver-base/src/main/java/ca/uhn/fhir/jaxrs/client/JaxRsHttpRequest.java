@@ -1,17 +1,15 @@
-package ca.uhn.fhir.jaxrs.client;
-
 /*
  * #%L
  * HAPI FHIR JAX-RS Server
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,32 +17,36 @@ package ca.uhn.fhir.jaxrs.client;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.jaxrs.client;
 
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.rest.api.RequestTypeEnum;
+import ca.uhn.fhir.rest.client.api.BaseHttpRequest;
+import ca.uhn.fhir.rest.client.api.IHttpRequest;
+import ca.uhn.fhir.rest.client.api.IHttpResponse;
+import ca.uhn.fhir.util.StopWatch;
+import jakarta.ws.rs.client.Entity;
+import jakarta.ws.rs.client.Invocation;
+import jakarta.ws.rs.core.Response;
+
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 
-import javax.ws.rs.client.Entity;
-import javax.ws.rs.client.Invocation;
-import javax.ws.rs.core.Response;
-
-import ca.uhn.fhir.rest.api.RequestTypeEnum;
-import ca.uhn.fhir.rest.client.api.IHttpRequest;
-import ca.uhn.fhir.rest.client.api.IHttpResponse;
-
 /**
  * A Http Request based on JaxRs. This is an adapter around the class
- * {@link javax.ws.rs.client.Invocation Invocation}
- * 
+ * {@link jakarta.ws.rs.client.Invocation Invocation}
+ *
  * @author Peter Van Houte | peter.vanhoute@agfa.com | Agfa Healthcare
  */
-public class JaxRsHttpRequest implements IHttpRequest {
+public class JaxRsHttpRequest extends BaseHttpRequest implements IHttpRequest {
 
+	private final Map<String, List<String>> myHeaders = new HashMap<>();
 	private Invocation.Builder myRequest;
 	private RequestTypeEnum myRequestType;
 	private Entity<?> myEntity;
-	private final Map<String, List<String>> myHeaders = new HashMap<String, List<String>>();
 
 	public JaxRsHttpRequest(Invocation.Builder theRequest, RequestTypeEnum theRequestType, Entity<?> theEntity) {
 		this.myRequest = theRequest;
@@ -55,30 +57,28 @@ public class JaxRsHttpRequest implements IHttpRequest {
 	@Override
 	public void addHeader(String theName, String theValue) {
 		if (!myHeaders.containsKey(theName)) {
-			myHeaders.put(theName, new LinkedList<String>());
+			myHeaders.put(theName, new LinkedList<>());
 		}
 		myHeaders.get(theName).add(theValue);
 		getRequest().header(theName, theValue);
 	}
 
-	/**
-	 * Get the Request
-	 * @return the Request
-	 */
-	public Invocation.Builder getRequest() {
-		return myRequest;
+	@Override
+	public IHttpResponse execute() {
+		StopWatch responseStopWatch = new StopWatch();
+		Invocation invocation = getRequest().build(getRequestType().name(), getEntity());
+		Response response = invocation.invoke();
+		return new JaxRsHttpResponse(response, responseStopWatch);
 	}
 
-	/**
-	 * Get the Request Type
-	 * @return the request type
-	 */
-	public RequestTypeEnum getRequestType() {
-		return myRequestType == null ? RequestTypeEnum.GET : myRequestType;
+	@Override
+	public Map<String, List<String>> getAllHeaders() {
+		return Collections.unmodifiableMap(this.myHeaders);
 	}
 
 	/**
 	 * Get the Entity
+	 *
 	 * @return the entity
 	 */
 	public Entity<?> getEntity() {
@@ -86,15 +86,22 @@ public class JaxRsHttpRequest implements IHttpRequest {
 	}
 
 	@Override
-	public IHttpResponse execute() {
-		Invocation invocation = getRequest().build(getRequestType().name(), getEntity());
-		Response response = invocation.invoke();
-		return new JaxRsHttpResponse(response);
+	public String getHttpVerbName() {
+		return myRequestType.name();
 	}
 
 	@Override
-	public Map<String, List<String>> getAllHeaders() {
-		return this.myHeaders;
+	public void removeHeaders(String theHeaderName) {
+		myHeaders.remove(theHeaderName);
+	}
+
+	/**
+	 * Get the Request
+	 *
+	 * @return the Request
+	 */
+	public Invocation.Builder getRequest() {
+		return myRequest;
 	}
 
 	@Override
@@ -103,14 +110,22 @@ public class JaxRsHttpRequest implements IHttpRequest {
 		return null;
 	}
 
+	/**
+	 * Get the Request Type
+	 *
+	 * @return the request type
+	 */
+	public RequestTypeEnum getRequestType() {
+		return myRequestType == null ? RequestTypeEnum.GET : myRequestType;
+	}
+
 	@Override
 	public String getUri() {
 		return ""; // TODO: can we get this from somewhere?
 	}
 
 	@Override
-	public String getHttpVerbName() {
-		return myRequestType.name();
+	public void setUri(String theUrl) {
+		throw new UnsupportedOperationException(Msg.code(606));
 	}
-
 }

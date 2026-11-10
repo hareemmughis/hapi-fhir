@@ -1,0 +1,265 @@
+package ca.uhn.fhir.jpa.provider;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.jpa.graphql.GraphQLProvider;
+import ca.uhn.fhir.rest.annotation.OptionalParam;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.param.TokenAndListParam;
+import ca.uhn.fhir.rest.server.IResourceProvider;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.exceptions.FHIRException;
+import org.hl7.fhir.instance.model.api.IBaseReference;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.HumanName;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Resource;
+import org.hl7.fhir.utilities.graphql.Argument;
+import org.hl7.fhir.utilities.graphql.IGraphQLStorageServices;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class GraphQLR4ProviderTest {
+
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(GraphQLR4ProviderTest.class);
+	private static final FhirContext ourCtx = FhirContext.forR4Cached();
+	private MyStorageServices myGraphQLStorageServices = new MyStorageServices();
+
+	@RegisterExtension
+	private RestfulServerExtension myRestfulServerExtension = new RestfulServerExtension(ourCtx)
+		.registerProvider(new DummyPatientResourceProvider())
+		.registerProvider(new GraphQLProvider(myGraphQLStorageServices));
+
+	@BeforeEach
+	public void before() {
+		//nothing
+	}
+
+	@Test
+	public void testGraphInstance() {
+		String query = "{name{family,given}}";
+		HttpTestResponse response = myRestfulServerExtension.fhirRequest("/Patient/123/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.assertStatus(200);
+
+		assertThat(TestUtil.stripWhitespace(response.getBody())).isEqualTo(TestUtil.stripWhitespace(GraphQLProviderTestUtil.DATA_PREFIX + "{\n" +
+			"  \"name\":[{\n" +
+			"    \"family\":\"FAMILY\",\n" +
+			"    \"given\":[\"GIVEN1\",\"GIVEN2\"]\n" +
+			"  },{\n" +
+			"    \"given\":[\"GivenOnly1\",\"GivenOnly2\"]\n" +
+			"  }]\n" +
+			"}" + GraphQLProviderTestUtil.DATA_SUFFIX));
+		assertThat(response.getHeader(Constants.HEADER_CONTENT_TYPE)).startsWith(Constants.CT_JSON);
+
+	}
+
+	@Test
+	public void testGraphInstanceWithFhirpath() {
+		String query = "{name(fhirpath:\"family.exists()\"){text,given,family}}";
+		HttpTestResponse response = myRestfulServerExtension.fhirRequest("/Patient/123/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.assertStatus(200);
+
+		assertThat(TestUtil.stripWhitespace(response.getBody())).isEqualTo(TestUtil.stripWhitespace(GraphQLProviderTestUtil.DATA_PREFIX + "{\n" +
+			"  \"name\":[{\n" +
+			"    \"given\":[\"GIVEN1\",\"GIVEN2\"],\n" +
+			"    \"family\":\"FAMILY\"\n" +
+			"  }]\n" +
+			"}" + GraphQLProviderTestUtil.DATA_SUFFIX));
+		assertThat(response.getHeader(Constants.HEADER_CONTENT_TYPE)).startsWith(Constants.CT_JSON);
+
+	}
+
+	@Test
+	public void testGraphSystemInstance() {
+		String query = "{Patient(id:123){id,name{given,family}}}";
+		HttpTestResponse response = myRestfulServerExtension.fhirRequest("/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.assertStatus(200);
+
+		assertThat(TestUtil.stripWhitespace(response.getBody())).isEqualTo(TestUtil.stripWhitespace(GraphQLProviderTestUtil.DATA_PREFIX + "{\n" +
+			"  \"Patient\":{\n" +
+			"    \"name\":[{\n" +
+			"      \"given\":[\"GIVEN1\",\"GIVEN2\"],\n" +
+			"      \"family\":\"FAMILY\"\n" +
+			"    },{\n" +
+			"      \"given\":[\"GivenOnly1\",\"GivenOnly2\"]\n" +
+			"    }]\n" +
+			"  }\n" +
+			"}" + GraphQLProviderTestUtil.DATA_SUFFIX));
+		assertThat(response.getHeader(Constants.HEADER_CONTENT_TYPE)).startsWith(Constants.CT_JSON);
+
+	}
+
+	@Test
+	public void testGraphSystemList() {
+		String query = "{PatientList(name:\"pet\"){name{family,given}}}";
+		HttpTestResponse response = myRestfulServerExtension.fhirRequest("/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.assertStatus(200);
+
+		assertThat(TestUtil.stripWhitespace(response.getBody())).isEqualTo(TestUtil.stripWhitespace(GraphQLProviderTestUtil.DATA_PREFIX + "{\n" +
+			"  \"PatientList\":[{\n" +
+			"    \"name\":[{\n" +
+			"      \"family\":\"pet\",\n" +
+			"      \"given\":[\"GIVEN1\",\"GIVEN2\"]\n" +
+			"    },{\n" +
+			"      \"given\":[\"GivenOnly1\",\"GivenOnly2\"]\n" +
+			"    }]\n" +
+			"  },{\n" +
+			"    \"name\":[{\n" +
+			"      \"given\":[\"pet\",\"GivenOnlyB1\",\"GivenOnlyB2\"]\n" +
+			"    }]\n" +
+			"  }]\n" +
+			"}" + GraphQLProviderTestUtil.DATA_SUFFIX));
+		assertThat(response.getHeader(Constants.HEADER_CONTENT_TYPE)).startsWith(Constants.CT_JSON);
+
+	}
+
+	@Test
+	public void testGraphSystemArrayArgumentList() {
+		String query = "{PatientList(id:[\"hapi-123\",\"hapi-124\"]){id,name{family}}}";
+		HttpTestResponse response = myRestfulServerExtension.fhirRequest("/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.assertStatus(200);
+
+		assertThat(TestUtil.stripWhitespace(response.getBody())).isEqualTo(TestUtil.stripWhitespace(GraphQLProviderTestUtil.DATA_PREFIX + "{\n" +
+			"  \"PatientList\":[{\n" +
+			"    \"id\":\"Patient/hapi-123/_history/2\",\n" +
+			"    \"name\":[{\n" +
+			"      \"family\":\"FAMILY 123\"\n" +
+			"    }]\n" +
+			"  },{\n" +
+			"    \"id\":\"Patient/hapi-124/_history/1\",\n" +
+			"    \"name\":[{\n" +
+			"      \"family\":\"FAMILY 124\"\n" +
+			"    }]\n" +
+			"  }]\n" +
+			"}" + GraphQLProviderTestUtil.DATA_SUFFIX));
+		assertThat(response.getHeader(Constants.HEADER_CONTENT_TYPE)).startsWith(Constants.CT_JSON);
+
+	}
+
+	public static class DummyPatientResourceProvider implements IResourceProvider {
+
+		@Override
+		public Class<? extends IBaseResource> getResourceType() {
+			return Patient.class;
+		}
+
+		@SuppressWarnings("rawtypes")
+		@Search()
+		public List search(
+			@OptionalParam(name = Patient.SP_IDENTIFIER) TokenAndListParam theIdentifiers) {
+			ArrayList<Patient> retVal = new ArrayList<>();
+
+			for (int i = 0; i < 200; i++) {
+				Patient patient = new Patient();
+				patient.addName(new HumanName().setFamily("FAMILY"));
+				patient.getIdElement().setValue("Patient/" + i);
+				retVal.add(patient);
+			}
+			return retVal;
+		}
+
+	}
+
+	private static class MyStorageServices implements IGraphQLStorageServices {
+		@Override
+		public void listResources(Object theAppInfo, String theType, List<Argument> theSearchParams, List<IBaseResource> theMatches) throws FHIRException {
+			ourLog.info("listResources of {} - {}", theType, theSearchParams);
+
+			if (theSearchParams.size() == 1) {
+				Argument argument = theSearchParams.get(0);
+
+				String name = argument.getName();
+				List<String> value = argument.getValues().stream()
+					.map((it) -> it.getValue())
+					.collect(Collectors.toList());
+
+				if ("name".equals(name) && "pet".equals(value.get(0))) {
+					Patient patient1 = new Patient();
+					patient1.addName()
+						.setFamily("pet")
+						.addGiven("GIVEN1")
+						.addGiven("GIVEN2");
+					patient1.addName()
+						.addGiven("GivenOnly1")
+						.addGiven("GivenOnly2");
+
+					Patient patient2 = new Patient();
+					patient2.addName()
+						.addGiven("pet")
+						.addGiven("GivenOnlyB1")
+						.addGiven("GivenOnlyB2");
+
+					theMatches.add(patient1);
+					theMatches.add(patient2);
+				}
+
+				if ("id".equals(name) && Arrays.asList("hapi-123", "hapi-124").containsAll(value)) {
+					Patient patient1 = new Patient();
+					patient1.setId("Patient/hapi-123/_history/2");
+					patient1.addName()
+						.setFamily("FAMILY 123");
+
+					Patient patient2 = new Patient();
+					patient2.setId("Patient/hapi-124/_history/1");
+					patient2.addName()
+						.setFamily("FAMILY 124");
+
+					theMatches.add(patient1);
+					theMatches.add(patient2);
+				}
+			}
+		}
+
+		@Override
+		public Resource lookup(Object theAppInfo, String theType, String theId) throws FHIRException {
+			ourLog.info("lookup {}/{}", theType, theId);
+
+			if (theType.equals("Patient") && theId.equals("123")) {
+				Patient p = new Patient();
+				p.addName()
+					.setFamily("FAMILY")
+					.addGiven("GIVEN1")
+					.addGiven("GIVEN2");
+				p.addName()
+					.addGiven("GivenOnly1")
+					.addGiven("GivenOnly2");
+				return p;
+			}
+
+			return null;
+		}
+
+		@Override
+		public IGraphQLStorageServices.ReferenceResolution lookup(Object theAppInfo, IBaseResource theContext, IBaseReference theReference) throws FHIRException {
+			ourLog.info("lookup from {} to {}", theContext.getIdElement().getValue(), theReference.getReferenceElement().getValue());
+			return null;
+		}
+
+		@Override
+		public Bundle search(Object theAppInfo, String theType, List<Argument> theSearchParams) throws FHIRException {
+			ourLog.info("search on {} - {}", theType, theSearchParams);
+			return null;
+		}
+	}
+}

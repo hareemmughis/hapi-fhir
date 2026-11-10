@@ -1,23 +1,22 @@
 <?xml version="1.0"?>
 <?mso-application progid="Excel.Sheet"?>
 <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
- xmlns:o="urn:schemas-microsoft-com:office:office"
- xmlns:x="urn:schemas-microsoft-com:office:excel"
- xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
- xmlns:html="http://www.w3.org/TR/REC-html40">
+			 xmlns:x="urn:schemas-microsoft-com:office:excel"
+			 xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+			 xmlns:html="http://www.w3.org/TR/REC-html40">
  <DocumentProperties xmlns="urn:schemas-microsoft-com:office:office">
   <Author>Grahame</Author>
-  <LastAuthor>Grahame Grieve</LastAuthor>
+  <LastAuthor>Richard J. Ettema (AEGIS.net)</LastAuthor>
   <Created>2012-03-19T11:12:07Z</Created>
-  <LastSaved>2016-02-27T01:21:16Z</LastSaved>
-  <Version>16.00</Version>
+  <LastSaved>2017-02-26T00:55:49Z</LastSaved>
+  <Version>12.00</Version>
  </DocumentProperties>
  <OfficeDocumentSettings xmlns="urn:schemas-microsoft-com:office:office">
   <AllowPNG/>
  </OfficeDocumentSettings>
  <ExcelWorkbook xmlns="urn:schemas-microsoft-com:office:excel">
-  <WindowHeight>11445</WindowHeight>
-  <WindowWidth>24690</WindowWidth>
+  <WindowHeight>11610</WindowHeight>
+  <WindowWidth>28800</WindowWidth>
   <WindowTopX>0</WindowTopX>
   <WindowTopY>0</WindowTopY>
   <ActiveSheet>1</ActiveSheet>
@@ -1127,6 +1126,35 @@
     <Cell ss:StyleID="Default"/>
     <Cell ss:StyleID="Default"/>
    </Row>
+   <Row ss:AutoFitHeight="0" ss:Height="45">
+    <Cell ss:StyleID="s87"><Data ss:Type="String">CompartmentDefinition.date</Data><NamedCell
+      ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s89"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s89"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s92"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="s93"><NamedCell ss:Name="_FilterDatabase"/></Cell>
+    <Cell ss:StyleID="Default"/>
+    <Cell ss:StyleID="Default"/>
+   </Row>
    <Row ss:AutoFitHeight="0" ss:Height="90">
     <Cell ss:StyleID="s87"><Data ss:Type="String">CompartmentDefinition.publisher</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
@@ -1181,35 +1209,6 @@
       ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s93"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-   </Row>
-   <Row ss:AutoFitHeight="0" ss:Height="45">
-    <Cell ss:StyleID="s87"><Data ss:Type="String">CompartmentDefinition.date</Data><NamedCell
-      ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s89"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s89"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s92"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s93"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="Default"/>
-    <Cell ss:StyleID="Default"/>
    </Row>
    <Row ss:AutoFitHeight="0" ss:Height="225">
     <Cell ss:StyleID="s87"><Data ss:Type="String">CompartmentDefinition.description</Data><NamedCell
@@ -1344,7 +1343,7 @@
     <Cell ss:StyleID="s89"><Data ss:Type="String">Which compartment this definition describes</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s89"><Data ss:Type="String">Only the specification can define the compartments that can exist. Servers can choose to support them</Data><NamedCell
+    <Cell ss:StyleID="s89"><Data ss:Type="String">Only the specification can define the compartments that can exist. Servers can choose to support them.</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
@@ -1374,10 +1373,10 @@
     <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s88"><Data ss:Type="String">Whether the search syntax is supported</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><Data ss:Type="String">Whether the search syntax is supported</Data><NamedCell
+    <Cell ss:StyleID="s88"><Data ss:Type="String">Whether the search syntax is supported,</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s89"><Data ss:Type="String">Servers may define and use compartments to manage logical access without implementing the compoartment related syntax</Data><NamedCell
+    <Cell ss:StyleID="s89"><Data ss:Type="String">Servers may define and use compartments to manage logical access without implementing the compartment related syntax.</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
@@ -1403,9 +1402,9 @@
     <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><Data ss:Type="String">How resource is related to the compartment</Data><NamedCell
+    <Cell ss:StyleID="s88"><Data ss:Type="String">How a resource is related to the compartment</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s89"><Data ss:Type="String">Information about how a resource it related to the compartment</Data><NamedCell
+    <Cell ss:StyleID="s89"><Data ss:Type="String">Information about how a resource is related to the compartment.</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s89"><NamedCell ss:Name="_FilterDatabase"/></Cell>
@@ -1469,12 +1468,12 @@
     <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><Data ss:Type="String">Search Parameter Name, or chained params</Data><NamedCell
+    <Cell ss:StyleID="s88"><Data ss:Type="String">Search Parameter Name, or chained parameters</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s89"><Data ss:Type="String">The name of a search parameter that represents the link to the compartment. More than one may be listed because a resource may be linked to a compartment more than one way</Data><NamedCell
+    <Cell ss:StyleID="s89"><Data ss:Type="String">The name of a search parameter that represents the link to the compartment. More than one may be listed because a resource may be linked to a compartment in more than one way,</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s89"><Data ss:Type="String">If no search parameters are listed, then the resource is not linked to the compartment</Data><NamedCell
+    <Cell ss:StyleID="s89"><Data ss:Type="String">If no search parameters are listed, then the resource is not linked to the compartment.</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s91"><NamedCell ss:Name="_FilterDatabase"/></Cell>
@@ -1501,9 +1500,9 @@
     <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s88"><NamedCell ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><Data ss:Type="String">Additional doco about the resource and compartment</Data><NamedCell
+    <Cell ss:StyleID="s88"><Data ss:Type="String">Additional documentation about the resource and compartment</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
-    <Cell ss:StyleID="s88"><Data ss:Type="String">Additional doco about the resource and compartment</Data><NamedCell
+    <Cell ss:StyleID="s88"><Data ss:Type="String">Additional documentation about the resource and compartment</Data><NamedCell
       ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s90"><NamedCell ss:Name="_FilterDatabase"/></Cell>
     <Cell ss:StyleID="s89"><NamedCell ss:Name="_FilterDatabase"/></Cell>
@@ -3846,9 +3845,9 @@
    <FreezePanes/>
    <FrozenNoSplit/>
    <SplitHorizontal>1</SplitHorizontal>
-   <TopRowBottomPane>9</TopRowBottomPane>
+   <TopRowBottomPane>19</TopRowBottomPane>
    <SplitVertical>1</SplitVertical>
-   <LeftColumnRightPane>1</LeftColumnRightPane>
+   <LeftColumnRightPane>11</LeftColumnRightPane>
    <ActivePane>0</ActivePane>
    <Panes>
     <Pane>
@@ -3856,6 +3855,7 @@
     </Pane>
     <Pane>
      <Number>1</Number>
+     <ActiveCol>1</ActiveCol>
     </Pane>
     <Pane>
      <Number>2</Number>
@@ -3863,8 +3863,7 @@
     </Pane>
     <Pane>
      <Number>0</Number>
-     <ActiveRow>13</ActiveRow>
-     <ActiveCol>2</ActiveCol>
+     <ActiveCol>14</ActiveCol>
     </Pane>
    </Panes>
    <ProtectObjects>False</ProtectObjects>
@@ -4384,7 +4383,6 @@
     <Pane>
      <Number>0</Number>
      <ActiveCol>0</ActiveCol>
-     <RangeSelection>R2</RangeSelection>
     </Pane>
    </Panes>
    <ProtectObjects>False</ProtectObjects>
@@ -4398,7 +4396,7 @@
    <NamedRange ss:Name="_FilterDatabase" ss:RefersTo="=Search!R1C1:R1C5"
     ss:Hidden="1"/>
   </Names>
-  <Table ss:ExpandedColumnCount="7" ss:ExpandedRowCount="24" x:FullColumns="1"
+  <Table ss:ExpandedColumnCount="5" ss:ExpandedRowCount="24" x:FullColumns="1"
    x:FullRows="1" ss:StyleID="s111" ss:DefaultColumnWidth="54"
    ss:DefaultRowHeight="15">
    <Column ss:StyleID="s111" ss:AutoFitWidth="0" ss:Width="70.5"/>
@@ -4406,7 +4404,6 @@
    <Column ss:StyleID="s111" ss:AutoFitWidth="0" ss:Width="109.5"/>
    <Column ss:StyleID="s111" ss:AutoFitWidth="0" ss:Width="210"/>
    <Column ss:StyleID="s111" ss:AutoFitWidth="0" ss:Width="382.5"/>
-   <Column ss:Index="7" ss:StyleID="s111" ss:AutoFitWidth="0" ss:Width="322.5"/>
    <Row ss:AutoFitHeight="0" ss:Height="15.75" ss:StyleID="s112">
     <Cell ss:StyleID="s103"><Data ss:Type="String">Name</Data><Comment ss:Author=""><ss:Data
        xmlns="http://www.w3.org/TR/REC-html40">Unique name for search parameter - required, lower-case, dash-delimited string    </ss:Data></Comment><NamedCell
@@ -4462,9 +4459,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s72"><Comment ss:Author=""><ss:Data
-       xmlns="http://www.w3.org/TR/REC-html40">        <Font html:Face="Tahoma"
-        x:Family="Swiss" html:Size="8" html:Color="#000000">Format is ResourceName.componentName.componentName</Font>       </ss:Data></Comment></Cell>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4472,7 +4466,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s78"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4480,7 +4473,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4488,7 +4480,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4496,7 +4487,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4504,7 +4494,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4512,7 +4501,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4520,7 +4508,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4528,7 +4515,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4536,7 +4522,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4544,7 +4529,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4552,7 +4536,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4560,7 +4543,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4568,7 +4550,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4576,7 +4557,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4584,7 +4564,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s113"/>
@@ -4592,7 +4571,6 @@
     <Cell ss:StyleID="s88"/>
     <Cell ss:StyleID="s114"/>
     <Cell ss:StyleID="s115"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0" ss:Height="15.75">
     <Cell ss:StyleID="s116"/>
@@ -4600,7 +4578,6 @@
     <Cell ss:StyleID="s117"/>
     <Cell ss:StyleID="s118"/>
     <Cell ss:StyleID="s119"/>
-    <Cell ss:Index="7" ss:StyleID="s87"/>
    </Row>
    <Row ss:AutoFitHeight="0" ss:Height="15.75"/>
   </Table>
@@ -4630,8 +4607,7 @@
     </Pane>
     <Pane>
      <Number>0</Number>
-     <ActiveRow>2</ActiveRow>
-     <ActiveCol>3</ActiveCol>
+     <ActiveCol>0</ActiveCol>
     </Pane>
    </Panes>
    <ProtectObjects>False</ProtectObjects>
@@ -5855,7 +5831,6 @@
     <Pane>
      <Number>0</Number>
      <ActiveCol>0</ActiveCol>
-     <RangeSelection>R2</RangeSelection>
     </Pane>
    </Panes>
    <ProtectObjects>False</ProtectObjects>
@@ -5873,11 +5848,11 @@
    x:FullRows="1" ss:StyleID="s136" ss:DefaultColumnWidth="260.25"
    ss:DefaultRowHeight="15">
    <Column ss:StyleID="s136" ss:Width="88.5"/>
-   <Column ss:StyleID="s136" ss:Width="27.75"/>
+   <Column ss:StyleID="s136" ss:AutoFitWidth="0" ss:Width="30.75"/>
    <Column ss:StyleID="s136" ss:Width="327.75"/>
    <Column ss:StyleID="s136" ss:Width="204"/>
    <Column ss:StyleID="s136" ss:Width="205.5" ss:Span="1"/>
-   <Column ss:Index="7" ss:StyleID="s136" ss:Width="39.75"/>
+   <Column ss:Index="7" ss:StyleID="s136" ss:AutoFitWidth="0" ss:Width="51"/>
    <Row ss:AutoFitHeight="0" ss:Height="15.75">
     <Cell ss:StyleID="s103"><Data ss:Type="String">Name</Data><Comment ss:Author=""><ss:Data
        xmlns="http://www.w3.org/TR/REC-html40">        <Font html:Face="Tahoma"
@@ -5960,11 +5935,11 @@
     <Cell ss:StyleID="s141"/>
    </Row>
    <Row ss:AutoFitHeight="0">
-    <Cell ss:StyleID="s140"/>
+    <Cell ss:StyleID="s140"><Data ss:Type="String">Example</Data></Cell>
     <Cell ss:StyleID="s88"/>
-    <Cell ss:StyleID="s89"/>
-    <Cell ss:StyleID="s88"/>
-    <Cell ss:StyleID="s88"/>
+    <Cell ss:StyleID="s89"><Data ss:Type="String">Example Compartment</Data></Cell>
+    <Cell ss:StyleID="s88"><Data ss:Type="String">example</Data></Cell>
+    <Cell ss:StyleID="s88"><Data ss:Type="String">compartmentdefinition-example.xml</Data></Cell>
     <Cell ss:StyleID="s129"/>
     <Cell ss:StyleID="s141"/>
    </Row>
@@ -6290,8 +6265,7 @@
     </Pane>
     <Pane>
      <Number>0</Number>
-     <ActiveRow>4</ActiveRow>
-     <ActiveCol>4</ActiveCol>
+     <ActiveCol>0</ActiveCol>
     </Pane>
    </Panes>
    <ProtectObjects>False</ProtectObjects>
@@ -6376,7 +6350,7 @@
    </Row>
    <Row ss:AutoFitHeight="0">
     <Cell ss:StyleID="s88"><Data ss:Type="String">CompartmentType</Data></Cell>
-    <Cell ss:StyleID="s89"><Data ss:Type="String">Which compartment a compartmnet definition describes</Data></Cell>
+    <Cell ss:StyleID="s89"><Data ss:Type="String">Which compartment a compartment definition describes</Data></Cell>
     <Cell ss:StyleID="s114"><Data ss:Type="String">code list</Data></Cell>
     <Cell ss:StyleID="s114"><Data ss:Type="String">required</Data></Cell>
     <Cell ss:StyleID="s114"><Data ss:Type="String">#compartment-type</Data></Cell>
@@ -6827,8 +6801,6 @@
     </Pane>
     <Pane>
      <Number>0</Number>
-     <ActiveRow>2</ActiveRow>
-     <ActiveCol>4</ActiveCol>
     </Pane>
    </Panes>
    <ProtectObjects>False</ProtectObjects>
@@ -7436,8 +7408,7 @@
     </Pane>
     <Pane>
      <Number>0</Number>
-     <ActiveRow>2</ActiveRow>
-     <ActiveCol>4</ActiveCol>
+     <ActiveCol>0</ActiveCol>
     </Pane>
    </Panes>
    <ProtectObjects>False</ProtectObjects>

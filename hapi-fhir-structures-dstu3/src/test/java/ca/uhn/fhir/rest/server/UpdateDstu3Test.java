@@ -1,172 +1,129 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.hamcrest.Matchers.containsString;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThat;
-
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpPut;
-import org.apache.http.entity.ContentType;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.hl7.fhir.dstu3.model.IdType;
-import org.hl7.fhir.dstu3.model.OperationOutcome;
-import org.hl7.fhir.dstu3.model.Patient;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
 import ca.uhn.fhir.rest.annotation.ConditionalUrlParam;
 import ca.uhn.fhir.rest.annotation.IdParam;
 import ca.uhn.fhir.rest.annotation.ResourceParam;
 import ca.uhn.fhir.rest.annotation.Update;
+import ca.uhn.fhir.rest.api.Constants;
 import ca.uhn.fhir.rest.api.MethodOutcome;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
 import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.dstu3.model.IdType;
+import org.hl7.fhir.dstu3.model.InstantType;
+import org.hl7.fhir.dstu3.model.OperationOutcome;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class UpdateDstu3Test {
-	private static CloseableHttpClient ourClient;
 	private static String ourConditionalUrl;
-	private static FhirContext ourCtx = FhirContext.forDstu3();
+	private static final FhirContext ourCtx = FhirContext.forDstu3Cached();
+	@RegisterExtension
+	private static RestfulServerExtension ourServer = new RestfulServerExtension(ourCtx)
+		.registerProvider(new PatientProvider());
 	private static IdType ourId;
-	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(UpdateDstu3Test.class);
-	private static int ourPort;
-	private static Server ourServer;
+	private static InstantType ourSetLastUpdated;
 
-	@Before
+	@BeforeEach
 	public void before() {
 		ourConditionalUrl = null;
 		ourId = null;
+		ourSetLastUpdated = null;
 	}
 
 	@Test
-	public void testUpdateConditional() throws Exception {
+	public void testUpdateReturnsETagAndUpdate() {
+
+		Patient patient = new Patient();
+		patient.setId("123");
+		patient.addIdentifier().setValue("002");
+		ourSetLastUpdated = new InstantType("2002-04-22T11:22:33.022Z");
+
+		HttpTestResponse response = ourServer.fhirRequest("/Patient/123")
+				.put(ourCtx.newXmlParser().encodeResourceToString(patient), Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.assertMimeType(Constants.CT_FHIR_XML);
+
+		assertThat(response.getBody()).isNotEmpty();
+
+		Patient actualPatient = response.getBodyAsResource(Patient.class);
+		assertEquals(patient.getIdElement().getIdPart(), actualPatient.getIdElement().getIdPart());
+		assertEquals(patient.getIdentifier().get(0).getValue(), actualPatient.getIdentifier().get(0).getValue());
+
+		assertThat(response.getHeader("location")).isNull();
+		response.assertHeader(Constants.HEADER_CONTENT_LOCATION, ourServer.getBaseUrl() + "/Patient/123/_history/002");
+		response.assertHeader(Constants.HEADER_ETAG_LC, "W/\"002\"");
+		response.assertHeader(Constants.HEADER_LAST_MODIFIED_LOWERCASE, "Mon, 22 Apr 2002 11:22:33 GMT");
+
+	}
+
+	@Test
+	public void testUpdateConditional() {
 
 		Patient patient = new Patient();
 		patient.setId("001");
 		patient.addIdentifier().setValue("002");
 
-		HttpPut httpPost = new HttpPut("http://localhost:" + ourPort + "/Patient?_id=001");
-		httpPost.setEntity(new StringEntity(ourCtx.newXmlParser().encodeResourceToString(patient), ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
+		String responseContent = ourServer.fhirRequest("/Patient?_id=001")
+			.put(ourCtx.newXmlParser().encodeResourceToString(patient), Constants.CT_FHIR_XML)
+			.assertStatus(200)
+			.getBody();
 
-		CloseableHttpResponse status = ourClient.execute(httpPost);
-		try {
-			String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-			ourLog.info("Response was:\n{}", responseContent);
-			assertEquals(200, status.getStatusLine().getStatusCode());
-
-			assertEquals("Patient?_id=001",ourConditionalUrl);
-			assertEquals(null, ourId);
-		} finally {
-			IOUtils.closeQuietly(status.getEntity().getContent());
-		}
+		assertThat(ourConditionalUrl).isEqualTo("Patient?_id=001");
+		assertThat(ourId).isNull();
 
 	}
 
 	@Test
-	public void testUpdateMissingIdInBody() throws Exception {
+	public void testUpdateMissingIdInBody() {
 
 		Patient patient = new Patient();
 		patient.addIdentifier().setValue("002");
 
-		HttpPut httpPost = new HttpPut("http://localhost:" + ourPort + "/Patient/001");
-		httpPost.setEntity(new StringEntity(ourCtx.newXmlParser().encodeResourceToString(patient), ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-
-		HttpResponse status = ourClient.execute(httpPost);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-		IOUtils.closeQuietly(status.getEntity().getContent());
-
-		ourLog.info("Response was:\n{}", responseContent);
-
-		assertEquals(400, status.getStatusLine().getStatusCode());
-		
-		OperationOutcome oo = ourCtx.newXmlParser().parseResource(OperationOutcome.class, responseContent);
-		assertEquals("Can not update resource, resource body must contain an ID element for update (PUT) operation", oo.getIssue().get(0).getDiagnostics());
+		OperationOutcome oo = ourServer.fhirRequest("/Patient/001")
+				.put(ourCtx.newXmlParser().encodeResourceToString(patient), Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(OperationOutcome.class);
+		assertEquals(Msg.code(419) + "Can not update resource, resource body must contain an ID element for update (PUT) operation", oo.getIssue().get(0).getDiagnostics());
 	}
 
 	@Test
-	public void testUpdateNormal() throws Exception {
+	public void testUpdateNormal() {
 
 		Patient patient = new Patient();
 		patient.setId("001");
 		patient.addIdentifier().setValue("002");
 
-		HttpPut httpPost = new HttpPut("http://localhost:" + ourPort + "/Patient/001");
-		httpPost.setEntity(new StringEntity(ourCtx.newXmlParser().encodeResourceToString(patient), ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
+		String responseContent = ourServer.fhirRequest("/Patient/001")
+			.put(ourCtx.newXmlParser().encodeResourceToString(patient), Constants.CT_FHIR_XML)
+			.assertStatus(200)
+			.getBody();
 
-		CloseableHttpResponse status = ourClient.execute(httpPost);
-		try {
-			String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-			ourLog.info("Response was:\n{}", responseContent);
-			assertEquals(200, status.getStatusLine().getStatusCode());
-
-			assertNull(ourConditionalUrl);
-			assertEquals("Patient/001", ourId.getValue());
-		} finally {
-			IOUtils.closeQuietly(status.getEntity().getContent());
-		}
+		assertThat(ourConditionalUrl).isNull();
+		assertThat(ourId.getValue()).isEqualTo("Patient/001");
 
 	}
 
 	@Test
-	public void testUpdateWrongIdInBody() throws Exception {
+	public void testUpdateWrongIdInBody() {
 
 		Patient patient = new Patient();
 		patient.setId("Patient/3/_history/4");
 		patient.addIdentifier().setValue("002");
 
-		HttpPut httpPost = new HttpPut("http://localhost:" + ourPort + "/Patient/1/_history/2");
-		httpPost.setEntity(new StringEntity(ourCtx.newXmlParser().encodeResourceToString(patient), ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-
-		HttpResponse status = ourClient.execute(httpPost);
-
-		String responseContent = IOUtils.toString(status.getEntity().getContent(), StandardCharsets.UTF_8);
-		IOUtils.closeQuietly(status.getEntity().getContent());
-
-		ourLog.info("Response was:\n{}", responseContent);
-
-		assertEquals(400, status.getStatusLine().getStatusCode());
-		assertThat(responseContent, containsString("Resource body ID of &quot;3&quot; does not match"));
-	}
-
-	@AfterClass
-	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
-	}
-
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-		servlet.setResourceProviders(new PatientProvider());
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
+		ourServer.fhirRequest("/Patient/1/_history/2")
+				.put(ourCtx.newXmlParser().encodeResourceToString(patient), Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertBodyContains("Resource body ID of &quot;3&quot; does not match");
 	}
 
 	public static class PatientProvider implements IResourceProvider {
@@ -187,8 +144,17 @@ public class UpdateDstu3Test {
 				return new MethodOutcome(id, oo, true);
 			}
 
-			return new MethodOutcome(id, oo);
+			thePatient.getMeta().setLastUpdatedElement(ourSetLastUpdated);
+
+			MethodOutcome retVal = new MethodOutcome(id, oo);
+			retVal.setResource(thePatient);
+			return retVal;
 		}
 
+	}
+
+	@AfterAll
+	public static void afterClassClearContext() throws Exception {
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 }

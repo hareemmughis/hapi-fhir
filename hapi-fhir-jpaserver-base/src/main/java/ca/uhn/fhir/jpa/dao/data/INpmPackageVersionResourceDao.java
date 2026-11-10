@@ -1,0 +1,97 @@
+/*
+ * #%L
+ * HAPI FHIR JPA Server
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.dao.data;
+
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.jpa.model.entity.NpmPackageVersionResourceEntity;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Slice;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
+public interface INpmPackageVersionResourceDao
+		extends JpaRepository<NpmPackageVersionResourceEntity, Long>, IHapiFhirJpaRepository {
+
+	@Query(
+			"SELECT e FROM NpmPackageVersionResourceEntity e WHERE e.myResourceType = :resourceType AND e.myFhirVersion = :fhirVersion AND ((:isCurrentVersion IS null ) OR (e.myPackageVersion.myCurrentVersion = :isCurrentVersion))")
+	Slice<NpmPackageVersionResourceEntity> findByResourceType(
+			Pageable thePage,
+			@Param("fhirVersion") FhirVersionEnum theFhirVersion,
+			@Param("resourceType") String theResourceType,
+			@Param("isCurrentVersion") Boolean theIsCurrentVersion);
+
+	@Query(
+			"SELECT e FROM NpmPackageVersionResourceEntity e WHERE e.myCanonicalUrl = :url AND e.myFhirVersion = :fhirVersion AND ((:isCurrentVersion IS null ) OR (e.myPackageVersion.myCurrentVersion = :isCurrentVersion))")
+	Slice<NpmPackageVersionResourceEntity> findByCanonicalUrl(
+			Pageable thePage,
+			@Param("fhirVersion") FhirVersionEnum theFhirVersion,
+			@Param("url") String theCanonicalUrl,
+			@Param("isCurrentVersion") Boolean theIsCurrentVersion);
+
+	@Query(
+			"SELECT e FROM NpmPackageVersionResourceEntity e WHERE e.myCanonicalUrl = :url AND e.myCanonicalVersion = :version AND e.myFhirVersion = :fhirVersion AND ((:isCurrentVersion IS null ) OR (e.myPackageVersion.myCurrentVersion = :isCurrentVersion))")
+	Slice<NpmPackageVersionResourceEntity> findByCanonicalUrlAndVersion(
+			Pageable theOf,
+			@Param("fhirVersion") FhirVersionEnum theFhirVersion,
+			@Param("url") String theCanonicalUrl,
+			@Param("version") String theCanonicalVersion,
+			@Param("isCurrentVersion") Boolean theIsCurrentVersion);
+
+	@Query(
+			"SELECT e FROM NpmPackageVersionResourceEntity e WHERE e.myCanonicalUrl = :url AND e.myFhirVersion = :fhirVersion AND e.myPackageVersion.myPackageId = :packageId AND ((:isCurrentVersion IS null ) OR (e.myPackageVersion.myCurrentVersion = :isCurrentVersion))")
+	Slice<NpmPackageVersionResourceEntity> findByCanonicalUrlAndPackageId(
+			Pageable theOf,
+			@Param("fhirVersion") FhirVersionEnum theFhirVersion,
+			@Param("url") String theCanonicalUrl,
+			@Param("packageId") String thePackageId,
+			@Param("isCurrentVersion") Boolean theIsCurrentVersion);
+
+	@Query(
+			"SELECT e FROM NpmPackageVersionResourceEntity e WHERE e.myCanonicalUrl = :url AND e.myFhirVersion = :fhirVersion AND e.myPackageVersion.myPackageId = :packageId AND e.myPackageVersion.myVersionId = :versionId AND ((:isCurrentVersion IS null ) OR (e.myPackageVersion.myCurrentVersion = :isCurrentVersion))")
+	Slice<NpmPackageVersionResourceEntity> findByCanonicalUrlAndPackageIdAndVersion(
+			Pageable theOf,
+			@Param("fhirVersion") FhirVersionEnum theFhirVersion,
+			@Param("url") String theCanonicalUrl,
+			@Param("packageId") String thePackageId,
+			@Param("versionId") String theVersionId,
+			@Param("isCurrentVersion") Boolean theIsCurrentVersion);
+
+	@Query(
+			"SELECT e FROM NpmPackageVersionResourceEntity e WHERE e.myCanonicalUrl = :url AND e.myCanonicalVersion = :version AND e.myFhirVersion = :fhirVersion AND e.myPackageVersion.myPackageId = :packageId AND ((:isCurrentVersion IS null ) OR (e.myPackageVersion.myCurrentVersion = :isCurrentVersion))")
+	Slice<NpmPackageVersionResourceEntity> findByCanonicalUrlAndVersionAndPackageId(
+			Pageable theOf,
+			@Param("fhirVersion") FhirVersionEnum theFhirVersion,
+			@Param("url") String theCanonicalUrl,
+			@Param("version") String theCanonicalVersion,
+			@Param("packageId") String thePackageId,
+			@Param("isCurrentVersion") Boolean theIsCurrentVersion);
+
+	@Query(
+			"SELECT e FROM NpmPackageVersionResourceEntity e WHERE e.myCanonicalUrl = :url AND e.myCanonicalVersion = :version AND e.myFhirVersion = :fhirVersion AND e.myPackageVersion.myPackageId = :packageId AND e.myPackageVersion.myVersionId = :versionId AND ((:isCurrentVersion IS null ) OR (e.myPackageVersion.myCurrentVersion = :isCurrentVersion))")
+	Slice<NpmPackageVersionResourceEntity> findByCanonicalUrlAndVersionAndPackageIdAndVersion(
+			Pageable theOf,
+			@Param("fhirVersion") FhirVersionEnum theFhirVersion,
+			@Param("url") String theCanonicalUrl,
+			@Param("version") String theCanonicalVersion,
+			@Param("packageId") String thePackageId,
+			@Param("versionId") String theVersionId,
+			@Param("isCurrentVersion") Boolean theIsCurrentVersion);
+}

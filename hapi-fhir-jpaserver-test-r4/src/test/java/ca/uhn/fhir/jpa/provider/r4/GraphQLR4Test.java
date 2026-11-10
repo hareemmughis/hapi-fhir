@@ -1,0 +1,254 @@
+package ca.uhn.fhir.jpa.provider.r4;
+
+import ca.uhn.fhir.jpa.provider.BaseResourceProviderR4Test;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.util.FileUtil;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r4.model.DateType;
+import org.hl7.fhir.r4.model.Patient;
+import org.intellij.lang.annotations.Language;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import static ca.uhn.fhir.jpa.provider.GraphQLProviderTestUtil.DATA_PREFIX;
+import static ca.uhn.fhir.jpa.provider.GraphQLProviderTestUtil.DATA_SUFFIX;
+import static org.assertj.core.api.Assertions.assertThat;
+
+@TestMethodOrder(MethodOrderer.MethodName.class)
+public class GraphQLR4Test extends BaseResourceProviderR4Test {
+	public static final String INTROSPECTION_QUERY = "{\"query\":\"\\n    query IntrospectionQuery {\\n      __schema {\\n        queryType { name }\\n        mutationType { name }\\n        subscriptionType { name }\\n        types {\\n          ...FullType\\n        }\\n        directives {\\n          name\\n          description\\n          locations\\n          args {\\n            ...InputValue\\n          }\\n        }\\n      }\\n    }\\n\\n    fragment FullType on __Type {\\n      kind\\n      name\\n      description\\n      fields(includeDeprecated: true) {\\n        name\\n        description\\n        args {\\n          ...InputValue\\n        }\\n        type {\\n          ...TypeRef\\n        }\\n        isDeprecated\\n        deprecationReason\\n      }\\n      inputFields {\\n        ...InputValue\\n      }\\n      interfaces {\\n        ...TypeRef\\n      }\\n      enumValues(includeDeprecated: true) {\\n        name\\n        description\\n        isDeprecated\\n        deprecationReason\\n      }\\n      possibleTypes {\\n        ...TypeRef\\n      }\\n    }\\n\\n    fragment InputValue on __InputValue {\\n      name\\n      description\\n      type { ...TypeRef }\\n      defaultValue\\n    }\\n\\n    fragment TypeRef on __Type {\\n      kind\\n      name\\n      ofType {\\n        kind\\n        name\\n        ofType {\\n          kind\\n          name\\n          ofType {\\n            kind\\n            name\\n            ofType {\\n              kind\\n              name\\n              ofType {\\n                kind\\n                name\\n                ofType {\\n                  kind\\n                  name\\n                  ofType {\\n                    kind\\n                    name\\n                  }\\n                }\\n              }\\n            }\\n          }\\n        }\\n      }\\n    }\\n  \",\"operationName\":\"IntrospectionQuery\"}";
+	private Logger ourLog = LoggerFactory.getLogger(GraphQLR4Test.class);
+	private IIdType myPatientId0;
+
+	@Test
+	public void testInstance_Read_Patient() {
+		initTestPatients();
+
+		String query = "{name{family,given}}";
+
+		String resp = myServer.fhirRequest("/Patient/" + myPatientId0.getIdPart() + "/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.getBody();
+		@Language("json")
+		String expected = """
+			{
+			  "name":[{
+			    "family":"FAM",
+			    "given":["GIVEN1","GIVEN2"]
+			  },{
+			    "given":["GivenOnly1","GivenOnly2"]
+			  }]
+			}""";
+		assertThat(TestUtil.stripWhitespace(resp)).isEqualTo(TestUtil.stripWhitespace(DATA_PREFIX + expected + DATA_SUFFIX));
+
+	}
+
+	@Test
+	public void testInstance_Patient_Birthdate() {
+		initTestPatients();
+
+		String query = "{birthDate}";
+
+		String resp = myServer.fhirRequest("/Patient/" + myPatientId0.getIdPart() + "/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.getBody();
+		@Language("json")
+		String expected = """
+            {
+		    "birthDate": "1965-08-09"
+			}""";
+		assertThat(TestUtil.stripWhitespace(resp)).isEqualTo(TestUtil.stripWhitespace(DATA_PREFIX + expected + DATA_SUFFIX));
+
+	}
+
+	@Test
+	public void testType_Introspect_Patient() {
+		initTestPatients();
+
+		// Repeat a couple of times to make sure it doesn't fail after the first one. At one point
+		// the generator polluted the structure userdata and failed the second time
+		for (int i = 0; i < 3; i++) {
+			myServer.fhirRequest("/Patient/$graphql")
+					.post(INTROSPECTION_QUERY, Constants.CT_JSON)
+					.assertStatus(200)
+					.assertBodyContains(
+						"{\"kind\":\"OBJECT\",\"name\":\"Patient\",",
+						"\"name\":\"Patient\",\"args\":[{\"name\":\"id\"",
+						"\"name\":\"PatientList\",\"args\":[{\"name\":\"_filter\"")
+					.assertBodyDoesNotContain(
+						"{\"kind\":\"OBJECT\",\"name\":\"Observation\",",
+						"\"name\":\"Observation\",\"args\":[{\"name\":\"id\"",
+						"\"name\":\"ObservationList\",\"args\":[{\"name\":\"_filter\"",
+						"\"name\":\"ObservationConnection\",\"fields\":[{\"name\":\"count\"");
+		}
+	}
+
+	@Test
+	public void testType_Introspect_Observation() {
+		initTestPatients();
+
+		// Repeat a couple of times to make sure it doesn't fail after the first one. At one point
+		// the generator polluted the structure userdata and failed the second time
+		for (int i = 0; i < 3; i++) {
+			myServer.fhirRequest("/Observation/$graphql")
+					.post(INTROSPECTION_QUERY, Constants.CT_JSON)
+					.assertStatus(200)
+					.assertBodyContains(
+						"{\"kind\":\"OBJECT\",\"name\":\"Observation\",",
+						"\"name\":\"Observation\",\"args\":[{\"name\":\"id\"",
+						"\"name\":\"ObservationList\",\"args\":[{\"name\":\"_filter\"",
+						"\"name\":\"ObservationConnection\",\"fields\":[{\"name\":\"count\"")
+					.assertBodyDoesNotContain(
+						"{\"kind\":\"OBJECT\",\"name\":\"Patient\",",
+						"{\"kind\":\"OBJECT\",\"name\":\"Query\",\"fields\":[{\"name\":\"PatientList\"",
+						"\"name\":\"Patient\",\"args\":[{\"name\":\"id\"",
+						"\"name\":\"PatientList\",\"args\":[{\"name\":\"_filter\"");
+		}
+	}
+
+	@Test
+	public void testRoot_Introspect() {
+		initTestPatients();
+
+		// Repeat a couple of times to make sure it doesn't fail after the first one. At one point
+		// the generator polluted the structure userdata and failed the second time
+		for (int i = 0; i < 3; i++) {
+			String resp = myServer.fhirRequest("/$graphql")
+				.post(INTROSPECTION_QUERY, Constants.CT_JSON)
+				.assertStatus(200)
+				.getBody();
+			ourLog.info("Response has size: {}", FileUtil.formatFileSize(resp.length()));
+			assertThat(resp).contains("{\"kind\":\"OBJECT\",\"name\":\"Patient\",");
+			assertThat(resp).contains("{\"kind\":\"OBJECT\",\"name\":\"Observation\",");
+			assertThat(resp).contains("\"name\":\"Observation\",\"args\":[{\"name\":\"id\"");
+			assertThat(resp).contains("\"name\":\"ObservationList\",\"args\":[{\"name\":\"_filter\"");
+			assertThat(resp).contains("\"name\":\"ObservationConnection\",\"fields\":[{\"name\":\"count\"");
+			assertThat(resp).contains("\"name\":\"Patient\",\"args\":[{\"name\":\"id\"");
+			assertThat(resp).contains("\"name\":\"PatientList\",\"args\":[{\"name\":\"_filter\"");
+		}
+	}
+
+	@Test
+	public void testRoot_Read_Patient() {
+		initTestPatients();
+
+		String query = "{Patient(id:\"" + myPatientId0.getIdPart() + "\"){name{family,given}}}";
+
+		String resp = myServer.fhirRequest("/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.getBody();
+
+		@Language("json")
+		String expected = """
+			{
+			"Patient":{
+			"name":[{
+			"family":"FAM",
+			"given":["GIVEN1","GIVEN2"]
+			},{
+			"given":["GivenOnly1","GivenOnly2"]
+			}]
+			}
+			}""";
+		assertThat(TestUtil.stripWhitespace(resp)).isEqualTo(TestUtil.stripWhitespace(DATA_PREFIX +
+			expected +
+			DATA_SUFFIX));
+
+	}
+
+
+	@Test
+	public void testRoot_Search_Patient() {
+		initTestPatients();
+
+		String query = "{PatientList(given:\"given\"){name{family,given}}}";
+
+		String resp = myServer.fhirRequest("/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.getBody();
+		@Language("json")
+		String expected = """
+			{
+			  "PatientList":[{
+			    "name":[{
+			      "family":"FAM",
+			      "given":["GIVEN1","GIVEN2"]
+			    },{
+			      "given":["GivenOnly1","GivenOnly2"]
+			    }]
+			  },{
+			    "name":[{
+			      "given":["GivenOnlyB1","GivenOnlyB2"]
+			    }]
+			  }]
+			}""";
+		assertThat(TestUtil.stripWhitespace(resp)).isEqualTo(TestUtil.stripWhitespace(DATA_PREFIX + expected + DATA_SUFFIX));
+
+	}
+
+	@Test
+	public void testRoot_Search_Observation() {
+		initTestPatients();
+
+		String query = "{ObservationList(date: \"2022\") {id}}";
+
+		myCaptureQueriesListener.clear();
+		myServer.fhirRequest("/$graphql")
+				.withQueryParam("query", query)
+				.get();
+		myCaptureQueriesListener.logSelectQueries();
+	}
+
+	@Test
+	public void testId_Search_Patient() {
+		initTestPatients();
+
+		String query = "{PatientList(_id: " + myPatientId0.getIdPart() + ") {id}}";
+
+		String resp = myServer.fhirRequest("/$graphql")
+				.withQueryParam("query", query)
+				.get()
+				.getBody();
+
+		@Language("json")
+		String expected = """
+			{
+			"PatientList":[{
+			"id":" """ + myPatientId0 + """
+			/_history/1"
+			}]
+			}""";
+		assertThat(TestUtil.stripWhitespace(resp)).isEqualTo(TestUtil.stripWhitespace(DATA_PREFIX +
+			expected +
+			DATA_SUFFIX));
+	}
+
+	private void initTestPatients() {
+		Patient p = new Patient();
+		p.addName()
+			.setFamily("FAM")
+			.addGiven("GIVEN1")
+			.addGiven("GIVEN2");
+		p.addName()
+			.addGiven("GivenOnly1")
+			.addGiven("GivenOnly2");
+		p.setBirthDateElement(new DateType("1965-08-09"));
+		myPatientId0 = myClient.create().resource(p).execute().getId().toUnqualifiedVersionless();
+
+		p = new Patient();
+		p.addName()
+			.addGiven("GivenOnlyB1")
+			.addGiven("GivenOnlyB2");
+		myClient.create().resource(p).execute();
+	}
+
+
+}

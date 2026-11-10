@@ -1,17 +1,15 @@
-package ca.uhn.fhir.context;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,14 +17,16 @@ package ca.uhn.fhir.context;
  * limitations under the License.
  * #L%
  */
-
-import org.hl7.fhir.instance.model.api.IPrimitiveType;
+package ca.uhn.fhir.context;
 
 import ca.uhn.fhir.model.api.annotation.DatatypeDef;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
 
-public class RuntimeIdDatatypeDefinition extends RuntimePrimitiveDatatypeDefinition implements IRuntimeDatatypeDefinition {
+public class RuntimeIdDatatypeDefinition extends RuntimePrimitiveDatatypeDefinition
+		implements IRuntimeDatatypeDefinition {
 
-	public RuntimeIdDatatypeDefinition(DatatypeDef theDef, Class<? extends IPrimitiveType<?>> theImplementingClass, boolean theStandardType) {
+	public RuntimeIdDatatypeDefinition(
+			DatatypeDef theDef, Class<? extends IPrimitiveType<?>> theImplementingClass, boolean theStandardType) {
 		super(theDef, theImplementingClass, theStandardType);
 	}
 
@@ -34,5 +34,4 @@ public class RuntimeIdDatatypeDefinition extends RuntimePrimitiveDatatypeDefinit
 	public ca.uhn.fhir.context.BaseRuntimeElementDefinition.ChildTypeEnum getChildType() {
 		return ChildTypeEnum.ID_DATATYPE;
 	}
-
 }

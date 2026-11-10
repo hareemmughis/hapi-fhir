@@ -1,0 +1,235 @@
+package ca.uhn.fhir.rest.server;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.annotation.At;
+import ca.uhn.fhir.rest.annotation.History;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.annotation.Read;
+import ca.uhn.fhir.rest.annotation.Since;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.param.DateRangeParam;
+import ca.uhn.fhir.rest.param.ParamPrefixEnum;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.DateTimeType;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.InstantType;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.StringType;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+public class HistoryR4Test {
+
+	private static final FhirContext ourCtx = FhirContext.forR4Cached();
+	private static DateRangeParam ourLastAt;
+	private static InstantType ourLastSince;
+	private static IPrimitiveType<Date> ourLastSince2;
+	private static IPrimitiveType<String> ourLastSince3;
+	private static IPrimitiveType<?> ourLastSince4;
+
+	@RegisterExtension
+	public RestfulServerExtension ourServer = new RestfulServerExtension(ourCtx)
+		 .registerProvider(new DummyPlainProvider())
+		 .registerProvider(new DummyResourceProvider())
+		 .withPagingProvider(new FifoMemoryPagingProvider(100))
+		 .setDefaultResponseEncoding(EncodingEnum.XML);
+
+	@BeforeEach
+	public void before() {
+		ourLastAt = null;
+		ourLastSince = null;
+		ourLastSince2 = null;
+		ourLastSince3 = null;
+		ourLastSince4 = null;
+	}
+
+	@Test
+	public void testAt() {
+		{
+			String responseContent = ourServer.fhirRequest("/_history?_at=gt2001&_at=lt2005")
+				.get()
+				.assertStatus(200)
+				.getBody();
+
+			assertEquals(ParamPrefixEnum.GREATERTHAN, ourLastAt.getLowerBound().getPrefix());
+			assertEquals("2001", ourLastAt.getLowerBound().getValueAsString());
+			assertEquals(ParamPrefixEnum.LESSTHAN, ourLastAt.getUpperBound().getPrefix());
+			assertEquals("2005", ourLastAt.getUpperBound().getValueAsString());
+		}
+	}
+
+	@Test
+	public void testInstanceHistory() {
+		{
+			Bundle bundle = ourServer.fhirRequest("/Patient/123/_history?_pretty=true")
+					.get()
+					.assertStatus(200)
+					.getBodyAsResource(Bundle.class);
+			assertThat(bundle.getEntry()).hasSize(2);
+			assertEquals(ourServer.getBaseUrl() + "/Patient/ih1/_history/1", bundle.getEntry().get(0).getResource().getId());
+			assertEquals(ourServer.getBaseUrl() + "/Patient/ih1/_history/2", bundle.getEntry().get(1).getResource().getId());
+
+		}
+	}
+
+	@Test
+	public void testServerHistory() {
+		{
+			Bundle bundle = ourServer.fhirRequest("/_history").get()
+					.assertStatus(200)
+					.getBodyAsResource(Bundle.class);
+			assertThat(bundle.getEntry()).hasSize(2);
+			assertEquals(ourServer.getBaseUrl() + "/Patient/h1/_history/1", bundle.getEntry().get(0).getResource().getId());
+			assertEquals(ourServer.getBaseUrl() + "/Patient/h1/_history/2", bundle.getEntry().get(1).getResource().getId());
+
+		}
+	}
+
+	@Test
+	public void testSince() {
+		{
+			String responseContent = ourServer.fhirRequest("/_history?_since=2005").get().assertStatus(200).getBody();
+
+			assertNull(ourLastAt);
+			assertEquals("2005", ourLastSince.getValueAsString());
+			assertEquals("2005", ourLastSince2.getValueAsString());
+			assertTrue(DateTimeType.class.equals(ourLastSince2.getClass()));
+			assertEquals("2005", ourLastSince3.getValueAsString());
+			assertTrue(StringType.class.equals(ourLastSince3.getClass()));
+			assertEquals("2005", ourLastSince4.getValueAsString());
+			assertTrue(StringType.class.equals(ourLastSince4.getClass()));
+		}
+	}
+
+	@Test
+	public void testTypeHistory() {
+		{
+			Bundle bundle = ourServer.fhirRequest("/Patient/_history").get()
+					.assertStatus(200)
+					.getBodyAsResource(Bundle.class);
+
+			assertNull(ourLastAt);
+
+			assertThat(bundle.getEntry()).hasSize(2);
+			assertEquals(ourServer.getBaseUrl() + "/Patient/th1/_history/1", bundle.getEntry().get(0).getResource().getId());
+			assertEquals(ourServer.getBaseUrl() + "/Patient/th1/_history/2", bundle.getEntry().get(1).getResource().getId());
+
+		}
+	}
+
+	/**
+	 * We test this here because of bug 3- At one point VRead would "steal" instance history calls and handle them
+	 */
+	@Test
+	public void testVread() {
+		{
+			Patient bundle = ourServer.fhirRequest("/Patient/123/_history/456")
+					.get()
+					.assertStatus(200)
+					.getBodyAsResource(Patient.class);
+			assertEquals("vread", bundle.getNameFirstRep().getFamily());
+		}
+	}
+
+	@AfterAll
+	public static void afterClassClearContext() throws Exception {
+		TestUtil.randomizeLocaleAndTimezone();
+	}
+
+	public static class DummyPlainProvider {
+
+		@History
+		public List<Patient> history(@Since InstantType theSince,
+											  @Since IPrimitiveType<Date> theSince2,
+											  @Since IPrimitiveType<String> theSince3,
+											  @Since IPrimitiveType theSince4,
+											  @At DateRangeParam theAt) {
+			ourLastAt = theAt;
+			ourLastSince = theSince;
+			ourLastSince2 = theSince2;
+			ourLastSince3 = theSince3;
+			ourLastSince4 = theSince4;
+
+			ArrayList<Patient> retVal = new ArrayList<>();
+
+			Patient patient = new Patient();
+			patient.setId("Patient/h1/_history/1");
+			patient.addName().setFamily("history");
+			retVal.add(patient);
+
+			Patient patient2 = new Patient();
+			patient2.setId("Patient/h1/_history/2");
+			patient2.addName().setFamily("history");
+			retVal.add(patient2);
+
+			return retVal;
+		}
+
+	}
+
+	public static class DummyResourceProvider implements IResourceProvider {
+
+		@Override
+		public Class<? extends Patient> getResourceType() {
+			return Patient.class;
+		}
+
+		@History
+		public List<Patient> instanceHistory(@IdParam IdType theId) {
+			ArrayList<Patient> retVal = new ArrayList<>();
+
+			Patient patient = new Patient();
+			patient.setId("Patient/ih1/_history/1");
+			patient.addName().setFamily("history");
+			retVal.add(patient);
+
+			Patient patient2 = new Patient();
+			patient2.setId("Patient/ih1/_history/2");
+			patient2.addName().setFamily("history");
+			retVal.add(patient2);
+
+			return retVal;
+		}
+
+		@History
+		public List<Patient> typeHistory() {
+			ArrayList<Patient> retVal = new ArrayList<>();
+
+			Patient patient = new Patient();
+			patient.setId("Patient/th1/_history/1");
+			patient.addName().setFamily("history");
+			retVal.add(patient);
+
+			Patient patient2 = new Patient();
+			patient2.setId("Patient/th1/_history/2");
+			patient2.addName().setFamily("history");
+			retVal.add(patient2);
+
+			return retVal;
+		}
+
+		@Read(version = true)
+		public Patient vread(@IdParam IdType theId) {
+			Patient retVal = new Patient();
+			retVal.addName().setFamily("vread");
+			retVal.setId(theId);
+			return retVal;
+		}
+
+	}
+
+}

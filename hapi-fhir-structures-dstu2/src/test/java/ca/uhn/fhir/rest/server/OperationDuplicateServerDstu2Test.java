@@ -1,25 +1,5 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.hamcrest.Matchers.*;
-import static org.junit.Assert.*;
-
-import java.util.Arrays;
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.model.dstu2.resource.Conformance;
 import ca.uhn.fhir.model.dstu2.resource.OperationDefinition;
@@ -29,103 +9,60 @@ import ca.uhn.fhir.model.dstu2.resource.Patient;
 import ca.uhn.fhir.model.primitive.StringDt;
 import ca.uhn.fhir.rest.annotation.Operation;
 import ca.uhn.fhir.rest.annotation.OperationParam;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
 import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class OperationDuplicateServerDstu2Test {
-	private static CloseableHttpClient ourClient;
-	private static FhirContext ourCtx;
-	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(OperationDuplicateServerDstu2Test.class);
-	private static int ourPort;
-	private static Server ourServer;
+	private static final FhirContext ourCtx = FhirContext.forDstu2Cached();
+
+	@RegisterExtension
+	public static final RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		.setDefaultResponseEncoding(EncodingEnum.XML)
+		.registerProvider(new PatientProvider())
+		.registerProvider(new OrganizationProvider())
+		.registerProvider(new PlainProvider())
+		.withPagingProvider(new FifoMemoryPagingProvider(10).setDefaultPageSize(2))
+		.setDefaultPrettyPrint(false);
 
 	@Test
-	public void testOperationsAreCollapsed() throws Exception {
+	public void testOperationsAreCollapsed() {
 		// Metadata
 		{
-			HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/metadata?_pretty=true");
-			HttpResponse status = ourClient.execute(httpGet);
-
-			assertEquals(200, status.getStatusLine().getStatusCode());
-			String response = IOUtils.toString(status.getEntity().getContent());
-			IOUtils.closeQuietly(status.getEntity().getContent());
-			ourLog.info(response);
-
-			Conformance resp = ourCtx.newXmlParser().parseResource(Conformance.class, response);
-			assertEquals(3, resp.getRest().get(0).getOperation().size());
+			Conformance resp = ourServer.fhirRequest("/metadata?_pretty=true").get()
+					.assertStatus(200)
+					.getBodyAsResource(Conformance.class);
+			assertThat(resp.getRest().get(0).getOperation()).hasSize(1);
 			assertEquals("myoperation", resp.getRest().get(0).getOperation().get(0).getName());
-			assertEquals("OperationDefinition/-s-myoperation", resp.getRest().get(0).getOperation().get(0).getDefinition().getReference().getValue());
+			assertEquals("OperationDefinition/OrganizationPatient-ts-myoperation", resp.getRest().get(0).getOperation().get(0).getDefinition().getReference().getValue());
 		}
 
 		// OperationDefinition
 		{
-			HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/OperationDefinition/-s-myoperation?_pretty=true");
-			HttpResponse status = ourClient.execute(httpGet);
-
-			assertEquals(200, status.getStatusLine().getStatusCode());
-			String response = IOUtils.toString(status.getEntity().getContent());
-			IOUtils.closeQuietly(status.getEntity().getContent());
-			ourLog.info(response);
-
-			OperationDefinition resp = ourCtx.newXmlParser().parseResource(OperationDefinition.class, response);
+			OperationDefinition resp = ourServer.fhirRequest("/OperationDefinition/OrganizationPatient-ts-myoperation?_pretty=true")
+					.get()
+					.assertStatus(200)
+					.getBodyAsResource(OperationDefinition.class);
 			assertEquals(true, resp.getSystemElement().getValue().booleanValue());
 			assertEquals("myoperation", resp.getCode());
 			assertEquals(true, resp.getIdempotent().booleanValue());
-			assertEquals(0, resp.getType().size());
-			assertEquals(1, resp.getParameter().size());
-		}
-		// OperationDefinition
-		{
-			HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/OperationDefinition/Organization--myoperation?_pretty=true");
-			HttpResponse status = ourClient.execute(httpGet);
-
-			assertEquals(200, status.getStatusLine().getStatusCode());
-			String response = IOUtils.toString(status.getEntity().getContent());
-			IOUtils.closeQuietly(status.getEntity().getContent());
-			ourLog.info(response);
-
-			OperationDefinition resp = ourCtx.newXmlParser().parseResource(OperationDefinition.class, response);
-			assertEquals(false, resp.getSystemElement().getValue().booleanValue());
-			assertEquals("myoperation", resp.getCode());
-			assertEquals(true, resp.getIdempotent().booleanValue());
-			assertEquals(1, resp.getType().size());
-			assertEquals("Organization", resp.getType().get(0).getValue());
-			assertEquals(1, resp.getParameter().size());
+			assertThat(resp.getType()).hasSize(2);
+			assertThat(resp.getParameter()).hasSize(1);
 		}
 	}
 
 
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
-	}
-
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourCtx = FhirContext.forDstu2();
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-
-		servlet.setPagingProvider(new FifoMemoryPagingProvider(10).setDefaultPageSize(2));
-
-		servlet.setFhirContext(ourCtx);
-		servlet.setResourceProviders(new PatientProvider(), new OrganizationProvider());
-		servlet.setPlainProviders(new PlainProvider());
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 	public static class BaseProvider {

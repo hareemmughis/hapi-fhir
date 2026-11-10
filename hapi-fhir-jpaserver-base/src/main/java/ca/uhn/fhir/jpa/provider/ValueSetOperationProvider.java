@@ -1,0 +1,370 @@
+/*-
+ * #%L
+ * HAPI FHIR JPA Server
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.provider;
+
+import ca.uhn.fhir.batch2.api.IJobCoordinator;
+import ca.uhn.fhir.batch2.model.JobInstance;
+import ca.uhn.fhir.batch2.model.JobInstanceStartRequest;
+import ca.uhn.fhir.batch2.util.AsyncRequestUtil;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.IValidationSupport.CodeValidationResult;
+import ca.uhn.fhir.context.support.ValueSetExpansionOptions;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.jpa.api.config.JpaStorageSettings;
+import ca.uhn.fhir.jpa.api.dao.DaoRegistry;
+import ca.uhn.fhir.jpa.api.dao.IFhirResourceDaoValueSet;
+import ca.uhn.fhir.jpa.batch.models.Batch2JobStartResponse;
+import ca.uhn.fhir.jpa.batch2.jobs.term.valueset.preexpand.PreExpandValueSetJobAppCtx;
+import ca.uhn.fhir.jpa.batch2.jobs.term.valueset.preexpand.PreExpandValueSetParameters;
+import ca.uhn.fhir.jpa.batch2.jobs.term.valueset.preexpand.PreExpandValueSetResultJson;
+import ca.uhn.fhir.jpa.model.util.JpaConstants;
+import ca.uhn.fhir.jpa.term.api.ITermValueSetExpansionSvc;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.annotation.Operation;
+import ca.uhn.fhir.rest.annotation.OperationParam;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.param.StringParam;
+import ca.uhn.fhir.rest.server.IPagingProvider;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import ca.uhn.fhir.rest.server.provider.ProviderConstants;
+import ca.uhn.fhir.rest.server.servlet.ServletRequestDetails;
+import ca.uhn.fhir.util.DatatypeUtil;
+import ca.uhn.fhir.util.JsonUtil;
+import ca.uhn.fhir.util.UrlUtil;
+import jakarta.annotation.Nullable;
+import jakarta.servlet.http.HttpServletRequest;
+import org.hl7.fhir.instance.model.api.IBaseCoding;
+import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
+import org.hl7.fhir.instance.model.api.IBaseParameters;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.ICompositeType;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.function.Consumer;
+import java.util.function.Function;
+
+import static ca.uhn.fhir.jpa.provider.TerminologyUploaderProvider.PARAM_JOB_INSTANCE_ID;
+import static ca.uhn.fhir.rest.server.provider.ProviderConstants.OPERATION_INVALIDATE_EXPANSION;
+import static ca.uhn.fhir.rest.server.provider.ProviderConstants.OPERATION_INVALIDATE_EXPANSION_POLL_FOR_STATUS;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+public class ValueSetOperationProvider extends BaseJpaProvider {
+
+	private static final Logger ourLog = LoggerFactory.getLogger(ValueSetOperationProvider.class);
+	public static final String PARAM_URL = "url";
+	public static final String PARAM_VERSION = "version";
+	public static final String PARAM_EXPANSION_STATUS = "expansionStatus";
+	public static final String PARAM_NAME = "name";
+	public static final String PARAM_COUNT = "count";
+	public static final String PARAM_OFFSET = "offset";
+
+	@Autowired
+	protected IValidationSupport myValidationSupport;
+
+	@Autowired
+	private DaoRegistry myDaoRegistry;
+
+	@Autowired
+	private IJobCoordinator myJobCoordinator;
+
+	@Autowired
+	private IPagingProvider myPagingProvider;
+
+	@Autowired
+	private ITermValueSetExpansionSvc myTermValueSetExpansionSvc;
+
+	public void setValidationSupport(IValidationSupport theValidationSupport) {
+		myValidationSupport = theValidationSupport;
+	}
+
+	@Operation(name = JpaConstants.OPERATION_EXPAND, idempotent = true, typeName = "ValueSet")
+	public IBaseResource expand(
+			HttpServletRequest theServletRequest,
+			@IdParam(optional = true) IIdType theId,
+			@OperationParam(name = "valueSet", min = 0, max = 1) IBaseResource theValueSet,
+			@OperationParam(name = PARAM_URL, min = 0, max = 1, typeName = "uri") IPrimitiveType<String> theUrl,
+			@OperationParam(name = "valueSetVersion", min = 0, max = 1, typeName = "string")
+					IPrimitiveType<String> theValueSetVersion,
+			@OperationParam(name = "filter", min = 0, max = 1, typeName = "string") IPrimitiveType<String> theFilter,
+			@OperationParam(name = "context", min = 0, max = 1, typeName = "string") IPrimitiveType<String> theContext,
+			@OperationParam(name = "contextDirection", min = 0, max = 1, typeName = "string")
+					IPrimitiveType<String> theContextDirection,
+			@OperationParam(name = PARAM_OFFSET, min = 0, max = 1, typeName = "integer")
+					IPrimitiveType<Integer> theOffset,
+			@OperationParam(name = PARAM_COUNT, min = 0, max = 1, typeName = "integer")
+					IPrimitiveType<Integer> theCount,
+			@OperationParam(
+							name = JpaConstants.OPERATION_EXPAND_PARAM_DISPLAY_LANGUAGE,
+							min = 0,
+							max = 1,
+							typeName = "code")
+					IPrimitiveType<String> theDisplayLanguage,
+			@OperationParam(
+							name = JpaConstants.OPERATION_EXPAND_PARAM_INCLUDE_HIERARCHY,
+							min = 0,
+							max = 1,
+							typeName = "boolean")
+					IPrimitiveType<Boolean> theIncludeHierarchy,
+			RequestDetails theRequestDetails) {
+
+		startRequest(theServletRequest);
+		try {
+
+			return getDao().expand(
+							theId,
+							theValueSet,
+							theUrl,
+							theValueSetVersion,
+							theFilter,
+							theContext,
+							theContextDirection,
+							theOffset,
+							theCount,
+							theDisplayLanguage,
+							theIncludeHierarchy,
+							theRequestDetails);
+
+		} finally {
+			endRequest(theServletRequest);
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	protected IFhirResourceDaoValueSet<IBaseResource> getDao() {
+		return (IFhirResourceDaoValueSet<IBaseResource>) myDaoRegistry.getResourceDao("ValueSet");
+	}
+
+	@Operation(
+			name = JpaConstants.OPERATION_VALIDATE_CODE,
+			idempotent = true,
+			typeName = "ValueSet",
+			returnParameters = {
+				@OperationParam(name = CodeValidationResult.RESULT, typeName = "boolean", min = 1),
+				@OperationParam(name = CodeValidationResult.MESSAGE, typeName = "string"),
+				@OperationParam(name = CodeValidationResult.DISPLAY, typeName = "string"),
+				@OperationParam(name = CodeValidationResult.SOURCE_DETAILS, typeName = "string")
+			})
+	public IBaseParameters validateCode(
+			HttpServletRequest theServletRequest,
+			@IdParam(optional = true) IIdType theId,
+			@OperationParam(name = PARAM_URL, min = 0, max = 1, typeName = "uri") IPrimitiveType<String> theValueSetUrl,
+			@OperationParam(name = "valueSetVersion", min = 0, max = 1, typeName = "string")
+					IPrimitiveType<String> theValueSetVersion,
+			@OperationParam(name = "code", min = 0, max = 1, typeName = "code") IPrimitiveType<String> theCode,
+			@OperationParam(name = "system", min = 0, max = 1, typeName = "uri") IPrimitiveType<String> theSystem,
+			@OperationParam(name = "systemVersion", min = 0, max = 1, typeName = "string")
+					IPrimitiveType<String> theSystemVersion,
+			@OperationParam(name = CodeValidationResult.DISPLAY, min = 0, max = 1, typeName = "string")
+					IPrimitiveType<String> theDisplay,
+			@OperationParam(name = "coding", min = 0, max = 1, typeName = "Coding") IBaseCoding theCoding,
+			@OperationParam(name = "codeableConcept", min = 0, max = 1, typeName = "CodeableConcept")
+					ICompositeType theCodeableConcept,
+			RequestDetails theRequestDetails) {
+
+		CodeValidationResult result;
+		startRequest(theServletRequest);
+		try {
+			if (theCoding != null && isNotBlank(theCoding.getSystem())) {
+				String system = UrlUtil.parseCanonicalUrl(theSystem != null ? theSystem.getValueAsString() : null)
+						.url();
+				if (system != null && !system.equalsIgnoreCase(theCoding.getSystem())) {
+					throw new InvalidRequestException(Msg.code(2352) + "Coding.system '" + theCoding.getSystem()
+							+ "' does not equal param system '" + system + "'. Unable to validate-code.");
+				}
+			}
+
+			IFhirResourceDaoValueSet<IBaseResource> dao = getDao();
+
+			IPrimitiveType<String> valueSetIdentifier = parametersToIdentifier(theValueSetUrl, theValueSetVersion);
+			IPrimitiveType<String> codeSystemIdentifier = parametersToIdentifier(theSystem, theSystemVersion);
+
+			result = dao.validateCode(
+					valueSetIdentifier,
+					theId,
+					theCode,
+					codeSystemIdentifier,
+					theDisplay,
+					theCoding,
+					theCodeableConcept,
+					theRequestDetails);
+			return result.toParameters(getContext());
+		} finally {
+			endRequest(theServletRequest);
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	@Nullable
+	private IPrimitiveType<String> parametersToIdentifier(IPrimitiveType<String> url, IPrimitiveType<String> version) {
+		IPrimitiveType<String> valueSetIdentifier;
+		if (url != null && version != null) {
+			valueSetIdentifier = (IPrimitiveType<String>)
+					getContext().getElementDefinitionNotNull("uri").newInstance();
+			valueSetIdentifier.setValue(UrlUtil.toCanonicalUrl(url.getValue(), version.getValue()));
+		} else {
+			valueSetIdentifier = url;
+		}
+		return valueSetIdentifier;
+	}
+
+	@Operation(name = OPERATION_INVALIDATE_EXPANSION, idempotent = false, manualResponse = true, typeName = "ValueSet")
+	public void invalidateValueSetExpansion(
+			@IdParam(optional = true) IIdType theValueSetId,
+			@OperationParam(name = PARAM_URL, min = 0, typeName = "uri") IPrimitiveType<String> theUrl,
+			@OperationParam(name = PARAM_VERSION, min = 0, typeName = "code") IPrimitiveType<String> theVersion,
+			ServletRequestDetails theRequestDetails,
+			HttpServletRequest theServletRequest)
+			throws IOException {
+		startRequest(theServletRequest);
+		try {
+
+			PreExpandValueSetParameters jobParameters = new PreExpandValueSetParameters();
+			jobParameters.setUrl(DatatypeUtil.toStringValue(theUrl));
+			jobParameters.setVersion(DatatypeUtil.toStringValue(theVersion));
+			jobParameters.setId(DatatypeUtil.toStringValue(theValueSetId));
+
+			JobInstanceStartRequest startRequest = new JobInstanceStartRequest();
+			startRequest.setJobDefinitionId(PreExpandValueSetJobAppCtx.JOB_ID_PRE_EXPAND_VALUESET);
+			startRequest.setParameters(jobParameters);
+
+			Batch2JobStartResponse startResponse = myJobCoordinator.startInstance(theRequestDetails, startRequest);
+			String instanceId = startResponse.getInstanceId();
+
+			String pollUrl = "ValueSet/" + OPERATION_INVALIDATE_EXPANSION_POLL_FOR_STATUS + "?" + PARAM_JOB_INSTANCE_ID
+					+ "=" + instanceId;
+
+			Consumer<IBaseOperationOutcome> operationOutcomePostProcessor =
+					oo -> AsyncRequestUtil.addWarningToOperationOutcomeIfNoPreferRespondAsync(
+							getContext(), oo, theRequestDetails);
+			AsyncRequestUtil.handleAsynchronousOperationStartRequest(
+					theRequestDetails, pollUrl, OPERATION_INVALIDATE_EXPANSION, operationOutcomePostProcessor);
+
+		} finally {
+			endRequest(theServletRequest);
+		}
+	}
+
+	/**
+	 * <code>$hapi.fhir.invalidate-expansion.poll-for-status</code>
+	 */
+	@Operation(
+			typeName = "ValueSet",
+			name = OPERATION_INVALIDATE_EXPANSION_POLL_FOR_STATUS,
+			manualResponse = true,
+			idempotent = true)
+	public void invalidateExpansionPollForStatus(
+			@OperationParam(name = PARAM_JOB_INSTANCE_ID, min = 1, typeName = "code")
+					IPrimitiveType<String> theJobInstanceId,
+			ServletRequestDetails theRequestDetails)
+			throws IOException {
+
+		JobInstance jobInstance = myJobCoordinator.getInstance(DatatypeUtil.toStringValue(theJobInstanceId));
+		Function<JobInstance, AsyncRequestUtil.CompletedJobPollResponse> completedJobResponseProvider = instance -> {
+			PreExpandValueSetResultJson resultJson =
+					JsonUtil.deserialize(jobInstance.getReport(), PreExpandValueSetResultJson.class);
+			String report = resultJson.getReport();
+			return new AsyncRequestUtil.CompletedJobPollResponse(null, List.of(report));
+		};
+		AsyncRequestUtil.handleAsyncJobPollForStatusResponse(
+				theRequestDetails,
+				jobInstance,
+				OPERATION_INVALIDATE_EXPANSION,
+				PreExpandValueSetJobAppCtx.JOB_ID_PRE_EXPAND_VALUESET,
+				completedJobResponseProvider);
+	}
+
+	@Operation(name = ProviderConstants.OPERATION_EXPANSION_STATUS, idempotent = true, typeName = "ValueSet")
+	public IBaseParameters getExpansionStatus(
+			@OperationParam(name = PARAM_EXPANSION_STATUS, max = OperationParam.MAX_UNLIMITED, typeName = "code")
+					List<IPrimitiveType<String>> theExpansionStatuses,
+			@OperationParam(name = PARAM_URL, max = 1) StringParam theUrl,
+			@OperationParam(name = PARAM_NAME, max = 1) StringParam theName,
+			@OperationParam(name = PARAM_COUNT, max = 1, typeName = "integer") IPrimitiveType<Integer> theCount,
+			@OperationParam(name = PARAM_OFFSET, max = 1, typeName = "integer") IPrimitiveType<Integer> theOffset) {
+		List<String> statuses = theExpansionStatuses != null
+				? theExpansionStatuses.stream().map(IPrimitiveType::getValue).toList()
+				: null;
+		int count =
+				theCount != null && theCount.hasValue() ? theCount.getValue() : myPagingProvider.getDefaultPageSize();
+		count = Math.min(myPagingProvider.getMaximumPageSize(), count);
+		int offset = theOffset != null && theOffset.hasValue() ? theOffset.getValue() : 0;
+		return myTermValueSetExpansionSvc.getExpansionStatus(theUrl, theName, statuses, count, offset);
+	}
+
+	public static ValueSetExpansionOptions createValueSetExpansionOptions(
+			JpaStorageSettings theStorageSettings,
+			IPrimitiveType<Integer> theOffset,
+			IPrimitiveType<Integer> theCount,
+			IPrimitiveType<Boolean> theIncludeHierarchy,
+			IPrimitiveType<String> theFilter,
+			IPrimitiveType<String> theDisplayLanguage) {
+		int offset = theStorageSettings.getPreExpandValueSetsDefaultOffset();
+		if (theOffset != null && theOffset.hasValue()) {
+			if (theOffset.getValue() >= 0) {
+				offset = theOffset.getValue();
+			} else {
+				throw new InvalidRequestException(
+						Msg.code(1135) + "offset parameter for $expand operation must be >= 0 when specified. offset: "
+								+ theOffset.getValue());
+			}
+		}
+
+		int count = theStorageSettings.getPreExpandValueSetsDefaultCount();
+		if (theCount != null && theCount.hasValue()) {
+			if (theCount.getValue() >= 0) {
+				count = theCount.getValue();
+			} else {
+				throw new InvalidRequestException(
+						Msg.code(1136) + "count parameter for $expand operation must be >= 0 when specified. count: "
+								+ theCount.getValue());
+			}
+		}
+		int countMax = theStorageSettings.getPreExpandValueSetsMaxCount();
+		if (count > countMax) {
+			ourLog.warn(
+					"count parameter for $expand operation of {} exceeds maximum value of {}; using maximum value.",
+					count,
+					countMax);
+			count = countMax;
+		}
+
+		ValueSetExpansionOptions options = ValueSetExpansionOptions.forOffsetAndCount(offset, count);
+
+		if (theIncludeHierarchy != null && Boolean.TRUE.equals(theIncludeHierarchy.getValue())) {
+			options.setIncludeHierarchy(true);
+		}
+
+		if (theFilter != null) {
+			options.setFilter(theFilter.getValue());
+		}
+
+		if (theDisplayLanguage != null) {
+			options.setTheDisplayLanguage(theDisplayLanguage.getValue());
+		}
+
+		return options;
+	}
+}

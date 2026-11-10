@@ -1,0 +1,7629 @@
+package ca.uhn.fhir.jpa.provider.r4;
+
+import ca.uhn.fhir.context.RuntimeSearchParam;
+import ca.uhn.fhir.i18n.HapiLocalizer;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.interceptor.api.Hook;
+import ca.uhn.fhir.interceptor.api.Pointcut;
+import ca.uhn.fhir.jpa.api.config.JpaStorageSettings;
+import ca.uhn.fhir.jpa.api.dao.IFhirResourceDao;
+import ca.uhn.fhir.jpa.api.model.DaoMethodOutcome;
+import ca.uhn.fhir.jpa.dao.data.ISearchDao;
+import ca.uhn.fhir.jpa.entity.Search;
+import ca.uhn.fhir.jpa.model.dao.JpaPidFk;
+import ca.uhn.fhir.jpa.model.entity.NormalizedQuantitySearchLevel;
+import ca.uhn.fhir.jpa.model.entity.ResourceHistoryTable;
+import ca.uhn.fhir.jpa.model.entity.ResourceIndexedSearchParamUri;
+import ca.uhn.fhir.jpa.model.entity.StorageSettings;
+import ca.uhn.fhir.jpa.model.util.JpaConstants;
+import ca.uhn.fhir.jpa.model.util.UcumServiceUtil;
+import ca.uhn.fhir.jpa.provider.BaseResourceProviderR4Test;
+import ca.uhn.fhir.jpa.search.SearchCoordinatorSvcImpl;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
+import ca.uhn.fhir.jpa.searchparam.submit.interceptor.SearchParamValidatingInterceptor;
+import ca.uhn.fhir.jpa.term.TerminologyTestHelper;
+import ca.uhn.fhir.jpa.term.ZipCollectionBuilder;
+import ca.uhn.fhir.jpa.test.config.TestR4Config;
+import ca.uhn.fhir.jpa.util.MemoryCacheService;
+import ca.uhn.fhir.jpa.util.QueryParameterUtils;
+import ca.uhn.fhir.model.api.StorageResponseCodeEnum;
+import ca.uhn.fhir.model.api.TemporalPrecisionEnum;
+import ca.uhn.fhir.model.primitive.IdDt;
+import ca.uhn.fhir.model.primitive.InstantDt;
+import ca.uhn.fhir.model.primitive.UriDt;
+import ca.uhn.fhir.parser.IParser;
+import ca.uhn.fhir.parser.StrictErrorHandler;
+import ca.uhn.fhir.rest.api.CacheControlDirective;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.MethodOutcome;
+import ca.uhn.fhir.rest.api.PreferReturnEnum;
+import ca.uhn.fhir.rest.api.SearchIncludeDeletedEnum;
+import ca.uhn.fhir.rest.api.SearchTotalModeEnum;
+import ca.uhn.fhir.rest.api.SortOrderEnum;
+import ca.uhn.fhir.rest.api.SortSpec;
+import ca.uhn.fhir.rest.api.SummaryEnum;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.api.server.SystemRequestDetails;
+import ca.uhn.fhir.rest.client.api.IClientInterceptor;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import ca.uhn.fhir.rest.client.api.IHttpRequest;
+import ca.uhn.fhir.rest.client.api.IHttpResponse;
+import ca.uhn.fhir.rest.client.interceptor.CapturingInterceptor;
+import ca.uhn.fhir.rest.gclient.ICriterion;
+import ca.uhn.fhir.rest.gclient.IQuery;
+import ca.uhn.fhir.rest.gclient.NumberClientParam;
+import ca.uhn.fhir.rest.gclient.StringClientParam;
+import ca.uhn.fhir.rest.param.DateRangeParam;
+import ca.uhn.fhir.rest.param.ParamPrefixEnum;
+import ca.uhn.fhir.rest.param.TokenParam;
+import ca.uhn.fhir.rest.param.TokenParamModifier;
+import ca.uhn.fhir.rest.server.BasePagingProvider;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import ca.uhn.fhir.rest.server.exceptions.PreconditionFailedException;
+import ca.uhn.fhir.rest.server.exceptions.ResourceGoneException;
+import ca.uhn.fhir.rest.server.exceptions.UnprocessableEntityException;
+import ca.uhn.fhir.rest.server.interceptor.RequestValidatingInterceptor;
+import ca.uhn.fhir.rest.server.servlet.ServletRequestDetails;
+import ca.uhn.fhir.rest.server.util.ICachedSearchDetails;
+import ca.uhn.fhir.rest.server.util.ISearchParamRegistry;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.BaseJettyServerExtension;
+import ca.uhn.fhir.util.ClasspathUtil;
+import ca.uhn.fhir.util.StopWatch;
+import ca.uhn.fhir.util.TestUtil;
+import ca.uhn.fhir.util.BundleUtil;
+import ca.uhn.fhir.util.UrlUtil;
+import ca.uhn.test.util.LogbackTestExtension;
+import ca.uhn.test.util.LogbackTestExtensionAssert;
+import ch.qos.logback.classic.Level;
+import com.google.common.base.Charsets;
+import com.google.common.collect.Lists;
+import jakarta.annotation.Nonnull;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Validate;
+import org.apache.commons.lang3.builder.ToStringBuilder;
+import org.apache.commons.lang3.builder.ToStringStyle;
+import org.apache.commons.lang3.time.DateUtils;
+import org.apache.commons.lang3.tuple.Pair;
+import org.assertj.core.api.AssertionsForInterfaceTypes;
+import org.hl7.fhir.common.hapi.validation.validator.FhirInstanceValidator;
+import org.hl7.fhir.instance.model.api.IAnyResource;
+import org.hl7.fhir.instance.model.api.IBaseBundle;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r4.model.Attachment;
+import org.hl7.fhir.r4.model.AuditEvent;
+import org.hl7.fhir.r4.model.BaseResource;
+import org.hl7.fhir.r4.model.Basic;
+import org.hl7.fhir.r4.model.Binary;
+import org.hl7.fhir.r4.model.BooleanType;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Bundle.BundleEntryComponent;
+import org.hl7.fhir.r4.model.Bundle.BundleType;
+import org.hl7.fhir.r4.model.Bundle.HTTPVerb;
+import org.hl7.fhir.r4.model.Bundle.SearchEntryMode;
+import org.hl7.fhir.r4.model.CarePlan;
+import org.hl7.fhir.r4.model.CodeSystem;
+import org.hl7.fhir.r4.model.CodeType;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.ConceptMap;
+import org.hl7.fhir.r4.model.Coverage;
+import org.hl7.fhir.r4.model.DateTimeType;
+import org.hl7.fhir.r4.model.DateType;
+import org.hl7.fhir.r4.model.DecimalType;
+import org.hl7.fhir.r4.model.Device;
+import org.hl7.fhir.r4.model.DiagnosticReport;
+import org.hl7.fhir.r4.model.DocumentManifest;
+import org.hl7.fhir.r4.model.DocumentReference;
+import org.hl7.fhir.r4.model.Encounter;
+import org.hl7.fhir.r4.model.Encounter.EncounterLocationComponent;
+import org.hl7.fhir.r4.model.Encounter.EncounterStatus;
+import org.hl7.fhir.r4.model.Enumerations;
+import org.hl7.fhir.r4.model.Enumerations.AdministrativeGender;
+import org.hl7.fhir.r4.model.Extension;
+import org.hl7.fhir.r4.model.Group;
+import org.hl7.fhir.r4.model.HumanName;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Identifier;
+import org.hl7.fhir.r4.model.ImagingStudy;
+import org.hl7.fhir.r4.model.InstantType;
+import org.hl7.fhir.r4.model.Location;
+import org.hl7.fhir.r4.model.Media;
+import org.hl7.fhir.r4.model.Medication;
+import org.hl7.fhir.r4.model.MedicationAdministration;
+import org.hl7.fhir.r4.model.MedicationRequest;
+import org.hl7.fhir.r4.model.Meta;
+import org.hl7.fhir.r4.model.MolecularSequence;
+import org.hl7.fhir.r4.model.Narrative;
+import org.hl7.fhir.r4.model.Narrative.NarrativeStatus;
+import org.hl7.fhir.r4.model.Observation;
+import org.hl7.fhir.r4.model.Observation.ObservationComponentComponent;
+import org.hl7.fhir.r4.model.Observation.ObservationStatus;
+import org.hl7.fhir.r4.model.OperationOutcome;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Parameters;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Period;
+import org.hl7.fhir.r4.model.Practitioner;
+import org.hl7.fhir.r4.model.Procedure;
+import org.hl7.fhir.r4.model.Quantity;
+import org.hl7.fhir.r4.model.Questionnaire;
+import org.hl7.fhir.r4.model.Questionnaire.QuestionnaireItemType;
+import org.hl7.fhir.r4.model.QuestionnaireResponse;
+import org.hl7.fhir.r4.model.Reference;
+import org.hl7.fhir.r4.model.Resource;
+import org.hl7.fhir.r4.model.SearchParameter;
+import org.hl7.fhir.r4.model.ServiceRequest;
+import org.hl7.fhir.r4.model.StringType;
+import org.hl7.fhir.r4.model.StructureDefinition;
+import org.hl7.fhir.r4.model.Subscription;
+import org.hl7.fhir.r4.model.Subscription.SubscriptionChannelType;
+import org.hl7.fhir.r4.model.Subscription.SubscriptionStatus;
+import org.hl7.fhir.r4.model.Task;
+import org.hl7.fhir.r4.model.UriType;
+import org.hl7.fhir.r4.model.ValueSet;
+import org.hl7.fhir.utilities.xhtml.NodeType;
+import org.hl7.fhir.utilities.xhtml.XhtmlNode;
+import org.intellij.lang.annotations.Language;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.test.util.AopTestUtils;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.math.BigDecimal;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static ca.uhn.fhir.jpa.util.TestUtil.sleepOneClick;
+import static ca.uhn.fhir.rest.param.BaseParamWithPrefix.MSG_PREFIX_INVALID_FORMAT;
+import static ca.uhn.fhir.storage.test.CircularQueueCaptureQueriesListenerAssertions.onThreadsWithNameMatching;
+import static ca.uhn.fhir.util.TestUtil.sleepAtLeast;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.apache.commons.lang3.StringUtils.leftPad;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.when;
+
+@SuppressWarnings("Duplicates")
+public class ResourceProviderR4Test extends BaseResourceProviderR4Test {
+	private static final String MRN_SYSTEM = "http://acme.org/mrn";
+	private static final String CONDITIONAL_UPDATE_MRN = "PT-COND";
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(ResourceProviderR4Test.class);
+	private final CapturingInterceptor myCapturingInterceptor = new CapturingInterceptor();
+	@RegisterExtension
+	public LogbackTestExtension myLogbackTestExtension = new LogbackTestExtension(SearchParamValidatingInterceptor.class, Level.WARN);
+	private SearchCoordinatorSvcImpl mySearchCoordinatorSvcRaw;
+	@Autowired
+	private ISearchDao mySearchEntityDao;
+	@Autowired
+	private TerminologyTestHelper myTerminologyTestHelper;
+	private IQuery<Bundle> initialSearch;
+
+	@Override
+	@AfterEach
+	public void after() throws Exception {
+		super.after();
+
+		myStorageSettings.setResourceClientIdStrategy(new JpaStorageSettings().getResourceClientIdStrategy());
+		myStorageSettings.setAllowMultipleDelete(new JpaStorageSettings().isAllowMultipleDelete());
+		myStorageSettings.setAllowExternalReferences(new JpaStorageSettings().isAllowExternalReferences());
+		myStorageSettings.setReuseCachedSearchResultsForMillis(new JpaStorageSettings().getReuseCachedSearchResultsForMillis());
+		myStorageSettings.setCountSearchResultsUpTo(new JpaStorageSettings().getCountSearchResultsUpTo());
+		myStorageSettings.setSearchPreFetchThresholds(new JpaStorageSettings().getSearchPreFetchThresholds());
+		myStorageSettings.setAllowContainsSearches(new JpaStorageSettings().isAllowContainsSearches());
+		myStorageSettings.setIndexMissingFields(new JpaStorageSettings().getIndexMissingFields());
+		myStorageSettings.setHibernateSearchIndexSearchParams(new JpaStorageSettings().isHibernateSearchIndexSearchParams());
+
+		myStorageSettings.setIndexOnContainedResources(new JpaStorageSettings().isIndexOnContainedResources());
+
+		mySearchCoordinatorSvcRaw.setSyncSizeForUnitTests(QueryParameterUtils.DEFAULT_SYNC_SIZE);
+		myStorageSettings.setNormalizedQuantitySearchLevel(NormalizedQuantitySearchLevel.NORMALIZED_QUANTITY_SEARCH_NOT_SUPPORTED);
+
+		myClient.unregisterInterceptor(myCapturingInterceptor);
+		myStorageSettings.setUpdateWithHistoryRewriteEnabled(false);
+		myStorageSettings.setPreserveRequestIdInResourceBody(false);
+
+		when(myPagingProvider.canStoreSearchResults())
+			.thenCallRealMethod();
+	}
+
+	@BeforeEach
+	@Override
+	public void before() throws Exception {
+		super.before();
+		myFhirContext.setParserErrorHandler(new StrictErrorHandler());
+		HapiLocalizer.setOurFailOnMissingMessage(true);
+
+		myStorageSettings.setAllowMultipleDelete(true);
+		myClient.registerInterceptor(myCapturingInterceptor);
+		myStorageSettings.setSearchPreFetchThresholds(new JpaStorageSettings().getSearchPreFetchThresholds());
+	}
+
+	@Test
+	public void testSearchParameterValidation() {
+		// setup
+		SystemRequestDetails requestDetails = new SystemRequestDetails();
+		requestDetails.getUserData().put(SearchParamValidatingInterceptor.SKIP_VALIDATION, true);
+
+		SearchParameter sp = new SearchParameter();
+		sp.setUrl("http://example.com/name");
+		sp.setId("name");
+		sp.setCode("name");
+		sp.setType(Enumerations.SearchParamType.STRING);
+		sp.setStatus(Enumerations.PublicationStatus.RETIRED);
+		sp.addBase("Patient");
+		sp.setExpression("Patient.name");
+
+		// test
+		DaoMethodOutcome outcome = mySearchParameterDao.update(sp, requestDetails);
+
+		myCaptureQueriesListener.clear();
+		sp.setId(outcome.getId());
+		sp.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		mySearchParameterDao.update(sp, requestDetails);
+
+		LogbackTestExtensionAssert.assertThat(myLogbackTestExtension).hasWarnMessage("Skipping validation of submitted SearchParameter because " + SearchParamValidatingInterceptor.SKIP_VALIDATION + " flag is true");
+	}
+
+	@Test
+	public void testParameterWithNoValueThrowsError_InvalidChainOnCustomSearch() {
+		SearchParameter searchParameter = new SearchParameter();
+		searchParameter.addBase("BodyStructure").addBase("Procedure");
+		searchParameter.setCode("focalAccess");
+		searchParameter.setType(Enumerations.SearchParamType.REFERENCE);
+		searchParameter.setExpression("Procedure.extension('Procedure#focalAccess')");
+		searchParameter.setXpathUsage(SearchParameter.XPathUsageType.NORMAL);
+		searchParameter.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		myClient.create().resource(searchParameter).execute();
+		mySearchParamRegistry.forceRefresh();
+
+		myServer.fhirRequest("/Procedure?focalAccess.a%20ne%20e=aaa").get()
+				.assertStatus(400)
+				.assertBodyContains("Invalid parameter chain: focalAccess.a ne e");
+	}
+
+	@Test
+	public void createResourceSearchParameter_withExpressionMetaSecurity_succeeds() {
+		SearchParameter searchParameter = new SearchParameter();
+		searchParameter.setId("resource-security");
+		searchParameter.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		searchParameter.setName("Security");
+		searchParameter.setCode("_security");
+		searchParameter.addBase("Patient").addBase("Account");
+		searchParameter.setType(Enumerations.SearchParamType.TOKEN);
+		searchParameter.setExpression("meta.security");
+
+		IIdType id = myClient.update().resource(searchParameter).execute().getId().toUnqualifiedVersionless();
+
+		assertNotNull(id);
+		assertEquals("resource-security", id.getIdPart());
+	}
+
+	@Test
+	public void createSearchParameter_with2Expressions_succeeds() {
+		SearchParameter searchParameter = new SearchParameter();
+
+		searchParameter.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		searchParameter.setCode("myGender");
+		searchParameter.addBase("Patient").addBase("Person");
+		searchParameter.setType(Enumerations.SearchParamType.TOKEN);
+		searchParameter.setExpression("Patient.gender|Person.gender");
+
+		MethodOutcome result = myClient.create().resource(searchParameter).execute();
+
+		assertEquals(true, result.getCreated());
+	}
+
+	@Test
+	public void testParameterWithNoValueThrowsError_InvalidRootParam() {
+		SearchParameter searchParameter = new SearchParameter();
+		searchParameter.addBase("BodyStructure").addBase("Procedure");
+		searchParameter.setCode("focalAccess");
+		searchParameter.setType(Enumerations.SearchParamType.REFERENCE);
+		searchParameter.setExpression("Procedure.extension('Procedure#focalAccess')");
+		searchParameter.setXpathUsage(SearchParameter.XPathUsageType.NORMAL);
+		searchParameter.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		myClient.create().resource(searchParameter).execute();
+
+		mySearchParamRegistry.forceRefresh();
+
+		myServer.fhirRequest("/Procedure?a").get()
+				.assertStatus(400)
+				.assertBodyContains("Unknown search parameter &quot;a&quot;");
+	}
+
+	@Test
+	public void testSearchResourcesOnProfile_whenProfileIsMissing_returnsResourcesWithMissingProfile() {
+		// given
+		myStorageSettings.setIndexMissingFields(StorageSettings.IndexEnabledEnum.ENABLED);
+		myStorageSettings.setTagStorageMode(JpaStorageSettings.TagStorageModeEnum.INLINE);
+
+		SearchParameter searchParameter = new SearchParameter();
+		searchParameter.addBase("Organization");
+		searchParameter.setCode("_profile");
+		searchParameter.setType(Enumerations.SearchParamType.URI);
+		searchParameter.setExpression("meta.profile");
+		searchParameter.setStatus(Enumerations.PublicationStatus.ACTIVE);
+
+		IFhirResourceDao<SearchParameter> searchParameterDao = myDaoRegistry.getResourceDao(SearchParameter.class);
+		searchParameterDao.create(searchParameter, (RequestDetails) null);
+
+		RuntimeSearchParam sp = mySearchParamRegistry.getActiveSearchParam("Organization", "_profile", ISearchParamRegistry.SearchParamLookupContextEnum.INDEX);
+		assertNotNull(sp);
+
+		IFhirResourceDao<Organization> organizationDao = myDaoRegistry.getResourceDao(Organization.class);
+		Organization organizationWithNoProfile = new Organization();
+		organizationWithNoProfile.setName("noProfile");
+		organizationDao.create(organizationWithNoProfile, mySrd);
+
+		myCaptureQueriesListener.clear();
+		Organization organizationWithProfile = new Organization();
+		organizationWithProfile.setName("withProfile");
+		organizationWithProfile.getMeta().addProfile("http://foo");
+		organizationDao.create(organizationWithProfile, mySrd);
+		myCaptureQueriesListener.logInsertQueries();
+
+		runInTransaction(() -> {
+			List<ResourceIndexedSearchParamUri> matched = myResourceIndexedSearchParamUriDao.findAll().stream()
+				.filter(theRow -> theRow.getResourceType().equals("Organization"))
+				.filter(theRow -> theRow.getParamName().equals("_profile"))
+				.collect(Collectors.toList());
+
+			assertThat(matched).hasSize(2);
+			assertNull(matched.get(0).getUri());
+			assertEquals("http://foo", matched.get(1).getUri());
+		});
+
+		// when
+		runInTransaction(() -> {
+			List<ResourceIndexedSearchParamUri> matched = myResourceIndexedSearchParamUriDao.findAll().stream()
+				.filter(theRow -> theRow.getResourceType().equals("Organization"))
+				.filter(theRow -> theRow.getParamName().equals("_profile"))
+				.filter(theRow -> theRow.isMissing() == true)
+				.collect(Collectors.toList());
+
+			// then
+			assertThat(matched).hasSize(1);
+			assertNull(matched.get(0).getUri());
+		});
+	}
+
+	@Test
+	public void testSearchForTokenValueOnlyUsesValueHash() {
+
+		myCaptureQueriesListener.clear();
+
+		myClient
+			.loadPage()
+			.byUrl(myServerBase + "/Practitioner?identifier=" + UrlUtil.escapeUrlParam("ABC|,DEF"))
+			.andReturnBundle(Bundle.class)
+			.execute();
+
+		myCaptureQueriesListener.logSelectQueries();
+	}
+
+	@Test
+	public void testSearchWithContainsLowerCase() {
+		myStorageSettings.setAllowContainsSearches(true);
+
+		Patient pt1 = new Patient();
+		pt1.addName().setFamily("Elizabeth");
+		String pt1id = myPatientDao.create(pt1, mySrd).getId().toUnqualifiedVersionless().getValue();
+
+		Patient pt2 = new Patient();
+		pt2.addName().setFamily("fghijk");
+		String pt2id = myPatientDao.create(pt2, mySrd).getId().toUnqualifiedVersionless().getValue();
+
+		Patient pt3 = new Patient();
+		pt3.addName().setFamily("zzzzz");
+		myPatientDao.create(pt3, mySrd).getId().toUnqualifiedVersionless().getValue();
+
+		myCaptureQueriesListener.clear();
+		Bundle output = myClient
+			.search()
+			.forResource("Patient")
+			.where(Patient.NAME.contains().value("ZAB"))
+			.returnBundle(Bundle.class)
+			.execute();
+		List<String> ids = output.getEntry().stream().map(t -> t.getResource().getIdElement().toUnqualifiedVersionless().getValue()).collect(Collectors.toList());
+		assertThat(ids).containsExactlyInAnyOrder(pt1id);
+		assertThat(myCaptureQueriesListener).has(
+			onThreadsWithNameMatching(BaseJettyServerExtension.THREAD_NAME_PREFIX_PATTERN)
+				.selectCount(2)
+		);
+
+		output = myClient
+			.search()
+			.forResource("Patient")
+			.where(Patient.NAME.contains().value("zab"))
+			.returnBundle(Bundle.class)
+			.execute();
+		ids = output.getEntry().stream().map(t -> t.getResource().getIdElement().toUnqualifiedVersionless().getValue()).collect(Collectors.toList());
+		assertThat(ids).containsExactlyInAnyOrder(pt1id);
+
+	}
+
+	@Test
+	public void testSearchWithPercentSign() {
+		myStorageSettings.setAllowContainsSearches(true);
+
+		Patient pt1 = new Patient();
+		pt1.addName().setFamily("Smith%");
+		String pt1id = myPatientDao.create(pt1, mySrd).getId().toUnqualifiedVersionless().getValue();
+
+		Bundle output = myClient
+			.search()
+			.forResource("Patient")
+			.where(Patient.NAME.contains().value("Smith%"))
+			.returnBundle(Bundle.class)
+			.execute();
+		List<String> ids = output.getEntry().stream().map(t -> t.getResource().getIdElement().toUnqualifiedVersionless().getValue()).collect(Collectors.toList());
+		assertThat(ids).containsExactlyInAnyOrder(pt1id);
+
+		Patient pt2 = new Patient();
+		pt2.addName().setFamily("Sm%ith");
+		String pt2id = myPatientDao.create(pt2, mySrd).getId().toUnqualifiedVersionless().getValue();
+
+		output = myClient
+			.search()
+			.forResource("Patient")
+			.where(Patient.NAME.contains().value("Sm%ith"))
+			.returnBundle(Bundle.class)
+			.execute();
+		ids = output.getEntry().stream().map(t -> t.getResource().getIdElement().toUnqualifiedVersionless().getValue()).collect(Collectors.toList());
+		assertThat(ids).containsExactlyInAnyOrder(pt2id);
+	}
+
+	@Test
+	public void testSearchWithDateInvalid() {
+		myServer.fhirRequest("/Condition?onset-date=junk").get()
+				.assertStatus(400)
+				.assertBodyContains(MSG_PREFIX_INVALID_FORMAT + "&quot;junk&quot;");
+
+		myServer.fhirRequest("/Condition?onset-date=ge").get()
+				.assertStatus(400)
+				.assertBodyContains(MSG_PREFIX_INVALID_FORMAT + "&quot;ge&quot;");
+
+		myServer.fhirRequest("/Condition")
+				.withQueryParam("onset-date", ">")
+				.get()
+				.assertStatus(400)
+				.assertBodyContains(MSG_PREFIX_INVALID_FORMAT + "&quot;&gt;&quot;");
+	}
+
+
+	@Test
+	public void testSearchWithSlashes() {
+		myStorageSettings.setSearchPreFetchThresholds(Lists.newArrayList(10, 50, 10000));
+
+		Procedure procedure = new Procedure();
+		procedure.setStatus(Procedure.ProcedureStatus.COMPLETED);
+		String procedureId = myClient.create().resource(procedure).execute().getId().toUnqualifiedVersionless().getValue();
+
+		DocumentReference dr = new DocumentReference();
+		dr.addContent().getAttachment().setContentType("application/vnd.mfer");
+		String drId = myClient.create().resource(dr).execute().getId().toUnqualifiedVersionless().getValue();
+
+		for (int i = 0; i < 60; i++) {
+			Observation obs = new Observation();
+			obs.addPartOf().setReference(procedureId);
+			obs.addDerivedFrom().setReference(drId);
+			myClient.create().resource(obs).execute();
+		}
+
+		ourLog.info("Starting search");
+
+		Bundle response = myClient
+			.search()
+			.byUrl("Observation?part-of=" + procedureId + "&derived-from:DocumentReference.contenttype=application/vnd.mfer&_total=accurate&_sort=_id&_count=2")
+			.returnBundle(Bundle.class)
+			.execute();
+
+		int obsCount = 0;
+		int pageCount = 0;
+		while (response != null) {
+			obsCount += response.getEntry().size();
+			List<String> nextIds = toUnqualifiedVersionlessIdValues(response);
+			ourLog.info("Loaded page of IDs: {}", nextIds);
+			pageCount++;
+			if (response.getLink("next") != null) {
+				myCaptureQueriesListener.clear();
+				response = myClient.loadPage().next(response).execute();
+				myCaptureQueriesListener.logSelectQueries();
+			} else {
+				response = null;
+			}
+
+
+			ourLog.info("Have loaded {} pages and {} reources", pageCount, obsCount);
+		}
+
+		assertEquals(60, obsCount);
+		assertEquals(30, pageCount);
+
+	}
+
+	/**
+	 * See #7177
+	 */
+	@ParameterizedTest
+	@MethodSource("testSearchIdentifierWithEscapedCharactersArguments")
+	public void testSearchIdentifierWithEscapedCharacters(String theUrl, boolean theExpectedMatch) {
+		Patient patient = new Patient();
+		patient.addIdentifier().setSystem("http://foo|123,456").setValue("A|B,C|D");
+		String pt1id = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless().getValue();
+
+		Bundle actual = myClient
+			.search()
+			.byUrl(theUrl)
+			.returnBundle(Bundle.class)
+			.execute();
+		List<String> actualIds = toUnqualifiedVersionlessIdValues(actual);
+		if (theExpectedMatch) {
+			assertThat(actualIds).containsExactlyInAnyOrder(pt1id);
+		} else {
+			assertThat(actualIds).isEmpty();
+		}
+	}
+
+	@Test
+	public void testManualPagingLinkOffsetDoesntReturnBeyondEnd() {
+		myStorageSettings.setSearchPreFetchThresholds(Lists.newArrayList(10, 1000));
+
+		for (int i = 0; i < 50; i++) {
+			Organization o = new Organization();
+			o.setId("O" + i);
+			o.setName("O" + i);
+			myClient.update().resource(o).execute().getId().toUnqualifiedVersionless();
+		}
+
+		Bundle output = myClient
+			.search()
+			.forResource("Organization")
+			.count(3)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertNull(output.getTotalElement().getValue());
+
+		output = myClient
+			.search()
+			.forResource("Organization")
+			.count(3)
+			.totalMode(SearchTotalModeEnum.ACCURATE)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertNotNull(output.getTotalElement().getValue());
+
+		String linkNext = output.getLink("next").getUrl();
+		linkNext = linkNext.replaceAll("_getpagesoffset=[0-9]+", "_getpagesoffset=3300");
+		assertThat(linkNext).contains("_getpagesoffset=3300");
+
+		Bundle nextPageBundle = myClient.loadPage().byUrl(linkNext).andReturnBundle(Bundle.class).execute();
+		ourLog.debug(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(nextPageBundle));
+		assertNull(nextPageBundle.getLink("next"));
+	}
+
+	/**
+	 * Totals should *not* include Included resources
+	 */
+	@ParameterizedTest
+	@CsvSource(useHeadersInDisplayName = true, textBlock = """
+		_count , _offset, noCache
+		true   , true   , false
+		true   , false  , false
+		false  , true   , false
+		false  , false  , false
+		true   , true   , true
+		true   , false  , true
+		false  , true   , true
+		false  , false  , true
+		""")
+	public void search_withIncludes_calculatesTotalsCorrectly(boolean theCount, boolean theOffset, boolean theNoCache) {
+		// setup
+		Organization o = new Organization();
+		o.setId("ORG");
+		o.setName("Hibert's Clinic");
+		IIdType oid = myClient.update().resource(o).execute().getId().toUnqualifiedVersionless();
+
+		int total = 25;
+		for (int i = 0; i < total; i++) {
+			Patient p = new Patient();
+			p.setId("P" + leftPad(Integer.toString(i), 3, '0'));
+			p.getManagingOrganization().setReference(oid.getValue());
+			myClient.update().resource(p).execute();
+		}
+
+		// Test - Load first page
+
+		initialSearch = myClient
+			.search()
+			.forResource("Patient")
+			.include(IBaseResource.INCLUDE_ALL)
+			.totalMode(SearchTotalModeEnum.ACCURATE)
+			.sort(new SortSpec(Constants.PARAM_ID, SortOrderEnum.ASC))
+			.returnBundle(Bundle.class);
+		if (theCount) {
+			initialSearch = initialSearch.count(10);
+		}
+		if (theOffset) {
+			initialSearch = initialSearch.offset(0);
+		}
+		if (theNoCache) {
+			initialSearch = initialSearch.cacheControl(CacheControlDirective.noCache().setNoStore(true));
+		}
+		Bundle output = initialSearch.execute();
+		assertNotNull(output);
+		assertEquals(total, output.getTotal());
+		assertThat(toUnqualifiedVersionlessIdValues(output)).containsExactly(
+			"Patient/P000",
+			"Patient/P001",
+			"Patient/P002",
+			"Patient/P003",
+			"Patient/P004",
+			"Patient/P005",
+			"Patient/P006",
+			"Patient/P007",
+			"Patient/P008",
+			"Patient/P009",
+			"Organization/ORG");
+		assertThat(output.getLink(Constants.LINK_NEXT).getUrl()).contains("_count=10");
+		if (theOffset || theNoCache) {
+			assertThat(output.getLink(Constants.LINK_NEXT).getUrl()).contains("_offset=10");
+		} else {
+			assertThat(output.getLink(Constants.LINK_NEXT).getUrl()).doesNotContain("_offset");
+		}
+
+		// Load second page
+
+		output = myClient.loadPage().next(output).execute();
+		assertNotNull(output);
+		assertEquals(total, output.getTotal());
+		assertThat(toUnqualifiedVersionlessIdValues(output)).containsExactly(
+			"Patient/P010",
+			"Patient/P011",
+			"Patient/P012",
+			"Patient/P013",
+			"Patient/P014",
+			"Patient/P015",
+			"Patient/P016",
+			"Patient/P017",
+			"Patient/P018",
+			"Patient/P019",
+			"Organization/ORG");
+		assertThat(output.getLink(Constants.LINK_NEXT).getUrl()).contains("_count=10");
+		if (theOffset || theNoCache) {
+			assertThat(output.getLink(Constants.LINK_NEXT).getUrl()).contains("_offset=20");
+		} else {
+			assertThat(output.getLink(Constants.LINK_NEXT).getUrl()).doesNotContain("_offset");
+		}
+	}
+
+	@Test
+	public void testSearchLinksWorkWithIncludes() {
+		for (int i = 0; i < 5; i++) {
+			Organization o = new Organization();
+			o.setId("O" + i);
+			o.setName("O" + i);
+			IIdType oid = myClient.update().resource(o).execute().getId().toUnqualifiedVersionless();
+
+			Patient p = new Patient();
+			p.setId("P" + i);
+			p.getManagingOrganization().setReference(oid.getValue());
+			myClient.update().resource(p).execute();
+		}
+
+		Bundle output = myClient
+			.search()
+			.forResource("Patient")
+			.include(IBaseResource.INCLUDE_ALL)
+			.count(3)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		List<String> ids = output.getEntry().stream().map(t -> t.getResource().getIdElement().toUnqualifiedVersionless().getValue()).collect(Collectors.toList());
+		ourLog.info("Ids: {}", ids);
+		assertThat(output.getEntry()).hasSize(6);
+		assertNotNull(output.getLink("next"));
+
+		// Page 2
+		output = myClient
+			.loadPage()
+			.next(output)
+			.execute();
+
+		ids = output.getEntry().stream().map(t -> t.getResource().getIdElement().toUnqualifiedVersionless().getValue()).collect(Collectors.toList());
+		ourLog.info("Ids: {}", ids);
+		assertThat(output.getEntry()).hasSize(4);
+		assertNull(output.getLink("next"));
+	}
+
+	/**
+	 * Test for <a href = https://github.com/hapifhir/hapi-fhir/issues/6849>#6849</a>
+	 * <p>
+	 * This is an edge case for chained searches with the _count parameter may not terminate when the search returns
+	 * resources with multiple references.
+	 */
+	@ParameterizedTest
+	@MethodSource("createFhirSearchWithChainingAndCountParams")
+	public void testFhirSearch_withChainingAndPagination_searchFinishes(Map<Integer, Integer> theRefCountToResourceCount, Integer theMaxPageSize, List<Integer> thePrefetchThresholds) {
+		// Given
+		if (theMaxPageSize != null) {
+			myPagingProvider.setMaximumPageSize(theMaxPageSize);
+		}
+		if (thePrefetchThresholds != null) {
+			myStorageSettings.setSearchPreFetchThresholds(thePrefetchThresholds);
+		}
+
+		// Create some organizations to reference
+		int maxNumberOfRefs = theRefCountToResourceCount.keySet().stream().mapToInt(num -> num).max().orElseThrow();
+		List<IIdType> organizations = new ArrayList<>();
+
+		for (int i = 0; i < maxNumberOfRefs; i++) {
+			Organization o = new Organization();
+			o.setId("O" + i);
+			o.setName("O" + i);
+			o.setActive(true);
+			organizations.add(myClient.update().resource(o).execute().getId().toUnqualifiedVersionless());
+		}
+
+		int totalNumberOfPatientsCreated = createPatientsWithReferences(theRefCountToResourceCount, organizations);
+
+		int numberOfSingleRefResources = theRefCountToResourceCount.getOrDefault(1, 0);
+		int count = totalNumberOfPatientsCreated - numberOfSingleRefResources;
+
+		Bundle output = myClient
+			.search()
+			.byUrl("Patient?general-practitioner.active=true")
+			.count(count)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		List<String> ids = output.getEntry().stream().map(t -> t.getResource().getIdElement().toUnqualifiedVersionless().getValue()).collect(Collectors.toList());
+		ourLog.info("Loaded page 1 with requested count {} and got {} ids: {}", count, ids.size(), ids);
+		assertThat(output.getEntry()).hasSize(Math.min(count, totalNumberOfPatientsCreated));
+
+		// When: loading the next page
+		for (int pageNum = 2; output.getLink("next") != null; pageNum++) {
+			output = myClient
+				.loadPage()
+				.next(output)
+				.execute();
+
+			ids = output.getEntry().stream().map(t -> t.getResource().getIdElement().toUnqualifiedVersionless().getValue()).collect(Collectors.toList());
+			ourLog.info("Loaded page {} with ids: {}", pageNum, ids);
+
+			// Then: search properly resolves, and has the correct count
+			if (output.getLink("next") != null) {
+				assertThat(output.getEntry()).hasSize(count);
+			} else {
+				int numLeft = totalNumberOfPatientsCreated % count;
+				numLeft = numLeft == 0 ? count : numLeft;
+				assertThat(output.getEntry()).hasSize(numLeft);
+			}
+		}
+	}
+
+	/**
+	 * @param theRefCountToResourceCount map where the key is the number of references (general-practitioner) the Patient should have, and the value is the number of such Patients to create
+	 * @param theOrganizationRefs        the Organizations to use as references
+	 * @return total number of patients created
+	 */
+	private int createPatientsWithReferences(Map<Integer, Integer> theRefCountToResourceCount, List<IIdType> theOrganizationRefs) {
+		int totalNumberOfPatientsCreated = 0;
+
+		for (Integer refCount : theRefCountToResourceCount.keySet()) {
+			// Create a new patient with refCount references
+			Patient p = new Patient();
+			p.setActive(true);
+			for (int j = 0; j < refCount; j++) {
+				p.addGeneralPractitioner(new Reference(theOrganizationRefs.get(j).getValue()));
+			}
+
+			for (int i = 0; i < theRefCountToResourceCount.get(refCount); i++) {
+				p.setId("P" + totalNumberOfPatientsCreated);
+				myPatientDao.update(p, mySrd);
+
+				totalNumberOfPatientsCreated++;
+			}
+		}
+		return totalNumberOfPatientsCreated;
+	}
+
+	/**
+	 * Ensure that a search for a specific date (which is transformed internally into a
+	 * date range with an identical lower and upper by PatientResourceProvider) doesn't
+	 * cause duplicate parameters.
+	 */
+	@Test
+	public void testSearchDate() {
+		// Setup
+		createPatient(withId("PAT-0"), withBirthdate("2020-01-01"));
+
+		// Test
+		myCaptureQueriesListener.clear();
+		Bundle actual = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(Patient.BIRTHDATE.exactly().day("2020-01-01"))
+			.returnBundle(Bundle.class)
+			.execute();
+		myCaptureQueriesListener.logSelectQueries();
+
+		// Verify
+		assertThat(toUnqualifiedVersionlessIdValues(actual)).containsExactly("Patient/PAT-0");
+		assertThat(actual.getLink(Constants.LINK_SELF).getUrl()).endsWith("Patient?birthdate=2020-01-01");
+	}
+
+
+	@Test
+	public void testSearchWithDeepChain() {
+
+		SearchParameter sp = new SearchParameter();
+		sp.addBase("Patient");
+		sp.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		sp.setType(Enumerations.SearchParamType.REFERENCE);
+		sp.setCode("extpatorg");
+		sp.setName("extpatorg");
+		sp.setExpression("Patient.extension('http://patext').value.as(Reference)");
+		myClient.create().resource(sp).execute();
+
+		sp = new SearchParameter();
+		sp.addBase("Organization");
+		sp.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		sp.setType(Enumerations.SearchParamType.REFERENCE);
+		sp.setCode("extorgorg");
+		sp.setName("extorgorg");
+		sp.setExpression("Organization.extension('http://orgext').value.as(Reference)");
+		myClient.create().resource(sp).execute();
+
+		mySearchParamRegistry.forceRefresh();
+
+		Organization grandParent = new Organization();
+		grandParent.setName("GRANDPARENT");
+		IIdType grandParentId = myClient.create().resource(grandParent).execute().getId().toUnqualifiedVersionless();
+
+		Organization parent = new Organization();
+		parent.setName("PARENT");
+		parent.getPartOf().setReference(grandParentId.getValue());
+		parent.addExtension("http://orgext", new Reference().setReference(grandParentId.getValue()));
+		IIdType parentId = myClient.create().resource(parent).execute().getId().toUnqualifiedVersionless();
+
+		Organization org = new Organization();
+		org.setName("ORGANIZATION");
+		org.getPartOf().setReference(parentId.getValue());
+		org.addExtension("http://orgext", new Reference().setReference(parentId.getValue()));
+		IIdType orgId = myClient.create().resource(org).execute().getId().toUnqualifiedVersionless();
+
+		myCaptureQueriesListener.logSelectQueriesForCurrentThread();
+		myCaptureQueriesListener.clear();
+
+		Patient p = new Patient();
+		p.getManagingOrganization().setReference(orgId.getValue());
+		p.addExtension("http://patext", new Reference().setReference(orgId.getValue()));
+		String pid = myClient.create().resource(p).execute().getId().toUnqualified().getValue();
+
+		List<String> idValues;
+
+		// Regular search param
+		idValues = searchAndReturnUnqualifiedIdValues("/Patient?organization=" + orgId.getValue());
+		assertThat(idValues).containsExactly(pid);
+
+		idValues = searchAndReturnUnqualifiedIdValues("/Patient?organization.name=ORGANIZATION");
+		assertThat(idValues).containsExactly(pid);
+
+		idValues = searchAndReturnUnqualifiedIdValues("/Patient?organization.partof.name=PARENT");
+		assertThat(idValues).containsExactly(pid);
+
+		idValues = searchAndReturnUnqualifiedIdValues("/Patient?organization.partof.partof.name=GRANDPARENT");
+		assertThat(idValues).containsExactly(pid);
+
+		// Search param on extension
+		idValues = searchAndReturnUnqualifiedIdValues("/Patient?extpatorg=" + orgId.getValue());
+		assertThat(idValues).containsExactly(pid);
+
+		idValues = searchAndReturnUnqualifiedIdValues("/Patient?extpatorg.name=ORGANIZATION");
+		assertThat(idValues).containsExactly(pid);
+
+		myCaptureQueriesListener.clear();
+		idValues = searchAndReturnUnqualifiedIdValues("/Patient?extpatorg.extorgorg.name=PARENT");
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(idValues).containsExactly(pid);
+
+		idValues = searchAndReturnUnqualifiedIdValues("/Patient?extpatorg.extorgorg.extorgorg.name=GRANDPARENT");
+		assertThat(idValues).containsExactly(pid);
+
+	}
+
+	@Test
+	public void testSearchFetchPageBeyondEnd() {
+		for (int i = 0; i < 10; i++) {
+			Patient p = new Patient();
+			p.setId("P" + i);
+			p.getNameFirstRep().setFamily(leftPad(Integer.toString(i), 5, '0'));
+			myClient.update().resource(p).execute().getId().toUnqualifiedVersionless();
+		}
+
+		// Load the 0-2 page
+
+		Bundle output = myClient
+			.search()
+			.forResource("Patient")
+			.count(3)
+			.sort(new SortSpec(Patient.SP_FAMILY, SortOrderEnum.ASC))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(extractFamilyNamesFromPatientsInBundle(output)).containsExactly(
+			"00000", "00001", "00002"
+		);
+
+		// Try to load an offset past the end
+
+		String nextPageUrl = output.getLink("next").getUrl();
+		String pastTheEndUrl = nextPageUrl.replace("_getpagesoffset=3", "_getpagesoffset=999");
+		ourLog.info("Going to request URL: {}", pastTheEndUrl);
+
+		output = myClient
+			.loadPage()
+			.byUrl(pastTheEndUrl)
+			.andReturnBundle(Bundle.class)
+			.execute();
+		assertThat(output.getEntry()).isEmpty();
+
+		// Now load the original 3-5 page
+
+		output = myClient
+			.loadPage()
+			.byUrl(nextPageUrl)
+			.andReturnBundle(Bundle.class)
+			.execute();
+		assertThat(extractFamilyNamesFromPatientsInBundle(output)).containsExactly(
+			"00003", "00004", "00005"
+		);
+
+	}
+
+	@Test
+	public void testDeleteConditional() {
+
+		Patient p = new Patient();
+		p.addName().setFamily("FAM").addGiven("GIV");
+		IIdType id = myPatientDao.create(p, mySrd).getId();
+
+		myClient.read().resource("Patient").withId(id.toUnqualifiedVersionless()).execute();
+
+		myClient
+			.delete()
+			.resourceConditionalByUrl("Patient?family=FAM&given=giv")
+			.execute();
+
+		try {
+			myClient.read().resource("Patient").withId(id.toUnqualifiedVersionless()).execute();
+			fail();
+		} catch (ResourceGoneException e) {
+			// good
+		}
+
+	}
+
+	@Test
+	public void testResourceGoneIncludesVersion() {
+
+		Patient p = new Patient();
+		p.addName().setFamily("FAM").addGiven("GIV");
+		IIdType id = myPatientDao.create(p, mySrd).getId().toUnqualifiedVersionless();
+
+		myClient
+			.delete()
+			.resourceById(id)
+			.execute();
+
+		CapturingInterceptor captureInterceptor = new CapturingInterceptor();
+		myClient.registerInterceptor(captureInterceptor);
+
+		try {
+			myClient.read().resource("Patient").withId(id.toUnqualifiedVersionless()).execute();
+			fail();
+		} catch (ResourceGoneException e) {
+			// good
+		}
+
+		List<String> locationHeader = captureInterceptor.getLastResponse().getHeaders(Constants.HEADER_LOCATION);
+		assertThat(locationHeader).hasSize(1);
+		assertThat(locationHeader.get(0)).contains(id.getValue() + "/_history/2");
+	}
+
+	@Test
+	public void testUpdateWithNoBody() {
+
+		myServer.fhirRequest("/Patient/AAA").method("PUT")
+				.assertStatus(400)
+				.assertBodyContains("No body was supplied in request");
+	}
+
+	@Test
+	public void testUpdateResourceAfterReadOperationAndNoChangesShouldNotChangeVersion() {
+		// Create Patient
+		Patient patient = new Patient();
+		patient.getText().setDivAsString("<div xmlns=\"http://www.w3.org/1999/xhtml\">hello</div>");
+
+		patient = (Patient) myClient.create().resource(patient).execute().getResource();
+		ourLog.info("Patient: {}", myFhirContext.newJsonParser().encodeResourceToString(patient));
+		assertEquals(1, patient.getIdElement().getVersionIdPartAsLong());
+
+		// Read Patient
+		patient = (Patient) myClient.read().resource("Patient").withId(patient.getIdElement()).execute();
+		ourLog.info("Patient: {}", myFhirContext.newJsonParser().encodeResourceToString(patient));
+		assertEquals(1, patient.getIdElement().getVersionIdPartAsLong());
+
+		// Update Patient with no changes
+		patient = (Patient) myClient.update().resource(patient).execute().getResource();
+		assertEquals(1, patient.getIdElement().getVersionIdPartAsLong());
+	}
+
+	@Test
+	public void testCreateWithNoBody() {
+
+		myServer.fhirRequest("/Patient").method("POST")
+				.assertStatus(400)
+				.assertBodyContains("No body was supplied in request");
+	}
+
+	@Test
+	public void testCreateWithClientAssignedId() {
+
+		// Create with client assigned ID
+		Patient p = new Patient();
+		p.setActive(true);
+		p.setId("AAA");
+		String encoded = myFhirContext.newJsonParser().encodeResourceToString(p);
+		myServer.fhirRequest("/Patient/AAA")
+				.put(encoded, Constants.CT_FHIR_JSON)
+				.assertStatus(201)
+				.assertBodyContains("true");
+
+		// Delete
+		myServer.fhirRequest("/Patient/AAA").delete().assertStatus(200);
+
+		// Create it again
+		p = new Patient();
+		p.setActive(true);
+		p.setId("AAA");
+		encoded = myFhirContext.newJsonParser().encodeResourceToString(p);
+		myServer.fhirRequest("/Patient/AAA")
+				.put(encoded, Constants.CT_FHIR_JSON)
+				.assertStatus(201)
+				.assertBodyContains("true");
+	}
+
+	@BeforeEach
+	public void beforeDisableResultReuse() {
+		myStorageSettings.setReuseCachedSearchResultsForMillis(null);
+		mySearchCoordinatorSvcRaw = AopTestUtils.getTargetObject(mySearchCoordinatorSvc);
+	}
+
+	private void checkParamMissing(String paramName) {
+		myServer.fhirRequest("/Observation?" + paramName + ":missing=false").get().assertStatus(200);
+	}
+
+	private ArrayList<IBaseResource> genResourcesOfType(Bundle theRes, Class<? extends IBaseResource> theClass) {
+		ArrayList<IBaseResource> retVal = new ArrayList<>();
+		for (BundleEntryComponent next : theRes.getEntry()) {
+			if (next.getResource() != null) {
+				if (theClass.isAssignableFrom(next.getResource().getClass())) {
+					retVal.add(next.getResource());
+				}
+			}
+		}
+		return retVal;
+	}
+
+	/**
+     * See #484
+     */
+	@Test
+	public void saveAndRetrieveBasicResource() throws IOException {
+		String input = IOUtils.toString(getClass().getResourceAsStream("/basic-stu3.xml"), StandardCharsets.UTF_8);
+
+		String respString = myClient.transaction().withBundle(input).prettyPrint().execute();
+		ourLog.debug(respString);
+		Bundle bundle = myFhirContext.newXmlParser().parseResource(Bundle.class, respString);
+		IdType id = new IdType(bundle.getEntry().get(0).getResponse().getLocation());
+
+		Basic basic = myClient.read().resource(Basic.class).withId(id).execute();
+		List<Extension> exts = basic.getExtensionsByUrl("http://localhost:1080/hapi-fhir-jpaserver-example/baseDstu2/StructureDefinition/DateID");
+		assertThat(exts).hasSize(1);
+	}
+
+	private List<String> searchAndReturnUnqualifiedIdValues(String thePath) {
+		myCaptureQueriesListener.clear();
+		Bundle bundle = myServer.fhirRequest(thePath).get().getBodyAsResource(Bundle.class);
+		List<String> ids = toUnqualifiedIdValues(bundle);
+		myCaptureQueriesListener.logSelectQueries(true, true);
+		return ids;
+	}
+
+	private List<String> searchOkAndReturnUnqualifiedVersionlessIdValues(String thePath) {
+		Bundle bundle = myServer.fhirRequest(thePath).get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+		return toUnqualifiedVersionlessIdValues(bundle);
+	}
+
+	@Test
+	@Disabled
+	public void testMakingQuery() {
+		ourLog.info("*** MAKING QUERY");
+		myServer.fhirRequest("/QuestionnaireResponse?_count=50&status=completed&questionnaire=ARIncenterAbsRecord&context.organization=O3435")
+				.withQueryParam("_lastUpdated", ">=2018-01-01")
+				.get();
+		System.exit(0);
+	}
+
+	@Test
+	public void testBundleCreate() throws Exception {
+		IGenericClient client = myClient;
+
+		String resBody = IOUtils.toString(ResourceProviderR4Test.class.getResource("/r4/document-father.json"), StandardCharsets.UTF_8);
+		IIdType id = client.create().resource(resBody).execute().getId();
+
+		ourLog.info("Created: {}", id);
+
+		Bundle bundle = client.read().resource(Bundle.class).withId(id).execute();
+
+		ourLog.debug(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(bundle));
+	}
+
+	@Test
+	public void testBundleCreateWithTypeTransaction() throws Exception {
+		IGenericClient client = myClient;
+
+		String resBody = IOUtils.toString(ResourceProviderR4Test.class.getResource("/r4/document-father.json"), StandardCharsets.UTF_8);
+		resBody = resBody.replace("\"type\": \"document\"", "\"type\": \"transaction\"");
+		try {
+			client.create().resource(resBody).execute();
+			fail();
+		} catch (UnprocessableEntityException e) {
+			assertThat(e.getMessage()).contains("Unable to store a Bundle resource on this server with a Bundle.type value of: transaction. Note that if you are trying to perform a FHIR transaction or batch operation you should POST the Bundle resource to the Base URL of the server, not to the /Bundle endpoint.");
+		}
+	}
+
+	@Test
+	public void testCodeSearch() {
+		Subscription subs = new Subscription();
+		subs.setStatus(SubscriptionStatus.ACTIVE);
+		subs.getChannel().setType(SubscriptionChannelType.WEBSOCKET);
+		subs.setCriteria("Observation?");
+		IIdType id = myClient.create().resource(subs).execute().getId().toUnqualifiedVersionless();
+
+		//@formatter:off
+		Bundle resp = myClient
+			.search()
+			.forResource(Subscription.class)
+			.where(Subscription.TYPE.exactly().code(SubscriptionChannelType.WEBSOCKET.toCode()))
+			.and(Subscription.STATUS.exactly().code(SubscriptionStatus.ACTIVE.toCode()))
+			.returnBundle(Bundle.class)
+			.execute();
+		//@formatter:off
+
+		assertThat(toUnqualifiedVersionlessIds(resp)).containsExactly(id);
+
+		//@formatter:off
+		resp = myClient
+			.search()
+			.forResource(Subscription.class)
+			.where(Subscription.TYPE.exactly().systemAndCode(SubscriptionChannelType.WEBSOCKET.getSystem(), SubscriptionChannelType.WEBSOCKET.toCode()))
+			.and(Subscription.STATUS.exactly().systemAndCode(SubscriptionStatus.ACTIVE.getSystem(), SubscriptionStatus.ACTIVE.toCode()))
+			.returnBundle(Bundle.class)
+			.execute();
+		//@formatter:off
+
+		assertThat(toUnqualifiedVersionlessIds(resp)).containsExactly(id);
+
+		//@formatter:off
+		resp = myClient
+			.search()
+			.forResource(Subscription.class)
+			.where(Subscription.TYPE.exactly().systemAndCode(SubscriptionChannelType.WEBSOCKET.getSystem(), SubscriptionChannelType.WEBSOCKET.toCode()))
+			.and(Subscription.STATUS.exactly().systemAndCode("foo", SubscriptionStatus.ACTIVE.toCode()))
+			.returnBundle(Bundle.class)
+			.execute();
+		//@formatter:off
+
+		assertThat(toUnqualifiedVersionlessIds(resp)).isEmpty();
+
+	}
+
+	@Test
+	public void testCreateAndReadBackResourceWithContainedReferenceToContainer() {
+		myFhirContext.setParserErrorHandler(new StrictErrorHandler());
+
+		@Language("JSON")
+		String input = """
+			{
+			  "resourceType": "Organization",
+			  "id": "1",
+			  "meta": {
+				"tag": [
+				  {
+					"system": "https://blah.org/deployment",
+					"code": "e69414dd-b5c2-462d-bcfd-9d04d6b16596",
+					"display": "DEPLOYMENT"
+				  },
+				  {
+					"system": "https://blah.org/region",
+					"code": "b47d7a5b-b159-4bed-a8f8-3258e6603adb",
+					"display": "REGION"
+				  },
+				  {
+					"system": "https://blah.org/provider",
+					"code": "28c30004-0333-40cf-9e7f-3f9e080930bd",
+					"display": "PROVIDER"
+				  }
+				]
+			  },
+			  "contained": [
+				{
+				  "resourceType": "Location",
+				  "id": "2",
+				  "position": {
+					"longitude": 51.443238301454289,
+					"latitude": 7.34196905697293
+				  },
+				  "managingOrganization": {
+					"reference": "1"
+				  }
+				}
+			  ],
+			  "type": [
+				{
+				  "coding": [
+					{
+					  "system": "https://blah.org/fmc/OrganizationType",
+					  "code": "CLINIC",
+					  "display": "Clinic"
+					}
+				  ]
+				}
+			  ],
+			  "name": "testOrg"
+			}
+		""";
+
+		Organization org = myFhirContext.newJsonParser().parseResource(Organization.class, input);
+		IIdType id = myOrganizationDao.create(org, mySrd).getId();
+		org = myOrganizationDao.read(id);
+
+		String output = myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(org);
+		ourLog.info(output);
+
+		Location loc = (Location) org.getContained().get(0);
+		assertEquals("1", loc.getManagingOrganization().getReference());
+	}
+
+	@Test
+	public void testCountParam() {
+		List<IBaseResource> resources = new ArrayList<>();
+		for (int i = 0; i < 100; i++) {
+			Organization org = new Organization();
+			org.setName("rpr4_testCountParam_01");
+			resources.add(org);
+		}
+		List<IBaseResource> outcome = myClient.transaction().withResources(resources).prettyPrint().encodedXml().execute();
+
+		runInTransaction(() -> assertEquals(100, myResourceTableDao.count()));
+
+		Bundle found = myClient
+			.search()
+			.forResource(Organization.class)
+			.where(Organization.NAME.matches().value("rpr4_testCountParam_01"))
+			.count(10)
+			.returnBundle(Bundle.class)
+			.execute();
+		assertThat(found.getEntry()).hasSize(10);
+
+		found = myClient.search().forResource(Organization.class).where(Organization.NAME.matches().value("rpr4_testCountParam_01")).count(999).returnBundle(Bundle.class).execute();
+		assertThat(found.getEntry()).hasSize(50);
+
+	}
+
+	@Test
+	public void testSearchByUrl() {
+		// setup
+		DateType dt = new DateType(new Date());
+		String nowStr = dt.getValueAsString();
+
+		boolean storeResourceInHSearch = myStorageSettings.isStoreResourceInHSearchIndex();
+		boolean advancedHSearch = myStorageSettings.isHibernateSearchIndexSearchParams();
+
+		try {
+			// use full text search
+			myStorageSettings.setStoreResourceInHSearchIndex(true);
+			myStorageSettings.setHibernateSearchIndexSearchParams(true);
+			mySearchParamRegistry.forceRefresh();
+
+			// test
+			Bundle b = myClient.search()
+				.byUrl("Patient?_lastUpdated=" + nowStr)
+				.returnBundle(Bundle.class)
+				.cacheControl(CacheControlDirective.noCache())
+				.execute();
+
+			assertNotNull(b);
+		} finally {
+			// reset back to previous
+			myStorageSettings.setHibernateSearchIndexSearchParams(advancedHSearch);
+			myStorageSettings.setStoreResourceInHSearchIndex(storeResourceInHSearch);
+		}
+	}
+	@Test
+	public void testCreateConditionalWithPreferRepresentation() {
+		Patient p = new Patient();
+		p.setActive(false);
+		p.addIdentifier().setSystem("foo").setValue("bar");
+		IIdType id = myClient.create().resource(p).execute().getId();
+
+		p = new Patient();
+		p.setId(id);
+		p.setActive(true);
+		p.addIdentifier().setSystem("foo").setValue("bar");
+		myClient.update().resource(p).execute();
+
+		// Now conditional create
+		p = new Patient();
+		p.setActive(true);
+		p.setBirthDateElement(new DateType("2011-01-01"));
+		p.addIdentifier().setSystem("foo").setValue("bar");
+		MethodOutcome outcome = myClient
+			.create()
+			.resource(p)
+			.conditionalByUrl("Patient?identifier=foo|bar")
+			.prefer(PreferReturnEnum.REPRESENTATION)
+			.execute();
+
+		assertEquals(id.getIdPart(), outcome.getId().getIdPart());
+		assertEquals("2", outcome.getId().getVersionIdPart());
+		p = (Patient) outcome.getResource();
+		assertNull(p.getBirthDate());
+	}
+
+	/**
+	 * See #438
+	 */
+	@Test
+	public void testCreateAndUpdateBinary() {
+		byte[] arr = {1, 21, 74, 123, -44};
+		Binary binary = new Binary();
+		binary.setContent(arr);
+		binary.setContentType("dansk");
+
+		IIdType resource = myClient.create().resource(binary).execute().getId();
+
+		Binary fromDB = myClient.read().resource(Binary.class).withId(resource.toVersionless()).execute();
+		assertEquals("1", fromDB.getIdElement().getVersionIdPart());
+
+		arr[0] = 2;
+		String binaryPath = "/Binary/" + resource.getIdPart();
+		myServer.fhirRequest(binaryPath).put(arr, "dansk")
+				.assertStatus(200)
+				.assertHeader(Constants.HEADER_CONTENT_LOCATION, resource.withVersion("2").getValue());
+
+		fromDB = myClient.read().resource(Binary.class).withId(resource.toVersionless()).execute();
+		assertEquals("2", fromDB.getIdElement().getVersionIdPart());
+
+		arr[0] = 3;
+		fromDB.setContent(arr);
+		String encoded = myFhirContext.newJsonParser().encodeResourceToString(fromDB);
+		myServer.fhirRequest(binaryPath).put(encoded, Constants.CT_FHIR_JSON)
+				.assertStatus(200)
+				.assertHeader(Constants.HEADER_CONTENT_LOCATION, resource.withVersion("3").getValue());
+
+		fromDB = myClient.read().resource(Binary.class).withId(resource.toVersionless()).execute();
+		assertEquals("3", fromDB.getIdElement().getVersionIdPart());
+
+		// Now an update with the wrong ID in the body
+
+		arr[0] = 4;
+		binary.setId("");
+		encoded = myFhirContext.newJsonParser().encodeResourceToString(binary);
+		myServer.fhirRequest(binaryPath).put(encoded, Constants.CT_FHIR_JSON).assertStatus(400);
+
+		fromDB = myClient.read().resource(Binary.class).withId(resource.toVersionless()).execute();
+		assertEquals("3", fromDB.getIdElement().getVersionIdPart());
+
+	}
+
+	/**
+	 * Issue submitted by Bryn
+	 */
+	@Test
+	public void testCreateBundle() throws IOException {
+		String input = IOUtils.toString(getClass().getResourceAsStream("/bryn-bundle.json"), StandardCharsets.UTF_8);
+		Validate.notNull(input);
+		myClient.create().resource(input).execute();
+	}
+
+	@Test
+	public void testCreateConditional() {
+		Patient patient = new Patient();
+		patient.addIdentifier().setSystem("http://uhn.ca/mrns").setValue("100");
+		patient.addName().setFamily("Tester").addGiven("Raghad");
+
+		MethodOutcome output1 = myClient.update().resource(patient).conditionalByUrl("Patient?identifier=http://uhn.ca/mrns|100").execute();
+
+		patient = new Patient();
+		patient.addIdentifier().setSystem("http://uhn.ca/mrns").setValue("100");
+		patient.addName().setFamily("Tester").addGiven("Raghad");
+
+		MethodOutcome output2 = myClient.update().resource(patient).conditionalByUrl("Patient?identifier=http://uhn.ca/mrns|100").execute();
+
+		assertEquals(output1.getId().getIdPart(), output2.getId().getIdPart());
+	}
+
+	/**
+	 * Scenarios that a conditional update operation with a user provided body id should be ACCEPTED.
+	 *
+	 * <p>
+	 * Raw HTTP is used deliberately — the generic client must not be able to drop the id on our behalf, or the
+	 * test would be measuring the client rather than the server.
+	 */
+	// Created by Claude Fable 5.1
+	@ParameterizedTest(name = "{0}")
+	@CsvSource(
+		textBlock = """
+		# name,                                                                       strategy,     existingMatchId, bodyId,      status, expectedVersion
+		'ALPHANUMERIC, no match, client-assigned body id: created under that id',     ALPHANUMERIC, ,                custom-id-1, 201,    1
+		'ALPHANUMERIC, one match, body id equals the match: updated in place',        ALPHANUMERIC, match-pt,        match-pt,    200,    2
+		'ANY, no match, client-assigned body id: created under that id',              ANY,          ,                custom-id-1, 201,    1
+		'ANY, no match, numeric body id: created under that id',                      ANY,          ,                987654321,   201,    1
+		'ANY, one match, body id equals the match: updated in place',                 ANY,          match-pt,        match-pt,    200,    2
+		'NOT_ALLOWED, one match, body id equals the match: updated in place',         NOT_ALLOWED,  match-pt,        match-pt,    200,    2
+		""")
+	public void testConditionalUpdate_userProvidedIdInResourceBody_acceptScenarios(
+			String theName,
+			JpaStorageSettings.ClientIdStrategyEnum theStrategy,
+			String theExistingMatchId,
+			String theBodyId,
+			int theExpectedStatus,
+			String theExpectedVersion)
+			throws IOException {
+		// setup
+		if (theExistingMatchId != null) {
+			createPatient(withId(theExistingMatchId), withIdentifier(MRN_SYSTEM, CONDITIONAL_UPDATE_MRN));
+		}
+		myStorageSettings.setResourceClientIdStrategy(theStrategy);
+
+		// execute
+		ConditionalUpdateResponse response = conditionalUpdateByMrn(CONDITIONAL_UPDATE_MRN, theBodyId, "Smith");
+
+		// verify
+		assertThat(response.statusCode()).isEqualTo(theExpectedStatus);
+
+		Patient stored = myClient.read().resource(Patient.class).withId(theBodyId).execute();
+		assertThat(stored.getIdElement().getVersionIdPart()).isEqualTo(theExpectedVersion);
+		assertThat(stored.getNameFirstRep().getFamily()).isEqualTo("Smith");
+		assertThat(searchPatientsByMrn(CONDITIONAL_UPDATE_MRN))
+			.extracting(t -> t.getIdElement().getIdPart())
+			.containsExactly(theBodyId);
+	}
+
+	/**
+	 * Scenarios that a conditional update operation with a user provided body id should be REJECTED.
+	 * <p>
+	 * Raw HTTP is used deliberately - see the sibling test above.
+	 */
+	// Created by Claude Fable 5.1
+	@ParameterizedTest(name = "{0}")
+	@CsvSource(
+		textBlock = """
+		# name,                                                                                 strategy,     existingMatchId, existingOtherId, bodyId,                                        status, expectedCode
+		'ALPHANUMERIC, one match, different body id: HAPI-2279',                                ALPHANUMERIC, match-pt,        ,                some-other-id,                                 400,    HAPI-2279
+		'ALPHANUMERIC, no match, numeric body id: HAPI-0960',                                   ALPHANUMERIC, ,                ,                987654321,                                     400,    HAPI-0960
+		'ALPHANUMERIC, no match, body id is not a valid FHIR id: HAPI-0521',                    ALPHANUMERIC, ,                ,                urn:uuid:8b7d3a4e-2c1f-4f5a-9e6b-0d1c2b3a4f5e, 400,    HAPI-0521
+		'ALPHANUMERIC, no match, body id already belongs to another resource: HAPI-0825',       ALPHANUMERIC, ,                existing-pt,     existing-pt,                                   409,    HAPI-0825
+		'ANY, one match, different body id: HAPI-2279',                                         ANY,          match-pt,        ,                some-other-id,                                 400,    HAPI-2279
+		'ANY, no match, body id is not a valid FHIR id: HAPI-0521',                             ANY,          ,                ,                urn:uuid:8b7d3a4e-2c1f-4f5a-9e6b-0d1c2b3a4f5e, 400,    HAPI-0521
+		'ANY, no match, body id already belongs to another resource: HAPI-0825',                ANY,          ,                existing-pt,     existing-pt,                                   409,    HAPI-0825
+		'NOT_ALLOWED, no match, client-assigned body id: HAPI-0959',                            NOT_ALLOWED,  ,                ,                custom-id-1,                                   404,    HAPI-0959
+		'NOT_ALLOWED, one match, different body id: HAPI-2279',                                 NOT_ALLOWED,  match-pt,        ,                some-other-id,                                 400,    HAPI-2279
+		'NOT_ALLOWED, no match, numeric body id: HAPI-0959',                                    NOT_ALLOWED,  ,                ,                987654321,                                     404,    HAPI-0959
+		'NOT_ALLOWED, no match, body id is not a valid FHIR id: HAPI-0521',                     NOT_ALLOWED,  ,                ,                urn:uuid:8b7d3a4e-2c1f-4f5a-9e6b-0d1c2b3a4f5e, 400,    HAPI-0521
+		'NOT_ALLOWED, no match, body id already belongs to another resource: HAPI-0959',        NOT_ALLOWED,  ,                existing-pt,     existing-pt,                                   404,    HAPI-0959
+		""")
+	public void testConditionalUpdate_userProvidedIdInResourceBody_rejectScenarios(
+			String theName,
+			JpaStorageSettings.ClientIdStrategyEnum theStrategy,
+			String theExistingMatchId,
+			String theExistingOtherId,
+			String theBodyId,
+			int theExpectedStatus,
+			String theExpectedCode)
+			throws IOException {
+		// setup
+		if (theExistingMatchId != null) {
+			createPatient(withId(theExistingMatchId), withIdentifier(MRN_SYSTEM, CONDITIONAL_UPDATE_MRN));
+		}
+		if (theExistingOtherId != null) {
+			createPatient(withId(theExistingOtherId), withIdentifier(MRN_SYSTEM, "PT-OTHER"));
+		}
+		myStorageSettings.setResourceClientIdStrategy(theStrategy);
+
+		// execute
+		ConditionalUpdateResponse response = conditionalUpdateByMrn(CONDITIONAL_UPDATE_MRN, theBodyId, "Smith");
+
+		// verify
+		assertThat(response.statusCode()).isEqualTo(theExpectedStatus);
+		assertThat(response.body()).contains(theExpectedCode);
+
+		assertThat(searchPatientsByFamily("Smith"))
+			.as("the rejected conditional update must not have created or modified anything")
+			.isEmpty();
+		List<String> expectedMatchIds = theExistingMatchId != null ? List.of(theExistingMatchId) : List.of();
+		assertThat(searchPatientsByMrn(CONDITIONAL_UPDATE_MRN))
+			.extracting(t -> t.getIdElement().getIdPart())
+			.containsExactlyElementsOf(expectedMatchIds);
+		for (String existingId : Arrays.asList(theExistingMatchId, theExistingOtherId)) {
+			if (existingId != null) {
+				Patient existing = myClient.read().resource(Patient.class).withId(existingId).execute();
+				assertThat(existing.getIdElement().getVersionIdPart())
+					.as("pre-existing resource " + existingId + " must be untouched")
+					.isEqualTo("1");
+			}
+		}
+	}
+
+	private record ConditionalUpdateResponse(int statusCode, String body) {}
+
+	/**
+	 * Sends {@code PUT Patient?identifier=<mrn>} with a hand-written JSON body so that the id reaches the server
+	 * exactly as given: the JSON encoder omits a {@code urn:} id, and the generic client could drop any id.
+	 */
+	private ConditionalUpdateResponse conditionalUpdateByMrn(String theMrn, String theBodyId, String theFamily) {
+		String body = "{\"resourceType\":\"Patient\",\"id\":\"" + theBodyId + "\","
+			+ "\"identifier\":[{\"system\":\"" + MRN_SYSTEM + "\",\"value\":\"" + theMrn + "\"}],"
+			+ "\"name\":[{\"family\":\"" + theFamily + "\"}]}";
+
+		HttpTestResponse response = myServer.fhirRequest("/Patient")
+				.withQueryParam("identifier", MRN_SYSTEM + "|" + theMrn)
+				.put(body, Constants.CT_FHIR_JSON);
+		return new ConditionalUpdateResponse(response.getStatusCode(), response.getBody());
+	}
+
+	private List<Patient> searchPatientsByMrn(String theMrn) {
+		Bundle found = myClient.search().forResource(Patient.class)
+			.where(Patient.IDENTIFIER.exactly().systemAndCode(MRN_SYSTEM, theMrn))
+			.returnBundle(Bundle.class).execute();
+		return BundleUtil.toListOfResourcesOfType(myFhirContext, found, Patient.class);
+	}
+
+	private List<Patient> searchPatientsByFamily(String theFamily) {
+		Bundle found = myClient.search().forResource(Patient.class)
+			.where(Patient.FAMILY.matches().value(theFamily))
+			.returnBundle(Bundle.class).execute();
+		return BundleUtil.toListOfResourcesOfType(myFhirContext, found, Patient.class);
+	}
+
+	@Test
+	public void testCreateIncludesRequestValidatorInterceptorOutcome() {
+		RequestValidatingInterceptor interceptor = new RequestValidatingInterceptor();
+		assertTrue(interceptor.isAddValidationResultsToResponseOperationOutcome());
+		interceptor.setFailOnSeverity(null);
+
+
+		myServer.getRestfulServer().registerInterceptor(interceptor);
+		myClient.registerInterceptor(new IClientInterceptor() {
+			@Override
+			public void interceptRequest(IHttpRequest theRequest) {
+				theRequest.addHeader(Constants.HEADER_PREFER, Constants.HEADER_PREFER_RETURN + "=" + Constants.HEADER_PREFER_RETURN_OPERATION_OUTCOME);
+			}
+
+			@Override
+			public void interceptResponse(IHttpResponse theResponse) {               // TODO Auto-generated method stub
+			}
+
+		});
+		try {
+			// Missing status, which is mandatory
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:foo").setValue("bar");
+			IBaseResource outcome = myClient.create().resource(obs).execute().getOperationOutcome();
+
+			String encodedOo = myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(outcome);
+			ourLog.info(encodedOo);
+			assertThat(encodedOo).contains("cvc-complex-type.2.4.b");
+			assertThat(encodedOo).contains("Successfully created resource \\\"Observation/");
+
+			interceptor.setAddValidationResultsToResponseOperationOutcome(false);
+			outcome = myClient.create().resource(obs).execute().getOperationOutcome();
+			encodedOo = myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(outcome);
+			ourLog.info(encodedOo);
+			assertThat(encodedOo).doesNotContain("cvc-complex-type.2.4.b");
+			assertThat(encodedOo).contains("Successfully created resource \\\"Observation/");
+
+		} finally {
+			myServer.getRestfulServer().unregisterInterceptor(interceptor);
+		}
+	}
+
+	@Test
+	public void testCreateQuestionnaireResponseWithValidation() {
+		CodeSystem cs = new CodeSystem();
+		cs.setUrl("http://cs");
+		cs.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		cs.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+		cs.addConcept().setCode("code0");
+		myClient.create().resource(cs).execute();
+
+		ValueSet options = new ValueSet();
+		options.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		options.setUrl("http://vs");
+		options.getCompose().addInclude().setSystem("http://cs");
+		IIdType optId = myClient.create().resource(options).execute().getId().toUnqualifiedVersionless();
+
+		Questionnaire q = new Questionnaire();
+		q.setUrl("http://urn/questionnaire");
+		q.addItem().setLinkId("link0").setRequired(false).setType(QuestionnaireItemType.CHOICE).setAnswerValueSet((optId.getValue()));
+		IIdType qId = myClient.create().resource(q).execute().getId();
+
+		QuestionnaireResponse qa;
+
+		// Good code
+
+		qa = new QuestionnaireResponse();
+		qa.setStatus(QuestionnaireResponse.QuestionnaireResponseStatus.COMPLETED);
+		qa.setText(new Narrative().setStatus(NarrativeStatus.ADDITIONAL).setDiv(new XhtmlNode(NodeType.Element).addText("foo")));
+		qa.setQuestionnaire(q.getUrl());
+		qa.addItem().setLinkId("link0").addAnswer().setValue(new Coding().setSystem("http://cs").setCode("code0"));
+
+		MethodOutcome result = myClient.validate().resource(qa).execute();
+
+		OperationOutcome oo = (OperationOutcome) result.getOperationOutcome();
+
+		assertThat(oo.getIssue()).hasSize(1);
+		OperationOutcome.OperationOutcomeIssueComponent firstIssue = oo.getIssue().get(0);
+		assertEquals(OperationOutcome.IssueSeverity.INFORMATION, firstIssue.getSeverity());
+		assertEquals("No issues detected during validation", firstIssue.getDiagnostics());
+
+		assertEquals(200, result.getResponseStatusCode());
+
+		// Bad code
+
+		qa = new QuestionnaireResponse();
+		qa.setStatus(QuestionnaireResponse.QuestionnaireResponseStatus.COMPLETED);
+		qa.setText(new Narrative().setStatus(NarrativeStatus.ADDITIONAL).setDiv(new XhtmlNode(NodeType.Element).addText("foo")));
+		qa.setQuestionnaire(q.getUrl());
+		qa.addItem().setLinkId("link0").addAnswer().setValue(new Coding().setSystem("http://cs").setCode("code1"));
+
+		try {
+			myClient.validate().resource(qa).execute();
+		} catch (PreconditionFailedException e) {
+			oo = (OperationOutcome) e.getOperationOutcome();
+			assertThat(oo.getIssue()).hasSize(2);
+
+			for (OperationOutcome.OperationOutcomeIssueComponent next : oo.getIssue()) {
+				assertEquals(OperationOutcome.IssueSeverity.ERROR, next.getSeverity());
+				assertThat(next.getDiagnostics()).contains("code1");
+			}
+		}
+	}
+
+	@Test
+	public void testSearchByExternalReference() {
+		myStorageSettings.setAllowExternalReferences(true);
+
+		Patient patient = new Patient();
+		patient.addName().setFamily("FooName");
+		IIdType patientId = myClient.create().resource(patient).execute().getId();
+
+		//Reference patientReference = new Reference("Patient/" + patientId.getIdPart()); <--- this works
+		Reference patientReference = new Reference(patientId); // <--- this is seen as an external reference
+
+		Media media = new Media();
+		Attachment attachment = new Attachment();
+		attachment.setLanguage("ENG");
+		media.setContent(attachment);
+		media.setSubject(patientReference);
+		IIdType mediaId = myClient.create().resource(media).execute().getId();
+
+		// Search for wrong type
+		Bundle returnedBundle = myClient.search()
+			.forResource(Observation.class)
+			.where(Observation.ENCOUNTER.hasId(patientReference.getReference()))
+			.returnBundle(Bundle.class)
+			.execute();
+		assertThat(returnedBundle.getEntry()).isEmpty();
+
+		// Search for right type
+		returnedBundle = myClient.search()
+			.forResource(Media.class)
+			.where(Media.SUBJECT.hasId(patientReference.getReference()))
+			.returnBundle(Bundle.class)
+			.execute();
+		assertEquals(mediaId, returnedBundle.getEntryFirstRep().getResource().getIdElement());
+	}
+
+	@Test
+	public void addingExtensionToExtension_shouldThrowException() {
+
+		// Add a procedure
+		Extension extension = new Extension();
+		extension.setUrl("planning-datetime");
+		extension.setValue(new DateTimeType(("2022-09-16")));
+		Procedure procedure = new Procedure();
+		procedure.setExtension(List.of(extension));
+		String procedureString = myFhirContext.newXmlParser().encodeResourceToString(procedure);
+		ourLog.debug(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(procedure));
+		String newIdString = myServer.fhirRequest("/Procedure")
+			.post(procedureString, Constants.CT_FHIR_XML)
+			.assertStatus(201)
+			.getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Procedure/");
+		IdType id = new IdType(newIdString);
+
+		// Add an extension to the procedure's extension
+		Bundle bundle = new Bundle();
+		bundle.setType(BundleType.TRANSACTION);
+		BundleEntryComponent entry = new BundleEntryComponent();
+		Bundle.BundleEntryRequestComponent requestComponent = new Bundle.BundleEntryRequestComponent();
+		requestComponent.setMethod(HTTPVerb.PATCH);
+		requestComponent.setUrl("Procedure/" + id.getIdPart());
+		entry.setRequest(requestComponent);
+		Parameters parameter = new Parameters();
+		Parameters.ParametersParameterComponent part1 = new Parameters.ParametersParameterComponent();
+		part1.setName("type");
+		part1.setValue(new CodeType("add"));
+		Parameters.ParametersParameterComponent part2 = new Parameters.ParametersParameterComponent();
+		part2.setName("path");
+		part2.setValue(new StringType("Procedure.extension[0]"));
+		Parameters.ParametersParameterComponent part3 = new Parameters.ParametersParameterComponent();
+		part3.setName("name");
+		part3.setValue(new StringType("extension"));
+		Parameters.ParametersParameterComponent nestedPart = new Parameters.ParametersParameterComponent();
+		nestedPart.setName("value");
+		nestedPart.addPart().setName("url").setValue(new UriType("is-preferred"));
+		nestedPart.addPart().setName("valueBoolean").setValue(new BooleanType(false));
+		List<Parameters.ParametersParameterComponent> parts = Arrays.asList(part1, part2, part3, nestedPart);
+		parameter.addParameter()
+			.setName("operation")
+			.setPart(parts);
+		entry.setResource(parameter);
+		bundle.setEntry(List.of(entry));
+		ourLog.debug(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(bundle));
+		String parameterResource = myFhirContext.newXmlParser().encodeResourceToString(bundle);
+		myServer.fhirRequest("")
+				.post(parameterResource, Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertBodyContains("Extension contains both a value and nested extensions");
+
+		// Get procedures
+		myServer.fhirRequest("/Procedure").get().assertStatus(200);
+	}
+
+	@Test
+	public void testCreateResourceConditional() {
+		String methodName = "testCreateResourceConditional";
+
+		Patient pt = new Patient();
+		pt.addName().setFamily(methodName);
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		String ifNoneExist = "Patient?name=" + methodName;
+		String newIdString = myServer.fhirRequest("/Patient")
+			.withHeader(Constants.HEADER_IF_NONE_EXIST, ifNoneExist)
+			.post(resource, Constants.CT_FHIR_XML)
+			.assertStatus(201)
+			.getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Patient/");
+		IdType id = new IdType(newIdString);
+
+		newIdString = myServer.fhirRequest("/Patient")
+			.withHeader(Constants.HEADER_IF_NONE_EXIST, ifNoneExist)
+			.post(resource, Constants.CT_FHIR_XML)
+			.assertStatus(200)
+			.getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).isEqualTo(id.getValue()); // version should match for conditional create
+	}
+
+	@Test
+	public void testCreateResourceConditionalComplex() {
+		Patient pt = new Patient();
+		pt.addIdentifier().setSystem("http://general-hospital.co.uk/Identifiers").setValue("09832345234543876876");
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		String newIdString = conditionalCreatePatient(resource).assertStatus(201).getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Patient/");
+		IdType id = new IdType(newIdString);
+
+		newIdString = conditionalCreatePatient(resource).assertStatus(200).getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Patient/");
+		IdType id2 = new IdType(newIdString);
+
+//		//@formatter:off
+//		IIdType id3 = ourClient
+//			.update()
+//			.resource(pt)
+//			.conditionalByUrl("Patient?identifier=http://general-hospital.co.uk/Identifiers|09832345234543876876")
+//			.execute().getId();
+//		//@formatter:on
+
+		assertEquals(id.getValue(), id2.getValue());
+	}
+
+	/**
+	 * POSTs a Patient with an If-None-Exist on the general-hospital identifier.
+	 */
+	private HttpTestResponse conditionalCreatePatient(String theResource) {
+		return myServer.fhirRequest("/Patient")
+			.withHeader(Constants.HEADER_IF_NONE_EXIST, "Patient?identifier=http://general-hospital.co.uk/Identifiers|09832345234543876876")
+			.post(theResource, Constants.CT_FHIR_XML);
+	}
+
+	@Test
+	public void testCreateResourceReturnsRepresentationByDefault() {
+		String resource = "<Patient xmlns=\"http://hl7.org/fhir\"></Patient>";
+
+		HttpTestResponse response = myServer.fhirRequest("/Patient")
+			.post(resource, Constants.CT_FHIR_XML)
+			.assertStatus(201);
+		String respString = response.getBody();
+		assertThat(respString).startsWith("<Patient xmlns=\"http://hl7.org/fhir\">");
+		assertThat(respString).endsWith("</Patient>");
+	}
+
+	@Test
+	public void testCreateResourceReturnsOperationOutcome() {
+		String resource = "<Patient xmlns=\"http://hl7.org/fhir\"></Patient>";
+
+		String prefer = Constants.HEADER_PREFER_RETURN + "=" + Constants.HEADER_PREFER_RETURN_OPERATION_OUTCOME;
+		myServer.fhirRequest("/Patient")
+				.withHeader(Constants.HEADER_PREFER, prefer)
+				.post(resource, Constants.CT_FHIR_XML)
+				.assertStatus(201)
+				.assertBodyContains("<OperationOutcome xmlns=\"http://hl7.org/fhir\">");
+	}
+
+	@Test
+	public void testCreateResourceWithNumericId() {
+		String resource = "<Patient xmlns=\"http://hl7.org/fhir\"><id value=\"2\"/></Patient>";
+
+		OperationOutcome oo = myServer.fhirRequest("/Patient/2")
+				.post(resource, Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssue().get(0).getDiagnostics()).isEqualTo(Msg.code(365) + "Can not create resource with ID \"2\", ID must not be supplied on a create (POST) operation (use an HTTP PUT / update operation if you wish to supply an ID)");
+	}
+
+	@Test
+	public void testCreateWithForcedId() {
+		String methodName = "testCreateWithForcedId";
+
+		Patient p = new Patient();
+		p.addName().setFamily(methodName);
+		p.setId(methodName);
+
+		IIdType optId = myClient.update().resource(p).execute().getId();
+		assertEquals(methodName, optId.getIdPart());
+		assertEquals("1", optId.getVersionIdPart());
+	}
+
+	@Test
+	public void testDeepChaining() {
+		Location l1 = new Location();
+		l1.getNameElement().setValue("testDeepChainingL1");
+		IIdType l1id = myClient.create().resource(l1).execute().getId();
+
+		Location l2 = new Location();
+		l2.getNameElement().setValue("testDeepChainingL2");
+		l2.getPartOf().setReferenceElement(l1id.toVersionless().toUnqualified());
+		IIdType l2id = myClient.create().resource(l2).execute().getId();
+
+		Encounter e1 = new Encounter();
+		e1.addIdentifier().setSystem("urn:foo").setValue("testDeepChainingE1");
+		e1.getStatusElement().setValue(EncounterStatus.INPROGRESS);
+		EncounterLocationComponent location = e1.addLocation();
+		location.getLocation().setReferenceElement(l2id.toUnqualifiedVersionless());
+		location.setPeriod(new Period().setStart(new Date(), TemporalPrecisionEnum.SECOND).setEnd(new Date(), TemporalPrecisionEnum.SECOND));
+		IIdType e1id = myClient.create().resource(e1).execute().getId();
+
+		Bundle res = myClient.search()
+			.forResource(Encounter.class)
+			.where(Encounter.IDENTIFIER.exactly().systemAndCode("urn:foo", "testDeepChainingE1"))
+			.include(Encounter.INCLUDE_LOCATION.asRecursive())
+			.include(Location.INCLUDE_PARTOF.asRecursive())
+			.returnBundle(Bundle.class)
+			.execute();
+
+		ourLog.debug(myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(res));
+
+		assertThat(res.getEntry()).hasSize(3);
+		assertThat(genResourcesOfType(res, Encounter.class)).hasSize(1);
+		assertEquals(e1id.toUnqualifiedVersionless(), genResourcesOfType(res, Encounter.class).get(0).getIdElement().toUnqualifiedVersionless());
+
+	}
+
+	@Test
+	public void testReferenceOfWrongType() {
+		Group l2 = new Group();
+		l2.setActive(true);
+		IIdType l2id = myClient.create().resource(l2).execute().getId();
+
+		Encounter e1 = new Encounter();
+		e1.getStatusElement().setValue(EncounterStatus.INPROGRESS);
+		e1.getSubject().setReference(l2id.toUnqualifiedVersionless().getValue());
+		IIdType e1id = myClient.create().resource(e1).execute().getId();
+
+		// Wrong type
+		Bundle res = myClient.search()
+			.forResource(Encounter.class)
+			.include(Encounter.INCLUDE_PATIENT.asRecursive())
+			.returnBundle(Bundle.class)
+			.execute();
+
+		ourLog.debug(myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(res));
+
+		assertThat(res.getEntry()).hasSize(1);
+		assertThat(genResourcesOfType(res, Encounter.class)).hasSize(1);
+		assertEquals(e1id.toUnqualifiedVersionless(), genResourcesOfType(res, Encounter.class).get(0).getIdElement().toUnqualifiedVersionless());
+
+		// Right type
+		res = myClient.search()
+			.forResource(Encounter.class)
+			.include(Encounter.INCLUDE_SUBJECT.asRecursive())
+			.returnBundle(Bundle.class)
+			.execute();
+
+		ourLog.debug(myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(res));
+
+		assertThat(res.getEntry()).hasSize(2);
+		assertThat(genResourcesOfType(res, Encounter.class)).hasSize(1);
+		assertThat(genResourcesOfType(res, Group.class)).hasSize(1);
+
+	}
+
+	@Test
+	public void testDeleteConditionalMultiple() {
+		String methodName = "testDeleteConditionalMultiple";
+
+		myStorageSettings.setAllowMultipleDelete(false);
+
+		Patient p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().setFamily("FAM1");
+		IIdType id1 = myPatientDao.create(p, mySrd).getId().toUnqualifiedVersionless();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().setFamily("FAM2");
+		IIdType id2 = myPatientDao.create(p, mySrd).getId().toUnqualifiedVersionless();
+
+		try {
+			//@formatter:off
+			myClient
+				.delete()
+				.resourceConditionalByType(Patient.class)
+				.where(Patient.IDENTIFIER.exactly().code(methodName))
+				.execute();
+			//@formatter:on
+			fail();
+		} catch (PreconditionFailedException e) {
+			assertEquals("HTTP 412 Precondition Failed: " + Msg.code(962) + "Failed to DELETE Patient with match URL \"Patient?identifier=testDeleteConditionalMultiple\" because this search matched 2 resources", e.getMessage());
+		}
+
+		// Not deleted yet..
+		myClient.read().resource("Patient").withId(id1).execute();
+		myClient.read().resource("Patient").withId(id2).execute();
+
+		myStorageSettings.setAllowMultipleDelete(true);
+
+		MethodOutcome response = myClient
+			.delete()
+			.resourceConditionalByType(Patient.class)
+			.where(Patient.IDENTIFIER.exactly().code(methodName))
+			.execute();
+
+		String encoded = myFhirContext.newXmlParser().encodeResourceToString(response.getOperationOutcome());
+		ourLog.info(encoded);
+		assertThat(encoded).contains("Successfully deleted 2 resource(s). Took ");
+		try {
+			myClient.read().resource("Patient").withId(id1).execute();
+			fail();
+		} catch (ResourceGoneException e) {
+			// good
+		}
+		try {
+			myClient.read().resource("Patient").withId(id2).execute();
+			fail();
+		} catch (ResourceGoneException e) {
+			// good
+		}
+	}
+
+	@Test
+	public void testDeleteConditionalNoMatches() {
+		String methodName = "testDeleteConditionalNoMatches";
+
+		myServer.fhirRequest("/Patient?identifier=" + methodName)
+				.delete()
+				.assertStatus(200)
+				.assertBodyContains("<diagnostics value=\"Unable to find resource matching URL &quot;Patient?identifier=testDeleteConditionalNoMatches&quot;. Nothing has been deleted.\"/>");
+	}
+
+	@Test
+	public void testDeleteInvalidReference() {
+		myServer.fhirRequest("/Patient").delete()
+				.assertStatus(400)
+				.assertBodyContains("Can not perform delete, no ID provided");
+	}
+
+	/**
+	 * Test for #345
+	 */
+	@Test
+	public void testDeleteNormal() {
+		Patient p = new Patient();
+		p.addName().setFamily("FAM");
+		IIdType id = myClient.create().resource(p).execute().getId().toUnqualifiedVersionless();
+
+		myClient.read().resource(Patient.class).withId(id).execute();
+
+		myClient.delete().resourceById(id).execute();
+
+		try {
+			myClient.read().resource(Patient.class).withId(id).execute();
+			fail();
+		} catch (ResourceGoneException e) {
+			// good
+		}
+	}
+
+	@Test
+	@Disabled("Scratchpad for ad-hoc testing")
+	public void testQuery() {
+		ourLog.info("** Performing Search");
+		myServer.fhirRequest("/MedicationRequest?category=community&identifier=urn:oid:2.16.840.1.113883.3.7418.12.3%7C&intent=order&medication.code:text=calcitriol,hectorol,Zemplar,rocaltrol,vectical,vitamin%20D,doxercalciferol,paricalcitol&status=active,completed")
+			.get();
+		ourLog.info("** DONE Performing Search");
+	}
+
+	@Test
+	public void testDeleteResourceConditional1() {
+		String methodName = "testDeleteResourceConditional1";
+
+		Patient pt = new Patient();
+		pt.addName().setFamily(methodName);
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		String newIdString = myServer.fhirRequest("/Patient")
+			.post(resource, Constants.CT_FHIR_XML)
+			.assertStatus(201)
+			.getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Patient/");
+		IdType id = new IdType(newIdString);
+
+		OperationOutcome oo = myServer.fhirRequest("/Patient?name=" + methodName).delete()
+				.assertStatus(200)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssueFirstRep().getDiagnostics()).startsWith("Successfully deleted 1 resource(s). Took");
+
+		oo = myServer.fhirRequest("/Patient/" + id.getIdPart())
+				.get()
+				.assertStatus(410)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssueFirstRep().getDiagnostics()).startsWith("Resource was deleted at");
+
+		// Delete should now have no matches
+
+		oo = myServer.fhirRequest("/Patient?name=" + methodName).delete()
+				.assertStatus(200)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssueFirstRep().getDiagnostics()).startsWith("Unable to find resource matching URL");
+	}
+
+	/**
+	 * Based on email from Rene Spronk
+	 */
+	@Test
+	public void testDeleteResourceConditional2() throws Exception {
+		String methodName = "testDeleteResourceConditional2";
+
+		Patient pt = new Patient();
+		pt.addName().setFamily(methodName);
+		pt.addIdentifier().setSystem("http://ghh.org/patient").setValue(methodName);
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		String newIdString = myServer.fhirRequest("/Patient")
+			.post(resource, Constants.CT_FHIR_XML)
+			.assertStatus(201)
+			.getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Patient/");
+		IdType id = new IdType(newIdString);
+
+		/*
+		 * Try it with a raw socket call. The Apache client won't let us use the unescaped "|" in the URL but we want to make sure that works too..
+		 */
+		Socket sock = new Socket();
+		try (sock) {
+			sock.setSoTimeout(3000);
+			sock.connect(new InetSocketAddress("localhost", myPort));
+			sock.getOutputStream().write(("DELETE /fhir/context/Patient?identifier=http://ghh.org/patient|" + methodName + " HTTP/1.1\n").getBytes(StandardCharsets.UTF_8));
+			sock.getOutputStream().write("Host: localhost\n".getBytes(StandardCharsets.UTF_8));
+			sock.getOutputStream().write("\n".getBytes(StandardCharsets.UTF_8));
+
+			BufferedReader socketInput = new BufferedReader(new InputStreamReader(sock.getInputStream()));
+
+			StringBuilder b = new StringBuilder();
+			char[] buf = new char[1000];
+			while (socketInput.read(buf) != -1) {
+				b.append(buf);
+			}
+			String resp = b.toString();
+
+			ourLog.debug("Resp: {}", resp);
+		} catch (SocketTimeoutException e) {
+			ourLog.debug(e.getMessage(), e);
+		}
+
+		Thread.sleep(1000);
+
+		myServer.fhirRequest("/Patient/" + id.getIdPart())
+			.get()
+			.assertStatus(410);
+	}
+
+	@Test
+	public void testDeleteNonExistingResourceReturnsOperationOutcome() {
+		String resourceType = "Patient";
+		String logicalID = "12345";
+
+		MethodOutcome resp = myClient.delete().resourceById(resourceType, logicalID).execute();
+
+		OperationOutcome oo = (OperationOutcome) resp.getOperationOutcome();
+		assertThat(oo.getIssueFirstRep().getDiagnostics()).startsWith("Not deleted, resource " + resourceType + "/" + logicalID + " does not exist.");
+	}
+
+	@Test
+	public void testDeleteAlreadyDeletedReturnsOperationOutcome() {
+		Patient p = new Patient();
+		IIdType id = myClient.create().resource(p).execute().getId();
+
+		MethodOutcome resp = myClient.delete().resourceById(id).execute();
+		OperationOutcome oo = (OperationOutcome) resp.getOperationOutcome();
+		assertThat(oo.getIssueFirstRep().getDiagnostics()).contains("Successfully deleted 1 resource(s).");
+		assertThat(oo.getIssueFirstRep().getDiagnostics()).contains("Took ");
+
+		resp = myClient.delete().resourceById(id).execute();
+		oo = (OperationOutcome) resp.getOperationOutcome();
+		assertThat(oo.getIssueFirstRep().getDiagnostics()).startsWith("Not deleted, resource ");
+		assertThat(oo.getIssueFirstRep().getDiagnostics()).endsWith("was already deleted.");
+	}
+
+	/**
+	 * See issue #52
+	 */
+	@Test
+	public void testDocumentManifestResources() throws Exception {
+		myFhirContext.getResourceDefinition(Practitioner.class);
+		myFhirContext.getResourceDefinition(DocumentManifest.class);
+
+		IGenericClient client = myClient;
+
+		int initialSize = client.search().forResource(DocumentManifest.class).returnBundle(Bundle.class).execute().getEntry().size();
+
+		String resBody = IOUtils.toString(ResourceProviderR4Test.class.getResource("/r4/documentmanifest.json"), StandardCharsets.UTF_8);
+		client.create().resource(resBody).execute();
+
+		int newSize = client.search().forResource(DocumentManifest.class).returnBundle(Bundle.class).execute().getEntry().size();
+
+		assertEquals(1, newSize - initialSize);
+	}
+
+	/**
+	 * See issue #52
+	 */
+	@Test
+	public void testDocumentReferenceResources() throws Exception {
+		IGenericClient client = myClient;
+
+		int initialSize = client.search().forResource(DocumentReference.class).returnBundle(Bundle.class).execute().getEntry().size();
+
+		String resBody = IOUtils.toString(ResourceProviderR4Test.class.getResource("/r4/documentreference.json"), StandardCharsets.UTF_8);
+		client.create().resource(resBody).execute();
+
+		int newSize = client.search().forResource(DocumentReference.class).returnBundle(Bundle.class).execute().getEntry().size();
+
+		assertEquals(1, newSize - initialSize);
+
+	}
+
+	@Test
+	public void testElements() {
+		DiagnosticReport dr = new DiagnosticReport();
+		dr.setStatus(DiagnosticReport.DiagnosticReportStatus.FINAL);
+		dr.getCode().setText("CODE TEXT");
+		myClient.create().resource(dr).execute();
+
+		String path = "/DiagnosticReport?_include=DiagnosticReport:result&_elements:exclude=DiagnosticReport&_elements=DiagnosticReport.status,Observation.value,Observation.code,Observation.subject&_pretty=true";
+		myServer.fhirRequest(path).get()
+				.assertStatus(200)
+				.assertBodyDoesNotContain("<Diagn");
+	}
+
+	@Test
+	public void testSearchWithIncludeAndTargetResourceParameterWillSucceed() {
+
+		Coverage coverage = new Coverage();
+		coverage.getMeta().addProfile("http://foo");
+		coverage.setId(IdType.newRandomUuid());
+		coverage.addIdentifier().setSystem("http://coverage").setValue("12345");
+		coverage.setStatus(Coverage.CoverageStatus.ACTIVE);
+		coverage.setType(new CodeableConcept().addCoding(new Coding("http://coverage-type", "12345", null)));
+
+		MethodOutcome methodOutcome = myClient.create().resource(coverage).execute();
+
+		Bundle returnedBundle = myClient.search().byUrl("Coverage?_include=Coverage:payor:Patient&_include=Coverage:payor:Organization").returnBundle(Bundle.class).execute();
+
+		IIdType createdCoverageId = methodOutcome.getId();
+		String entryId = returnedBundle.getEntry().get(0).getResource().getId();
+
+		assertEquals(createdCoverageId.getValue(), entryId);
+
+	}
+
+	@Test
+	public void testEmptySearch() {
+		myStorageSettings.setHibernateSearchIndexFullText(true);
+		mySearchParamRegistry.forceRefresh();
+
+		Bundle responseBundle;
+
+		responseBundle = myClient.search().forResource(Patient.class).returnBundle(Bundle.class).execute();
+		assertEquals(0, responseBundle.getTotal());
+
+		responseBundle = myClient.search().forResource(Patient.class).where(Patient.NAME.matches().value("AAA")).returnBundle(Bundle.class).execute();
+		assertEquals(0, responseBundle.getTotal());
+
+		responseBundle = myClient.search().forResource(Patient.class).where(new StringClientParam("_content").matches().value("AAA")).returnBundle(Bundle.class).execute();
+		assertEquals(0, responseBundle.getTotal());
+
+	}
+
+	/**
+	 * See #872
+	 */
+	@Test
+	public void testExtensionUrlWithHl7Url() throws IOException {
+		String input = IOUtils.toString(ResourceProviderR4Test.class.getResourceAsStream("/bug872-ext-with-hl7-url.json"), Charsets.UTF_8);
+
+		myServer.fhirRequest("/Patient/" + JpaConstants.OPERATION_VALIDATE)
+			.post(input, Constants.CT_JSON)
+			.assertStatus(200);
+	}
+
+	/**
+	 * See #872
+	 */
+	@Test
+	public void testValidateExtensionUrlWithHl7UrlPost() throws IOException {
+		RequestValidatingInterceptor interceptor = new RequestValidatingInterceptor();
+		FhirInstanceValidator val = new FhirInstanceValidator(myValidationSupport);
+		interceptor.addValidatorModule(val);
+
+		myServer.getRestfulServer().registerInterceptor(interceptor);
+		try {
+			String input = IOUtils.toString(ResourceProviderR4Test.class.getResourceAsStream("/bug872-ext-with-hl7-url.json"), Charsets.UTF_8);
+
+			myServer.fhirRequest("/Patient/$validate")
+					.post(input, Constants.CT_JSON)
+					.assertStatus(200)
+					.assertBodyContains("Unknown extension http://hl7.org/fhir/ValueSet/v3-ActInvoiceGroupCode");
+		} finally {
+			myServer.getRestfulServer().unregisterInterceptor(interceptor);
+		}
+	}
+
+	@Test
+	public void testValidateGeneratedCapabilityStatement() {
+
+		String input = myServer.fhirRequest("/metadata?_format=json").get().assertStatus(200).getBody();
+
+		myServer.fhirRequest("/CapabilityStatement/$validate?_pretty=true")
+			.post(input, Constants.CT_JSON)
+			.assertStatus(200);
+	}
+
+	@Test
+	public void testValidateResourceContainingProfileDeclarationDoesntResolve() {
+		Observation input = new Observation();
+		input.getText().setDiv(new XhtmlNode().setValue("<div>AA</div>")).setStatus(Narrative.NarrativeStatus.GENERATED);
+		input.getMeta().addProfile("http://foo/structuredefinition/myprofile");
+
+		input.getCode().setText("Hello");
+		input.setStatus(ObservationStatus.FINAL);
+
+		myServer.fhirRequest("/Observation/$validate?_pretty=true")
+				.post(input)
+				.assertStatus(200)
+				.assertBodyContains("Profile reference 'http://foo/structuredefinition/myprofile' has not been checked because it could not be found");
+	}
+
+	@SuppressWarnings("unused")
+	@Test
+	public void testFullTextSearch() {
+		myStorageSettings.setHibernateSearchIndexFullText(true);
+		mySearchParamRegistry.forceRefresh();
+
+		Observation obs1 = new Observation();
+		obs1.getCode().setText("Systolic Blood Pressure");
+		obs1.setStatus(ObservationStatus.FINAL);
+		obs1.setValue(new Quantity(123));
+		IIdType id1 = myObservationDao.create(obs1, mySrd).getId().toUnqualifiedVersionless();
+
+		Observation obs2 = new Observation();
+		obs2.getCode().setText("Diastolic Blood Pressure");
+		obs2.setStatus(ObservationStatus.FINAL);
+		obs2.setValue(new Quantity(81));
+		IIdType id2 = myObservationDao.create(obs2, mySrd).getId().toUnqualifiedVersionless();
+		obs2.setId(id2);
+
+		myStorageSettings.setHibernateSearchIndexSearchParams(true);
+		mySearchParamRegistry.forceRefresh();
+
+		Bundle bundle = myServer.fhirRequest("/Observation?_content=systolic&_pretty=true")
+				.withHeader(Constants.HEADER_CONTENT_TYPE, Constants.CT_JSON)
+				.get()
+				.assertStatus(200)
+				.assertMimeType(Constants.CT_FHIR_JSON_NEW)
+				.getBodyAsResource(Bundle.class);
+		assertThat(bundle.getTotal()).isEqualTo(1);
+		Resource resource = bundle.getEntry().get(0).getResource();
+		assertThat(resource.fhirType()).isEqualTo("Observation");
+		assertThat(resource.getIdPart()).isEqualTo(id1.getIdPart());
+	}
+
+	@Test
+	public void testFulltextSearchWithIdAndContent() {
+		myStorageSettings.setHibernateSearchIndexFullText(true);
+		mySearchParamRegistry.forceRefresh();
+
+		Patient p = new Patient();
+		p.setId("FOO");
+		p.addName().setFamily("FAMILY");
+		myClient.update().resource(p).execute();
+
+		p = new Patient();
+		p.setId("BAR");
+		p.addName().setFamily("HELLO");
+		myClient.update().resource(p).execute();
+
+		Observation o = new Observation();
+		o.setId("BAZ");
+		o.getSubject().setReference("Patient/FOO");
+		o.getCode().setText("GOODBYE");
+		myClient.update().resource(o).execute();
+
+		List<String> ids = searchAndReturnUnqualifiedVersionlessIdValues("/Patient?_id=FOO&_content=family");
+		assertThat(ids).containsExactly("Patient/FOO");
+
+		ids = searchAndReturnUnqualifiedVersionlessIdValues("/Patient?_id=FOO&_content=HELLO");
+		assertThat(ids).isEmpty();
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {
+		"/Patient?_text=HELLO",
+		"/Patient?_content=HELLO",
+		"/Patient?_content=HELLO&_text=HELLO",
+		"/Patient?_id=FOO&_content=HELLO",
+		"/Patient/A/$everything?_content=HELLO"
+	})
+	public void testFullTextIndexingDisabled(String theUri) {
+		// Setup
+		myStorageSettings.setHibernateSearchIndexFullText(false);
+		createPatient(withId("A"), withActiveTrue());
+
+		// Test
+		String resp = myServer.fhirRequest(theUri).get().assertStatus(400).getBody();
+
+		// Verify
+		String expectedParams = null;
+		if (theUri.contains("_content")) {
+			expectedParams = "_content";
+		}
+		if (theUri.contains("_text")) {
+			if (expectedParams != null) {
+				expectedParams += ", _text";
+			} else {
+				expectedParams = "_text";
+			}
+		}
+		assertThat(resp).contains("Fulltext searching is not enabled on this server, can not support the parameter(s): " + expectedParams);
+	}
+
+
+	@Test
+	public void testGetResourceCountsOperation() {
+		String methodName = "testMetaOperations";
+
+		Patient pt = new Patient();
+		pt.addName().setFamily(methodName);
+		myClient.create().resource(pt).execute().getId().toUnqualifiedVersionless();
+
+		myResourceCountsCache.clear();
+		myResourceCountsCache.update();
+
+		myServer.fhirRequest("/$get-resource-counts").get()
+				.assertStatus(200)
+				.assertBodyContains("<parameter><name value=\"Patient\"/><valueInteger value=\"");
+	}
+
+	@Test
+	public void testHasParameter() {
+		IIdType pid0;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			pid0 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			myObservationDao.create(obs, mySrd);
+		}
+		{
+			Device device = new Device();
+			device.addIdentifier().setValue("DEVICEID");
+			IIdType devId = myDeviceDao.create(device, mySrd).getId().toUnqualifiedVersionless();
+
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("NOLINK");
+			obs.setDevice(new Reference(devId));
+			myObservationDao.create(obs, mySrd);
+		}
+
+		String uri = "/Patient?_has:Observation:subject:identifier=" + UrlUtil.escapeUrlParam("urn:system|FOO");
+		List<String> ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		assertThat(ids).containsExactly(pid0.getValue());
+	}
+
+	@Test
+	public void testHasParameterNoResults() {
+
+		myServer.fhirRequest("/AllergyIntolerance?_has=Provenance:target:userID=12345").get()
+				.assertBodyContains("Invalid _has parameter syntax: _has");
+	}
+
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false})
+	public void testHasParameterOnChain(boolean theWithIndexOnContainedResources) {
+		myStorageSettings.setIndexOnContainedResources(theWithIndexOnContainedResources);
+
+		IIdType pid0;
+		IIdType pid1;
+		IIdType groupId;
+		IIdType obsId;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			pid0 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Group group = new Group();
+			group.addMember().setEntity(new Reference(pid0.getValue()));
+			group.addMember().setEntity(new Reference(pid1.getValue()));
+			groupId = myGroupDao.create(group, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Observation obs = new Observation();
+			obs.getCode().addCoding().setSystem("urn:system").setCode("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obsId = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String uri;
+		List<String> ids;
+
+		logAllTokenIndexes();
+
+		uri = "/Observation?code=urn:system%7CFOO&subject._has:Group:member:_id=" + groupId.getValue();
+		myCaptureQueriesListener.clear();
+		ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		myCaptureQueriesListener.logAllQueries();
+		assertThat(ids).containsExactly(obsId.getValue());
+	}
+
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false})
+	public void testHasParameterWithIdTarget(boolean theWithIndexOnContainedResources) {
+		myStorageSettings.setIndexOnContainedResources(theWithIndexOnContainedResources);
+
+		IIdType pid0;
+		IIdType obsId;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			pid0 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obsId = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String uri;
+		List<String> ids;
+
+		logAllResourceLinks();
+
+		uri = "/Patient?_has:Observation:subject:_id=" + obsId.getValue();
+		myCaptureQueriesListener.clear();
+		ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		myCaptureQueriesListener.logAllQueries();
+		assertThat(ids).containsExactly(pid0.getValue());
+	}
+
+	@Test
+	public void testHistoryWithAtParameter() {
+		String methodName = "testHistoryWithFromAndTo";
+
+		Patient patient = new Patient();
+		patient.addName().setFamily(methodName);
+
+		List<Date> preDates = Lists.newArrayList();
+		List<String> ids = Lists.newArrayList();
+
+		IIdType idCreated = myPatientDao.create(patient, mySrd).getId();
+		ids.add(idCreated.toUnqualified().getValue());
+		IIdType id = idCreated.toUnqualifiedVersionless();
+
+		for (int i = 0; i < 10; i++) {
+			sleepAtLeast(100);
+			preDates.add(new Date());
+			sleepAtLeast(100);
+			patient.setId(id);
+			patient.getName().get(0).getFamilyElement().setValue(methodName + "_i" + i);
+			ids.add(myPatientDao.update(patient, mySrd).getId().toUnqualified().getValue());
+		}
+
+		List<String> idValues;
+
+		myCaptureQueriesListener.clear();
+		idValues = searchAndReturnUnqualifiedIdValues("/Patient/" + id.getIdPart() + "/_history?_at=gt" + toStr(preDates.get(0)) + "&_at=lt" + toStr(preDates.get(3)));
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(idValues).as(idValues.toString()).containsExactly(ids.get(3), ids.get(2), ids.get(1), ids.get(0));
+
+		idValues = searchAndReturnUnqualifiedIdValues("/Patient/_history?_at=gt" + toStr(preDates.get(0)) + "&_at=lt" + toStr(preDates.get(3)));
+		assertThat(idValues).as(idValues.toString()).containsExactly(ids.get(3), ids.get(2), ids.get(1));
+
+		idValues = searchAndReturnUnqualifiedIdValues("/_history?_at=gt" + toStr(preDates.get(0)) + "&_at=lt" + toStr(preDates.get(3)));
+		assertThat(idValues).as(idValues.toString()).containsExactly(ids.get(3), ids.get(2), ids.get(1));
+
+		idValues = searchAndReturnUnqualifiedIdValues("/_history?_at=gt2060");
+		assertThat(idValues).as(idValues.toString()).isEmpty();
+
+		idValues = searchAndReturnUnqualifiedIdValues("/_history?_at=" + InstantDt.withCurrentTime().getYear());
+		assertThat(idValues).as(idValues.toString()).hasSize(10); // 10 is the page size
+
+		idValues = searchAndReturnUnqualifiedIdValues("/_history?_at=ge" + InstantDt.withCurrentTime().getYear());
+		assertThat(idValues).as(idValues.toString()).hasSize(10);
+
+		idValues = searchAndReturnUnqualifiedIdValues("/_history?_at=gt" + (InstantDt.withCurrentTime().getYear() + 1));
+		assertThat(idValues).isEmpty();
+	}
+
+	@Test
+	public void testPaginatingHistoryWithGenericClientLoadPageMethod() {
+		//Given: A patient with 100 versions.
+		Patient p = new Patient().setActive(true);
+		p.setId("a123");
+		myPatientDao.update(p);
+
+		for (int i=0; i < 99; i++) {
+			p.addName().setFamily("John" + i);
+			myPatientDao.update(p, mySrd);
+		}
+
+		Bundle response = myClient
+			.history()
+			.onInstance(new IdType("Patient", "a123"))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		//When: Paginating using GenericClient's "loadPage()" method
+		while (response.getLink("next") != null) {
+			response = myClient.loadPage().next(response).execute();
+		}
+		//Verify: We paginate to the last page.
+		assertNotNull(response.getLink("self"));
+		assertNotNull(response.getLink("previous"));
+		assertNull(response.getLink("next"));
+	}
+
+	@Test
+	public void testPaginatingHistoryWithOffsetAndCountQueryParam() {
+		//Given: A patient with 100 versions.
+		Patient p = new Patient().setActive(true);
+		p.setId("a123");
+		myPatientDao.update(p);
+
+		for (int i=0; i < 99; i++) {
+			p.addName().setFamily("John" + i);
+			myPatientDao.update(p, mySrd);
+		}
+
+		int offset = 0;
+		Bundle response;
+		boolean nextLinkExists = true;
+		//When: Paginating using _offset and _count query parameters
+		while (nextLinkExists) {
+			response = myClient
+				.history()
+				.onInstance(new IdType("Patient", "a123"))
+				.returnBundle(Bundle.class)
+				.offset(offset)
+				.count(10)
+				.execute();
+			offset += 10;
+			nextLinkExists = response.getLink("next") != null;
+			//Verify: We get to the last page.
+			if (!nextLinkExists){
+				assertNotNull(response.getLink("self"));
+				assertNotNull(response.getLink("previous"));
+				assertNull(response.getLink("next"));
+			}
+		}
+	}
+
+
+	@ParameterizedTest
+	@CsvSource({
+		"false,PatientWithServerGeneratedId1",
+		"true,PatientWithServerGeneratedId2"
+	})
+	public void testHistoryOnInstanceWithServerGeneratedId(boolean theInvalidateCacheBeforeHistory,
+														   String thePatientFamilyName) {
+
+		Patient patient = new Patient();
+		patient.addName().setFamily(thePatientFamilyName);
+		IIdType id = myClient.create().resource(patient).execute().getId().toVersionless();
+		ourLog.info("Res ID: {}", id);
+
+		final String expectedFullUrl = myServerBase + "/Patient/" + id.getIdPart();
+
+		if (theInvalidateCacheBeforeHistory) {
+			// the reason for this test parameterization to invalidate the cache is that
+			// when a resource is created/updated, its id mapping is cached for 1 minute so
+			// retrieving the history right after creating the resource will use the cached value.
+			// By invalidating the cache here and getting the history bundle again,
+			// we test the scenario where the id mapping needs to be read from the db,
+			// hence testing a different code path.
+			myMemoryCacheService.invalidateCaches(MemoryCacheService.CacheEnum.PID_TO_FORCED_ID);
+		}
+
+		Bundle history = myClient.history().onInstance(id.getValue()).returnBundle(Bundle.class).execute();
+		assertEquals(1, history.getEntry().size());
+		BundleEntryComponent historyEntry0 = history.getEntry().get(0);
+		// validate entry.fullUrl
+		assertEquals(expectedFullUrl, historyEntry0.getFullUrl());
+		//validate entry.request
+		assertEquals(HTTPVerb.POST, historyEntry0.getRequest().getMethod());
+		assertEquals("Patient/" + id.getIdPart() + "/_history/1", historyEntry0.getRequest().getUrl());
+		//validate entry.response
+		assertEquals("201 Created", historyEntry0.getResponse().getStatus());
+		assertNotNull(historyEntry0.getResponse().getEtag());
+
+		//validate patient resource details in the entry
+		Patient historyEntry0Patient = (Patient) historyEntry0.getResource();
+		assertEquals(id.withVersion("1").getValue(), historyEntry0Patient.getId());
+		assertEquals(1, historyEntry0Patient.getName().size());
+		assertEquals(thePatientFamilyName, historyEntry0Patient.getName().get(0).getFamily());
+
+
+	}
+
+	@ParameterizedTest
+	@CsvSource({
+		"false,PatientWithForcedId1",
+		"true,PatientWithForcedId2"
+	})
+	public void testHistoryOnInstanceWithForcedId(boolean theInvalidateCacheBeforeHistory,
+												  String thePatientFamilyName) {
+
+		final String patientForcedId = thePatientFamilyName + "-ForcedId";
+		Patient patient = new Patient();
+		patient.addName().setFamily(thePatientFamilyName);
+		patient.setId(patientForcedId);
+		IIdType id = myClient.update().resource(patient).execute().getId().toVersionless();
+		ourLog.info("Res ID: {}", id);
+		assertEquals(patientForcedId, id.getIdPart());
+
+		final String expectedFullUrl = myServerBase + "/Patient/" + id.getIdPart();
+
+		if (theInvalidateCacheBeforeHistory) {
+			// the reason for this test parameterization to invalidate the cache is that
+			// when a resource is created/updated, its id mapping is cached for 1 minute so
+			// retrieving the history right after creating the resource will use the cached value.
+			// By invalidating the cache here and getting the history bundle again,
+			// we test the scenario where the id mapping needs to be read from the db,
+			// hence testing a different code path.
+			myMemoryCacheService.invalidateCaches(MemoryCacheService.CacheEnum.PID_TO_FORCED_ID);
+		}
+
+		Bundle history = myClient.history().onInstance(id.getValue()).returnBundle(Bundle.class).execute();
+		assertEquals(1, history.getEntry().size());
+		BundleEntryComponent historyEntry0 = history.getEntry().get(0);
+		// validate entry.fullUrl
+		assertEquals(expectedFullUrl, historyEntry0.getFullUrl());
+		//validate entry.request
+		assertEquals(HTTPVerb.POST, historyEntry0.getRequest().getMethod());
+		assertEquals("Patient/" + id.getIdPart() + "/_history/1", historyEntry0.getRequest().getUrl());
+		//validate entry.response
+		assertEquals("201 Created", historyEntry0.getResponse().getStatus());
+		assertNotNull(historyEntry0.getResponse().getEtag());
+
+		//validate patient resource details in the entry
+		Patient historyEntry0Patient = (Patient) historyEntry0.getResource();
+		assertEquals(id.withVersion("1").getValue(), historyEntry0Patient.getId());
+		assertEquals(1, historyEntry0Patient.getName().size());
+		assertEquals(thePatientFamilyName, historyEntry0Patient.getName().get(0).getFamily());
+	}
+
+	@Test
+	public void testHistoryWithDeletedResource() {
+		String methodName = "testHistoryWithDeletedResource";
+
+		Patient patient = new Patient();
+		patient.addName().setFamily(methodName);
+		IIdType id = myClient.create().resource(patient).execute().getId().toVersionless();
+		myClient.delete().resourceById(id).execute();
+		patient.setId(id);
+		myClient.update().resource(patient).execute();
+
+		ourLog.info("Res ID: {}", id);
+
+		Bundle history = myClient.history().onInstance(id.getValue()).returnBundle(Bundle.class).prettyPrint().summaryMode(SummaryEnum.DATA).execute();
+		assertThat(history.getEntry()).hasSize(3);
+		assertEquals(id.withVersion("3").getValue(), history.getEntry().get(0).getResource().getId());
+		assertThat(((Patient) history.getEntry().get(0).getResource()).getName()).hasSize(1);
+
+		assertEquals(HTTPVerb.DELETE, history.getEntry().get(1).getRequest().getMethodElement().getValue());
+		assertEquals("Patient/" + id.getIdPart() + "/_history/2", history.getEntry().get(1).getRequest().getUrl());
+		assertNull(history.getEntry().get(1).getResource());
+
+		assertEquals(id.withVersion("1").getValue(), history.getEntry().get(2).getResource().getId());
+		assertThat(((Patient) history.getEntry().get(2).getResource()).getName()).hasSize(1);
+
+		ourLog.debug(myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(history));
+
+		try {
+			myBundleDao.validate(history, null, null, null, null, null, mySrd);
+		} catch (PreconditionFailedException e) {
+			ourLog.debug(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(e.getOperationOutcome()));
+			throw e;
+		}
+	}
+
+	@Test
+	public void testHistoryPaging() {
+
+		Patient patient = new Patient();
+		patient.setId("Patient/A");
+		patient.setActive(true);
+		myClient.update().resource(patient).execute();
+		patient.setActive(false);
+		myClient.update().resource(patient).execute();
+
+		sleepAtLeast(100);
+		Date midDate = new Date();
+		sleepAtLeast(100);
+
+		patient.setActive(true);
+		myClient.update().resource(patient).execute();
+		patient.setActive(false);
+		myClient.update().resource(patient).execute();
+		patient.setActive(true);
+		myClient.update().resource(patient).execute();
+		patient.setActive(false);
+		myClient.update().resource(patient).execute();
+
+		Bundle history = myClient
+			.history()
+			.onInstance("Patient/A")
+			.returnBundle(Bundle.class)
+			.prettyPrint()
+			.count(2)
+			.execute();
+
+		assertThat(toUnqualifiedIdValues(history)).as(toUnqualifiedIdValues(history).toString()).containsExactly("Patient/A/_history/6", "Patient/A/_history/5");
+
+		history = myClient
+			.loadPage()
+			.next(history)
+			.execute();
+
+		assertThat(toUnqualifiedIdValues(history)).as(toUnqualifiedIdValues(history).toString()).containsExactly("Patient/A/_history/4", "Patient/A/_history/3");
+
+		history = myClient
+			.loadPage()
+			.next(history)
+			.execute();
+
+		assertThat(toUnqualifiedIdValues(history)).as(toUnqualifiedIdValues(history).toString()).containsExactly("Patient/A/_history/2", "Patient/A/_history/1");
+
+		// we got them all
+		assertNull(history.getLink("next"));
+
+		/*
+		 * Try with a date offset
+		 */
+
+		history = myClient
+			.history()
+			.onInstance("Patient/A")
+			.returnBundle(Bundle.class)
+			.since(midDate)
+			.prettyPrint()
+			.count(2)
+			.execute();
+
+		assertThat(toUnqualifiedIdValues(history)).as(toUnqualifiedIdValues(history).toString()).containsExactly("Patient/A/_history/6", "Patient/A/_history/5");
+
+		history = myClient
+			.loadPage()
+			.next(history)
+			.execute();
+
+		assertThat(toUnqualifiedIdValues(history)).as(toUnqualifiedIdValues(history).toString()).containsExactly("Patient/A/_history/4", "Patient/A/_history/3");
+
+		history = myClient
+			.loadPage()
+			.next(history)
+			.execute();
+
+		assertThat(history.getEntry()).isEmpty();
+
+	}
+
+	@Test
+	public void testIdAndVersionInBodyForCreate() {
+		String methodName = "testIdAndVersionInBodyForCreate";
+
+		Patient pt = new Patient();
+		pt.setId("Patient/AAA/_history/4");
+		pt.addName().setFamily(methodName);
+		String resource = myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(pt);
+
+		ourLog.info("Input: {}", resource);
+
+		IdType id = createPatientAndReturnLocationId(resource);
+
+		assertEquals("1", id.getVersionIdPart());
+		assertThat(id.getIdPart()).isNotEqualTo("AAA");
+
+		myServer.fhirRequest("/Patient/" + id.getIdPart()).get()
+				.assertStatus(200)
+				.assertBodyContains("<id value=\"" + id.getIdPart() + "\"/>", "<versionId value=\"1\"/>");
+	}
+
+	/**
+	 * POSTs the XML-encoded resource and returns the id from the {@literal Location} header.
+	 */
+	private IdType createPatientAndReturnLocationId(String theResource) {
+		HttpTestResponse response = myServer.fhirRequest("/Patient").post(theResource, Constants.CT_FHIR_XML);
+		String newIdString = response.assertStatus(201).getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Patient/");
+		return new IdType(newIdString);
+	}
+
+	@Test
+	public void testIdAndVersionInBodyForUpdate() {
+		String methodName = "testIdAndVersionInBodyForUpdate";
+
+		Patient pt = new Patient();
+		pt.setId("Patient/AAA/_history/4");
+		pt.addName().setFamily(methodName);
+		String resource = myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(pt);
+
+		ourLog.info("Input: {}", resource);
+
+		IdType id = createPatientAndReturnLocationId(resource);
+
+		assertEquals("1", id.getVersionIdPart());
+		assertThat(id.getIdPart()).isNotEqualTo("AAA");
+
+		OperationOutcome oo = myServer.fhirRequest("/Patient/" + id.getIdPart() + "/_history/1")
+				.put(resource, Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssue().get(0).getDiagnostics()).isEqualTo(Msg.code(420) + "Can not update resource, resource body must contain an ID element which matches the request URL for update (PUT) operation - Resource body ID of \"AAA\" does not match URL ID of \""
+			+ id.getIdPart() + "\"");
+	}
+
+	/**
+     * See issue #52
+     */
+	@Test
+	public void testImagingStudyResources() throws Exception {
+		IGenericClient client = myClient;
+
+		int initialSize = client.search().forResource(ImagingStudy.class).returnBundle(Bundle.class).execute().getEntry().size();
+
+		String resBody = IOUtils.toString(ResourceProviderR4Test.class.getResource("/r4/imagingstudy.json"), StandardCharsets.UTF_8);
+		client.create().resource(resBody).execute();
+
+		int newSize = client.search().forResource(ImagingStudy.class).returnBundle(Bundle.class).execute().getEntry().size();
+
+		assertEquals(1, newSize - initialSize);
+	}
+
+	@Test
+	public void testPagingWithIncludesOnEachResource() {
+		// setup
+		int total = 20;
+		Organization org = new Organization();
+		org.setName("ORG");
+		IIdType orgId = myOrganizationDao.create(org, mySrd).getId().toUnqualifiedVersionless();
+
+		Coding tagCode = new Coding();
+		tagCode.setCode("test");
+		tagCode.setSystem("http://example.com");
+		for (int i = 0; i < total; i++) {
+			Task t = new Task();
+			t.getMeta()
+				.addTag(tagCode);
+			t.setStatus(Task.TaskStatus.REQUESTED);
+			t.getOwner().setReference(orgId.getValue());
+			myTaskDao.create(t, mySrd);
+		}
+		HashSet<String> ids = new HashSet<>();
+
+		// test
+		int requestedAmount = 10;
+		Bundle bundle = myClient
+			.search()
+			.byUrl("Task?_count=10&_tag=test&status=requested&_include=Task%3Aowner&_sort=status")
+			.returnBundle(Bundle.class)
+			.execute();
+		assertThat(bundle.getEntry()).isNotEmpty();
+		assertThat(bundle.getEntry()).hasSize(11);
+		for (BundleEntryComponent resource : bundle.getEntry()) {
+			ids.add(resource.getResource().getId());
+		}
+
+		String nextUrl = null;
+		do {
+			Bundle.BundleLinkComponent nextLink = bundle.getLink("next");
+			if (nextLink != null) {
+				nextUrl = nextLink.getUrl();
+
+				// make sure we're always requesting 10
+				assertThat(nextUrl).contains(String.format("_count=%d", requestedAmount));
+
+				// get next batch
+				bundle = myClient.fetchResourceFromUrl(Bundle.class, nextUrl);
+				int received = bundle.getEntry().size();
+
+				// currently, last page could be empty... so we'll
+				// short circuit out here
+				if (received != 0) {
+					// every batch should include the 10 tasks + 1 orgranization
+					assertEquals(11, received);
+					for (BundleEntryComponent resource : bundle.getEntry()) {
+						ids.add(resource.getResource().getId());
+					}
+				}
+			} else {
+				nextUrl = null;
+			}
+		} while (nextUrl != null);
+
+		// verify
+		// we should receive all resources and the single organization (repeatedly)
+		assertThat(ids).hasSize(total + 1);
+	}
+
+
+	@ParameterizedTest
+	@CsvSource({
+		"true,19,10",
+		"false,19,10",
+		"true,20,0",
+		"false,20,0"
+	})
+	public void testPagingWithIncludesReturnsConsistentValues(
+		boolean theAllowStoringSearchResults,
+		int theResourceCount,
+		int theOrgCount
+	) {
+		// setup
+
+		// create resources
+		{
+			Coding tagCode = new Coding();
+			tagCode.setCode("test");
+			tagCode.setSystem("http://example.com");
+			int orgCount = theOrgCount;
+			for (int i = 0; i < theResourceCount; i++) {
+				Task t = new Task();
+				t.getMeta()
+					.addTag(tagCode);
+				t.setStatus(Task.TaskStatus.REQUESTED);
+				if (orgCount > 0) {
+					Organization org = new Organization();
+					org.setName("ORG");
+					IIdType orgId = myOrganizationDao.create(org, mySrd).getId().toUnqualifiedVersionless();
+
+					orgCount--;
+					t.getOwner().setReference(orgId.getValue());
+				}
+				myTaskDao.create(t, mySrd);
+			}
+		}
+
+		// when
+		if (!theAllowStoringSearchResults) {
+			// we don't actually allow this in our current
+			// pagingProvider implementations (except for history).
+			// But we will test with it because our ResponsePage
+			// is what's under test here
+			when(myPagingProvider.canStoreSearchResults())
+				.thenReturn(false);
+		}
+
+		int requestedAmount = 10;
+		Bundle bundle = myClient
+			.search()
+			.byUrl("Task?_count=10&_tag=test&status=requested&_include=Task%3Aowner&_sort=status")
+			.returnBundle(Bundle.class)
+			.execute();
+		int count = bundle.getEntry().size();
+		assertThat(bundle.getEntry()).isNotEmpty();
+
+		String nextUrl = null;
+		do {
+			Bundle.BundleLinkComponent nextLink = bundle.getLink("next");
+			if (nextLink != null) {
+				nextUrl = nextLink.getUrl();
+
+				// make sure we're always requesting 10
+				assertThat(nextUrl).contains(String.format("_count=%d", requestedAmount));
+
+				// get next batch
+				bundle = myClient.fetchResourceFromUrl(Bundle.class, nextUrl);
+				int received = bundle.getEntry().size();
+
+				// every next result should produce results
+				assertThat(bundle.getEntry()).isNotEmpty();
+				count += received;
+			} else {
+				nextUrl = null;
+			}
+		} while (nextUrl != null);
+
+		// verify
+		// we should receive all resources and linked resources
+		assertEquals(theResourceCount + theOrgCount, count);
+	}
+
+
+	@Test
+	public void testPagingWithIncludesReturnsConsistentValues() {
+		// setup
+		int total = 19;
+		int orgs = 10;
+		// create resources
+		{
+			Coding tagCode = new Coding();
+			tagCode.setCode("test");
+			tagCode.setSystem("http://example.com");
+			int orgCount = orgs;
+			for (int i = 0; i < total; i++) {
+				Task t = new Task();
+				t.getMeta()
+					.addTag(tagCode);
+				t.setStatus(Task.TaskStatus.REQUESTED);
+				if (orgCount > 0) {
+					Organization org = new Organization();
+					org.setName("ORG");
+					IIdType orgId = myOrganizationDao.create(org, mySrd).getId().toUnqualifiedVersionless();
+
+					orgCount--;
+					t.getOwner().setReference(orgId.getValue());
+				}
+				myTaskDao.create(t, mySrd);
+			}
+		}
+
+		int requestedAmount = 10;
+		Bundle bundle = myClient
+			.search()
+			.byUrl("Task?_count=10&_tag=test&status=requested&_include=Task%3Aowner&_sort=status")
+			.returnBundle(Bundle.class)
+			.execute();
+		int count = bundle.getEntry().size();
+		assertThat(bundle.getEntry()).isNotEmpty();
+
+		String nextUrl = null;
+		do {
+			Bundle.BundleLinkComponent nextLink = bundle.getLink("next");
+			if (nextLink != null) {
+				nextUrl = nextLink.getUrl();
+
+				// make sure we're always requesting 10
+				assertThat(nextUrl).contains(String.format("_count=%d", requestedAmount));
+
+				// get next batch
+				bundle = myClient.fetchResourceFromUrl(Bundle.class, nextUrl);
+				int received = bundle.getEntry().size();
+
+				// every next result should produce results
+				assertThat(bundle.getEntry()).isNotEmpty();
+				count += received;
+			} else {
+				nextUrl = null;
+			}
+		} while (nextUrl != null);
+
+		// verify
+		// we should receive all resources and linked resources
+		assertEquals(total + orgs, count);
+	}
+
+
+	/**
+     * See #793
+     */
+	@Test
+	public void testIncludeCountDoesntIncludeIncludes() {
+		Organization org = new Organization();
+		org.setName("ORG");
+		IIdType orgId = myOrganizationDao.create(org, mySrd).getId().toUnqualifiedVersionless();
+
+		for (int i = 0; i < 10; i++) {
+			Patient pt = new Patient();
+			pt.getManagingOrganization().setReference(orgId.getValue());
+			pt.addName().setFamily("FAM" + i);
+			myPatientDao.create(pt, mySrd);
+		}
+
+		Bundle bundle = myClient
+			.search()
+			.forResource(Patient.class)
+			.include(Patient.INCLUDE_ORGANIZATION)
+			.count(2)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		ourLog.debug(myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(bundle));
+
+		assertThat(bundle.getEntry()).hasSize(3);
+		assertEquals("Patient", bundle.getEntry().get(0).getResource().getIdElement().getResourceType());
+		assertEquals("Patient", bundle.getEntry().get(1).getResource().getIdElement().getResourceType());
+		assertEquals("Organization", bundle.getEntry().get(2).getResource().getIdElement().getResourceType());
+
+		// Load the next page
+		bundle = myClient
+			.loadPage()
+			.next(bundle)
+			.execute();
+
+		assertEquals("Patient", bundle.getEntry().get(0).getResource().getIdElement().getResourceType());
+		assertEquals("Patient", bundle.getEntry().get(1).getResource().getIdElement().getResourceType());
+		assertEquals("Organization", bundle.getEntry().get(2).getResource().getIdElement().getResourceType());
+		assertEquals(10, bundle.getTotalElement().getValue());
+	}
+
+	@Test
+	public void testIncludeWithNullMaxIncludesToLoad() {
+		myStorageSettings.setMaximumIncludesToLoadPerPage(null);
+		Organization org = new Organization();
+		org.setName("ORG");
+		IIdType orgId = myOrganizationDao.create(org, mySrd).getId().toUnqualifiedVersionless();
+
+		Patient pt = new Patient();
+		pt.getManagingOrganization().setReference(orgId.getValue());
+		pt.addName().setFamily("FAM");
+		myPatientDao.create(pt, mySrd);
+
+		Bundle bundle = myClient
+			.search()
+			.forResource(Patient.class)
+			.include(Patient.INCLUDE_ORGANIZATION)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		ourLog.debug(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(bundle));
+
+		assertThat(bundle.getEntry()).hasSize(2);
+		assertEquals("Patient", bundle.getEntry().get(0).getResource().getIdElement().getResourceType());
+		assertEquals("Organization", bundle.getEntry().get(1).getResource().getIdElement().getResourceType());
+	}
+
+	@Test
+	public void testIncludeWithExternalReferences() {
+		myStorageSettings.setAllowExternalReferences(true);
+
+		Patient p = new Patient();
+		p.getManagingOrganization().setReference("http://example.com/Organization/123");
+		myClient.create().resource(p).execute();
+
+		Bundle b = myClient.search().forResource("Patient").include(Patient.INCLUDE_ORGANIZATION).returnBundle(Bundle.class).execute();
+		assertThat(b.getEntry()).hasSize(1);
+	}
+
+	@Test
+	public void testMetaOperationWithNoMetaParameter() {
+		Patient p = new Patient();
+		p.addName().setFamily("testMetaAddInvalid");
+		IIdType id = myClient.create().resource(p).execute().getId().toUnqualifiedVersionless();
+
+		//@formatter:off
+		String input = "<Parameters>\n" +
+			"  <meta>\n" +
+			"    <tag>\n" +
+			"      <system value=\"http://example.org/codes/tags\"/>\n" +
+			"      <code value=\"record-lost\"/>\n" +
+			"      <display value=\"Patient File Lost\"/>\n" +
+			"    </tag>\n" +
+			"  </meta>\n" +
+			"</Parameters>";
+		//@formatter:on
+
+		for (String operation : List.of("$meta-add", "$meta-delete")) {
+			myServer.fhirRequest("/Patient/" + id.getIdPart() + "/" + operation)
+					.post(input, Constants.CT_FHIR_XML)
+					.assertStatus(400)
+					.assertBodyContains("Input contains no parameter with name 'meta'");
+		}
+	}
+
+	@Test
+	public void testMetaOperations() {
+		String methodName = "testMetaOperations";
+
+		Patient pt = new Patient();
+		pt.addName().setFamily(methodName);
+		IIdType id = myClient.create().resource(pt).execute().getId().toUnqualifiedVersionless();
+
+		Meta meta = myClient.meta().get(Meta.class).fromResource(id).execute();
+		assertThat(meta.getTag()).isEmpty();
+
+		Meta inMeta = new Meta();
+		inMeta.addTag().setSystem("urn:system1").setCode("urn:code1");
+		meta = myClient.meta().add().onResource(id).meta(inMeta).execute();
+		assertThat(meta.getTag()).hasSize(1);
+
+		inMeta = new Meta();
+		inMeta.addTag().setSystem("urn:system1").setCode("urn:code1");
+		meta = myClient.meta().delete().onResource(id).meta(inMeta).execute();
+		assertThat(meta.getTag()).isEmpty();
+
+	}
+
+	@Test
+	public void testMetadata() {
+		myServer.fhirRequest("/metadata").get()
+				.assertStatus(200)
+				.assertBodyContains("THIS IS THE DESC");
+	}
+
+	@SuppressWarnings("unused")
+	@Test
+	public void testMetadataSuperParamsAreIncluded() {
+		StructureDefinition p = new StructureDefinition();
+		p.setAbstract(true);
+		p.setUrl("http://example.com/foo");
+		IIdType id = myClient.create().resource(p).execute().getId().toUnqualifiedVersionless();
+
+		Bundle resp = myClient
+			.search()
+			.forResource(StructureDefinition.class)
+			.where(StructureDefinition.URL.matches().value("http://example.com/foo"))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertEquals(1, resp.getTotal());
+	}
+
+	@Test
+	public void testParseAndEncodeExtensionWithValueWithExtension() {
+		String input = "<Patient xmlns=\"http://hl7.org/fhir\">\n" +
+			"    <extension url=\"https://purl.org/elab/fhir/network/StructureDefinition/1/BirthWeight\">\n" +
+			"       <valueDecimal>\n" +
+			"          <extension url=\"http://www.hl7.org/fhir/extension-data-absent-reason.html\">\n" +
+			"            <valueCoding>\n" +
+			"                <system value=\"http://hl7.org/fhir/ValueSet/birthweight\"/>\n" +
+			"                <code value=\"Underweight\"/>\n" +
+			"                <userSelected value=\"false\"/>\n" +
+			"            </valueCoding>\n" +
+			"          </extension>\n" +
+			"       </valueDecimal>\n" +
+			"    </extension>\n" +
+			"    <identifier>\n" +
+			"       <system value=\"https://purl.org/elab/fhir/network/StructureDefinition/1/EuroPrevallStudySubjects\"/>\n" +
+			"       <value value=\"1\"/>\n" +
+			"    </identifier>\n" +
+			"    <gender value=\"female\"/>\n" +
+			"</Patient>";
+
+		String newIdString = myServer.fhirRequest("/Patient")
+			.post(input, Constants.CT_FHIR_XML)
+			.assertStatus(201)
+			.getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Patient/");
+		IdType id = new IdType(newIdString);
+
+		myServer.fhirRequest("/Patient/" + id.getIdPart() + "?_pretty=true")
+				.get()
+				.assertStatus(200)
+				.assertBodyContains("Underweight");
+	}
+
+	@Test
+	public void testPatchUsingJsonPatch() {
+		String methodName = "testPatchUsingJsonPatch";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String prefer = Constants.HEADER_PREFER_RETURN + '=' + Constants.HEADER_PREFER_RETURN_OPERATION_OUTCOME;
+		String patchText = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		myServer.fhirRequest("/Patient/" + pid1.getIdPart())
+				.withHeader(Constants.HEADER_PREFER, prefer)
+				.patch(patchText)
+				.assertStatus(200)
+				.assertBodyContains("<OperationOutcome", "INFORMATION");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertFalse(newPt.getActive());
+	}
+
+	@Test
+	public void testPatchUsingJsonPatchWithContentionCheckBad() {
+		String methodName = "testPatchUsingJsonPatchWithContentionCheckBad";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String path = "/Patient/" + pid1.getIdPart();
+		myServer.fhirRequest(path)
+				.withHeader(Constants.HEADER_IF_MATCH, "W/\"9\"")
+				.patch("[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]")
+				.assertStatus(409)
+				.assertBodyContains(
+					"<OperationOutcome",
+					"<diagnostics value=\"" + Msg.code(550) + Msg.code(974) + "Version 9 is not the most recent version of this resource, unable to apply patch\"/>");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("1", newPt.getIdElement().getVersionIdPart());
+		assertTrue(newPt.getActive());
+	}
+
+	@Test
+	public void testPatchUsingJsonPatchWithContentionCheckGood() {
+		String methodName = "testPatchUsingJsonPatchWithContentionCheckGood";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String path = "/Patient/" + pid1.getIdPart();
+		String prefer = Constants.HEADER_PREFER_RETURN + '=' + Constants.HEADER_PREFER_RETURN_OPERATION_OUTCOME;
+		String patchText = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		myServer.fhirRequest(path)
+				.withHeader(Constants.HEADER_PREFER, prefer)
+				.withHeader(Constants.HEADER_IF_MATCH, "W/\"1\"")
+				.patch(patchText)
+				.assertStatus(200)
+				.assertBodyContains("<OperationOutcome", "INFORMATION");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertFalse(newPt.getActive());
+	}
+
+	@Test
+	public void testPatchUsingXmlPatch() {
+		String methodName = "testPatchUsingXmlPatch";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String patchString = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><diff xmlns:fhir=\"http://hl7.org/fhir\"><replace sel=\"fhir:Patient/fhir:active/@value\">false</replace></diff>";
+		String prefer = Constants.HEADER_PREFER_RETURN + '=' + Constants.HEADER_PREFER_RETURN_OPERATION_OUTCOME;
+		myServer.fhirRequest("/Patient/" + pid1.getIdPart())
+				.withHeader(Constants.HEADER_PREFER, prefer)
+				.patch(patchString, Constants.CT_XML_PATCH)
+				.assertStatus(200)
+				.assertBodyContains("<OperationOutcome", "INFORMATION");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertFalse(newPt.getActive());
+	}
+
+	@Test
+	public void testPreserveVersionsOnAuditEvent() {
+		// ehp: this test is riddled with logs to try to figure out why it fail intermittently
+		ourLog.info("AutoVersionReferenceAtPaths: {}", myStorageSettings.getAutoVersionReferenceAtPaths());
+		ourLog.info("DontStripVersionsFromReferencesAtPaths: {}", myFhirContext.getParserOptions().getDontStripVersionsFromReferencesAtPaths());
+
+		Organization org = new Organization();
+		org.setName("ORG");
+		IIdType orgId = myClient.create().resource(org).execute().getId();
+		assertEquals("1", orgId.getVersionIdPart());
+
+		Patient patient = new Patient();
+		patient.addIdentifier().setSystem("http://uhn.ca/mrns").setValue("100");
+		patient.getManagingOrganization().setReference(orgId.toUnqualified().getValue());
+		IIdType patientId = myClient.create().resource(patient).execute().getId();
+		assertEquals("1", patientId.getVersionIdPart());
+
+		AuditEvent ae = new org.hl7.fhir.r4.model.AuditEvent();
+		String unqualifiedReference = patientId.toUnqualified().getValue();
+		ourLog.info("patientId: {}", patientId.getValue());
+		ourLog.info("patientId.toUnqualified(): {}", patientId.toUnqualified().getValue());
+		ourLog.info("patientId.toVersionless(): {}", patientId.toVersionless().getValue());
+		ourLog.info("patientId.toUnqualifiedVersionless(): {}", patientId.toUnqualifiedVersionless().getValue());
+		ourLog.info("Setting reference to: {}", unqualifiedReference);
+		ae.addEntity().getWhat().setReference(unqualifiedReference);
+		ourLog.info("BEFORE CREATE - AuditEvent reference: {}", ae.getEntityFirstRep().getWhat().getReference());
+		IIdType aeId = myClient.create().resource(ae).execute().getId();
+		ourLog.info("AFTER CREATE - AuditEvent reference in returned resource: {}", ae.getEntityFirstRep().getWhat().getReference());
+		assertEquals("1", aeId.getVersionIdPart());
+
+		patient = myClient.read().resource(Patient.class).withId(patientId).execute();
+		assertTrue(patient.getManagingOrganization().getReferenceElement().hasIdPart());
+		assertFalse(patient.getManagingOrganization().getReferenceElement().hasVersionIdPart());
+
+		ae = myClient.read().resource(AuditEvent.class).withId(aeId.toUnqualifiedVersionless()).execute();
+
+		String reference = ae.getEntityFirstRep().getWhat().getReference();
+		IIdType referenceElement = ae.getEntityFirstRep().getWhat().getReferenceElement();
+		ourLog.info("AuditEvent reference: {}", reference);
+		ourLog.info("Reference hasIdPart: {}", referenceElement.hasIdPart());
+		ourLog.info("Reference hasVersionIdPart: {}", referenceElement.hasVersionIdPart());
+		ourLog.info("Reference getVersionIdPart: {}", referenceElement.getVersionIdPart());
+
+		assertTrue(ae.getEntityFirstRep().getWhat().getReferenceElement().hasIdPart(), ae.getEntityFirstRep().getWhat().getReference());
+		assertTrue(ae.getEntityFirstRep().getWhat().getReferenceElement().hasVersionIdPart(), ae.getEntityFirstRep().getWhat().getReference());
+	}
+
+	/**
+	 * See issue #52
+	 */
+	@Test
+	public void testProcedureRequestResources() {
+		IGenericClient client = myClient;
+
+		int initialSize = client.search().forResource(ServiceRequest.class).returnBundle(Bundle.class).execute().getEntry().size();
+
+		ServiceRequest res = new ServiceRequest();
+		res.addIdentifier().setSystem("urn:foo").setValue("123");
+
+		client.create().resource(res).execute();
+
+		int newSize = client.search().forResource(ServiceRequest.class).returnBundle(Bundle.class).execute().getEntry().size();
+
+		assertEquals(1, newSize - initialSize);
+
+	}
+
+	/**
+	 * Test for issue #60
+	 */
+	@Test
+	public void testReadAllInstancesOfType() {
+		Patient pat;
+
+		pat = new Patient();
+		pat.addIdentifier().setSystem("urn:system").setValue("testReadAllInstancesOfType_01");
+		myClient.create().resource(pat).prettyPrint().encodedXml().execute();
+
+		pat = new Patient();
+		pat.addIdentifier().setSystem("urn:system").setValue("testReadAllInstancesOfType_02");
+		myClient.create().resource(pat).prettyPrint().encodedXml().execute();
+
+		{
+			Bundle returned = myClient.search().forResource(Patient.class).encodedXml().returnBundle(Bundle.class).execute();
+			assertThat(returned.getEntry()).hasSizeGreaterThan(1);
+			assertEquals(BundleType.SEARCHSET, returned.getType());
+		}
+		{
+			Bundle returned = myClient.search().forResource(Patient.class).encodedJson().returnBundle(Bundle.class).execute();
+			assertThat(returned.getEntry()).hasSizeGreaterThan(1);
+		}
+	}
+
+	@Test
+	public void testRetrieveMissingVersionsDoesntCrashHistory() {
+		Patient p1 = new Patient();
+		p1.setActive(true);
+		final IIdType id1 = myClient.create().resource(p1).execute().getId();
+
+		Patient p2 = new Patient();
+		p2.setActive(false);
+		IIdType id2 = myClient.create().resource(p2).execute().getId();
+
+		new TransactionTemplate(myTxManager).executeWithoutResult(status -> {
+			ResourceHistoryTable version = myResourceHistoryTableDao.findForIdAndVersion(JpaPidFk.fromId(id1.getIdPartAsLong(), null), 1);
+			myResourceHistoryTableDao.delete(version);
+		});
+
+		Bundle bundle = myClient.history().onServer().returnBundle(Bundle.class).execute();
+		assertEquals(1, bundle.getTotal());
+		assertThat(bundle.getEntry()).hasSize(1);
+		assertEquals(id2.getIdPart(), bundle.getEntry().get(0).getResource().getIdElement().getIdPart());
+	}
+
+	@Test
+	public void testRetrieveMissingVersionsDoesntCrashSearch() {
+		Patient p1 = new Patient();
+		p1.setActive(true);
+		final IIdType id1 = myClient.create().resource(p1).execute().getId();
+
+		Patient p2 = new Patient();
+		p2.setActive(false);
+		IIdType id2 = myClient.create().resource(p2).execute().getId();
+
+		myCaptureQueriesListener.clear();
+		new TransactionTemplate(myTxManager).executeWithoutResult(status -> {
+			ResourceHistoryTable version = myResourceHistoryTableDao.findForIdAndVersion(JpaPidFk.fromId(id1.getIdPartAsLong(), null), 1);
+			myResourceHistoryTableDao.delete(version);
+		});
+
+		myCaptureQueriesListener.logAllQueriesForCurrentThread();
+
+		Bundle bundle = myClient
+			.search()
+			.forResource("Patient")
+			.returnBundle(Bundle.class)
+			.execute();
+		ourLog.debug("Result: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(bundle));
+		assertThat(bundle.getEntry()).hasSize(1);
+			assertEquals(id2.getIdPart(), bundle.getEntry().get(0).getResource().getIdElement().getIdPart());
+	}
+
+	@Test
+	public void testSaveAndRetrieveExistingNarrativeJson() {
+		Patient p1 = new Patient();
+		p1.getText().setStatus(NarrativeStatus.GENERATED);
+		p1.getText().getDiv().setValueAsString("<div>HELLO WORLD</div>");
+		p1.addIdentifier().setSystem("urn:system").setValue("testSaveAndRetrieveExistingNarrative01");
+
+		IIdType newId = myClient.create().resource(p1).encodedJson().execute().getId();
+
+		Patient actual = myClient.read().resource(Patient.class).withId(newId).encodedJson().execute();
+		assertEquals("<div xmlns=\"http://www.w3.org/1999/xhtml\">HELLO WORLD</div>", actual.getText().getDiv().getValueAsString());
+	}
+
+	@Test
+	public void testSaveAndRetrieveExistingNarrativeXml() {
+		Patient p1 = new Patient();
+		p1.getText().setStatus(NarrativeStatus.GENERATED);
+		p1.getText().getDiv().setValueAsString("<div>HELLO WORLD</div>");
+		p1.addIdentifier().setSystem("urn:system").setValue("testSaveAndRetrieveExistingNarrative01");
+
+		IIdType newId = myClient.create().resource(p1).encodedXml().execute().getId();
+
+		Patient actual = myClient.read().resource(Patient.class).withId(newId).encodedXml().execute();
+		assertEquals("<div xmlns=\"http://www.w3.org/1999/xhtml\">HELLO WORLD</div>", actual.getText().getDiv().getValueAsString());
+	}
+
+	@Test
+	public void testSaveAndRetrieveResourceWithExtension() {
+		Patient nextPatient = new Patient();
+		nextPatient.setId("Patient/B");
+		nextPatient
+			.addExtension()
+			.setUrl("http://foo")
+			.setValue(new Reference("Practitioner/A"));
+
+		myClient.update().resource(nextPatient).execute();
+
+		Patient p = myClient.read().resource(Patient.class).withId("B").execute();
+
+		String encoded = myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(p);
+		ourLog.info(encoded);
+
+		assertThat(encoded).contains("http://foo");
+	}
+
+	@Test
+	public void testSaveAndRetrieveWithContained() {
+		Patient p1 = new Patient();
+		p1.addIdentifier().setSystem("urn:system:rpr4").setValue("testSaveAndRetrieveWithContained01");
+
+		Organization o1 = new Organization();
+		o1.addIdentifier().setSystem("urn:system:rpr4").setValue("testSaveAndRetrieveWithContained02");
+
+		p1.getManagingOrganization().setResource(o1);
+
+		IIdType newId = myClient.create().resource(p1).execute().getId();
+
+		Patient actual = myClient.read(Patient.class, new UriDt(newId.getValue()));
+		assertThat(actual.getContained()).hasSize(1);
+
+		Bundle b = myClient
+			.search()
+			.forResource("Patient")
+			.where(Patient.IDENTIFIER.exactly().systemAndCode("urn:system:rpr4", "testSaveAndRetrieveWithContained01"))
+			.prettyPrint()
+			.returnBundle(Bundle.class)
+			.execute();
+		assertThat(b.getEntry()).hasSize(1);
+
+	}
+
+	@Test
+	public void testSaveAndRetrieveWithoutNarrative() {
+		Patient p1 = new Patient();
+		p1.getText().setDivAsString("<div><td>Identifier</td><td>testSearchByResourceChain01</td></div>");
+		p1.addIdentifier().setSystem("urn:system").setValue("testSearchByResourceChain01");
+
+		IdType newId = (IdType) myClient.create().resource(p1).execute().getId();
+
+		Patient actual = myClient.read(Patient.class, newId.getIdPart());
+		assertThat(actual.getText().getDiv().getValueAsString()).contains("<td>Identifier</td><td>testSearchByResourceChain01</td>");
+	}
+
+	@Test
+	public void testTerminologyWithCompleteCs_Expand() {
+
+		CodeSystem cs = new CodeSystem();
+		cs.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+		cs.setUrl("http://cs");
+		CodeSystem.ConceptDefinitionComponent a = cs.addConcept()
+			.setCode("A");
+		a.addConcept().setCode("A1");
+		a.addConcept().setCode("A2");
+		CodeSystem.ConceptDefinitionComponent b = cs.addConcept()
+			.setCode("B");
+		b.addConcept().setCode("B1");
+		b.addConcept().setCode("B2");
+		myClient.create().resource(cs).execute();
+
+		ValueSet vs = new ValueSet();
+		vs.setUrl("http://vs");
+		vs.getCompose()
+			.addInclude()
+			.setSystem("http://cs")
+			.addFilter()
+			.setProperty("concept")
+			.setOp(ValueSet.FilterOperator.ISA)
+			.setValue("A");
+		IIdType vsid = myClient.create().resource(vs).execute().getId().toUnqualifiedVersionless();
+
+		myServer.fhirRequest("/" + vsid.getValue() + "/$expand")
+				.get()
+				.assertStatus(200)
+				.assertBodyContains("\"A\"", "\"A1\"")
+				.assertBodyDoesNotContain("\"B\"", "\"B1\"");
+	}
+
+	@Test
+	public void testEncounterWithReason() {
+		Encounter enc = new Encounter();
+		enc.addReasonCode()
+			.addCoding().setSystem("http://myorg").setCode("hugs").setDisplay("Hugs for better wellness");
+		enc.getPeriod().setStartElement(new DateTimeType("2012"));
+		IIdType id = myClient.create().resource(enc).execute().getId().toUnqualifiedVersionless();
+
+		enc = myClient.read().resource(Encounter.class).withId(id).execute();
+		assertEquals("hugs", enc.getReasonCodeFirstRep().getCodingFirstRep().getCode());
+	}
+
+	@Test
+	public void testTerminologyWithCompleteCs_SearchForConceptIn() {
+
+		CodeSystem cs = new CodeSystem();
+		cs.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+		cs.setUrl("http://cs");
+		CodeSystem.ConceptDefinitionComponent a = cs.addConcept()
+			.setCode("A");
+		a.addConcept().setCode("A1");
+		a.addConcept().setCode("A2");
+		CodeSystem.ConceptDefinitionComponent b = cs.addConcept()
+			.setCode("B");
+		b.addConcept().setCode("B1");
+		b.addConcept().setCode("B2");
+		myClient.create().resource(cs).execute();
+
+		ValueSet vs = new ValueSet();
+		vs.setUrl("http://vs");
+		vs.getCompose()
+			.addInclude()
+			.setSystem("http://cs")
+			.addFilter()
+			.setProperty("concept")
+			.setOp(ValueSet.FilterOperator.ISA)
+			.setValue("A");
+		myClient.create().resource(vs).execute().getId().toUnqualifiedVersionless();
+
+		Observation obs = new Observation();
+		obs.getCode().addCoding().setSystem("http://cs").setCode("A1");
+		obs.setValue(new StringType("OBS1"));
+		obs.setStatus(ObservationStatus.FINAL);
+		myClient.create().resource(obs).execute();
+
+		Observation obs2 = new Observation();
+		obs2.getCode().addCoding().setSystem("http://cs").setCode("B1");
+		obs2.setStatus(ObservationStatus.FINAL);
+		obs2.setValue(new StringType("OBS2"));
+		myClient.create().resource(obs2).execute();
+
+		myServer.fhirRequest("/Observation?code:in=http://vs")
+				.get()
+				.assertStatus(200)
+				.assertBodyContains("\"OBS1\"")
+				.assertBodyDoesNotContain("\"OBS2\"");
+	}
+
+	@Test
+	public void testCodeInWithLargeValueSet() throws IOException {
+		createCodeSystem(
+			withUrl("http://hl7.org/fhir/sid/icd-10"),
+			withVersion("1.0"),
+			withCodeSystemContent("not-present")
+		);
+
+		//Given: We load a large codesystem
+		myStorageSettings.setMaximumExpansionSize(1000);
+		ZipCollectionBuilder zipCollectionBuilder = new ZipCollectionBuilder();
+		zipCollectionBuilder.addFileZip("/largecodesystem/", "concepts.csv");
+		zipCollectionBuilder.addFileZip("/largecodesystem/", "hierarchy.csv");
+		myTerminologyTestHelper.startImportCustomJobAndWaitForCompletion("http://hl7.org/fhir/sid/icd-10", "1.0", zipCollectionBuilder);
+
+		//And Given: We create two valuesets based on the CodeSystem, one with >1000 codes and one with <1000 codes
+		ValueSet valueSetOver1000 = loadResourceFromClasspath(ValueSet.class, "/largecodesystem/ValueSetV.json");
+		ValueSet valueSetUnder1000 = loadResourceFromClasspath(ValueSet.class, "/largecodesystem/ValueSetV1.json");
+		myClient.update().resource(valueSetOver1000).execute();
+		myClient.update().resource(valueSetUnder1000).execute();
+		myBatch2JobHelper.awaitNoJobsRunning();
+
+		//When: We create matching and non-matching observations for the valuesets
+		Observation matchingObs = loadResourceFromClasspath(Observation.class, "/largecodesystem/observation-matching.json");
+		Observation nonMatchingObs = loadResourceFromClasspath(Observation.class, "/largecodesystem/observation-non-matching.json");
+		myClient.update().resource(matchingObs).execute();
+		myClient.update().resource(nonMatchingObs).execute();
+
+		//Then: Results should return the same, regardless of count of concepts in the ValueSet
+		assertOneResult(myClient.search().byUrl("Observation?code:in=http://smilecdr.com/V1").returnBundle(Bundle.class).execute());
+		assertOneResult(myClient.search().byUrl("Observation?code:not-in=http://smilecdr.com/V1").returnBundle(Bundle.class).execute());
+		assertOneResult(myClient.search().byUrl("Observation?code:in=http://smilecdr.com/V").returnBundle(Bundle.class).execute());
+		assertOneResult(myClient.search().byUrl("Observation?code:not-in=http://smilecdr.com/V").returnBundle(Bundle.class).execute());
+
+		myStorageSettings.setMaximumExpansionSize(new JpaStorageSettings().getMaximumExpansionSize());
+	}
+
+	private void assertOneResult(Bundle theResponse) {
+		assertThat(theResponse.getEntry()).hasSize(1);
+	}
+
+	@Test
+	public void testSearchBundleDoesntIncludeTextElement() {
+		myServer.fhirRequest("/Patient?_format=json")
+				.get()
+				.assertStatus(200)
+				.assertBodyDoesNotContain("\"text\",\"type\"");
+	}
+
+	@Test
+	public void testSearchByExtendedChars() {
+		for (int i = 0; i < 10; i++) {
+			Patient p = new Patient();
+			p.addName().setFamily("Jernelöv");
+			p.addIdentifier().setValue("ID" + i);
+			myPatientDao.create(p, mySrd);
+		}
+
+		Bundle b = myServer.fhirRequest("/Patient")
+				.withQueryParam("name", "Jernelöv")
+				.withQueryParam("_count", "5")
+				.withQueryParam("_pretty", "true")
+				.get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+
+		assertThat(b.getLink("self").getUrl()).isEqualTo("http://localhost:" + myPort + "/fhir/context/Patient?_count=5&_pretty=true&name=Jernel%C3%B6v");
+
+		Patient p = (Patient) b.getEntry().get(0).getResource();
+		assertThat(p.getName().get(0).getFamily()).isEqualTo("Jernelöv");
+	}
+
+	@Test
+	public void testSearchByIdOr() {
+		IIdType id1;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			id1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		IIdType id2;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			id2 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		Bundle found;
+
+		found = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(IAnyResource.RES_ID.exactly().systemAndValues(null, id1.getIdPart(), id2.getIdPart()))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(toUnqualifiedVersionlessIds(found)).containsExactlyInAnyOrder(id1, id2);
+
+		found = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(IAnyResource.RES_ID.exactly().systemAndValues(null, Arrays.asList(id1.getIdPart(), id2.getIdPart(), "FOOOOO")))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(toUnqualifiedVersionlessIds(found)).containsExactlyInAnyOrder(id1, id2);
+
+		found = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(IAnyResource.RES_ID.exactly().systemAndCode(null, id1.getIdPart()))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(toUnqualifiedVersionlessIds(found)).containsExactlyInAnyOrder(id1);
+
+		found = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(IAnyResource.RES_ID.exactly().codes(id1.getIdPart(), id2.getIdPart()))
+			.and(IAnyResource.RES_ID.exactly().code(id1.getIdPart()))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(toUnqualifiedVersionlessIds(found)).containsExactlyInAnyOrder(id1);
+
+		found = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(IAnyResource.RES_ID.exactly().codes(Arrays.asList(id1.getIdPart(), id2.getIdPart(), "FOOOOO")))
+			.and(IAnyResource.RES_ID.exactly().code(id1.getIdPart()))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(toUnqualifiedVersionlessIds(found)).containsExactlyInAnyOrder(id1);
+
+		found = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(IAnyResource.RES_ID.exactly().codes(id1.getIdPart(), id2.getIdPart(), "FOOO"))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(toUnqualifiedVersionlessIds(found)).containsExactlyInAnyOrder(id1, id2);
+
+		found = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(IAnyResource.RES_ID.exactly().codes("FOOO"))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(toUnqualifiedVersionlessIds(found)).isEmpty();
+
+	}
+
+	@Test
+	public void testSearchByIdForDeletedResourceWithClientAssignedId() {
+		// Create with client assigned ID
+		Patient p = new Patient();
+		String patientId = "AAA";
+		p.setId(patientId);
+
+		MethodOutcome outcome = myClient.update().resource(p).execute();
+		assertTrue(outcome.getCreated());
+
+		Patient createdPatient = (Patient) outcome.getResource();
+
+		// Search
+		Bundle search1 = (Bundle) myClient.search()
+			.forResource(Patient.class)
+			.where(Patient.RES_ID.exactly().identifier(patientId))
+			.execute();
+
+		assertEquals(1, search1.getTotal());
+		assertEquals(patientId, search1.getEntry().get(0).getResource().getIdElement().getIdPart());
+
+		// Delete
+		outcome = myClient.delete().resource(createdPatient).execute();
+		assertNull(outcome.getResource());
+
+		// Search
+		Bundle search2 = (Bundle) myClient.search()
+			.forResource(Patient.class)
+			.where(Patient.RES_ID.exactly().identifier(patientId))
+			.execute();
+
+		assertTrue(CollectionUtils.isEmpty(search2.getEntry()));
+		assertEquals(0, search2.getTotal());
+	}
+
+	@Test
+	public void testSearchByIdForDeletedResourceWithServerAssignedId() {
+		// Create with server assigned ID
+		Patient p = new Patient();
+		MethodOutcome outcome = myClient.create().resource(p).execute();
+		assertTrue(outcome.getCreated());
+
+		Patient createdPatient = (Patient) outcome.getResource();
+		String patientId = createdPatient.getIdElement().getIdPart();
+
+		// Search
+		Bundle search1 = (Bundle) myClient.search()
+			.forResource(Patient.class)
+			.where(Patient.RES_ID.exactly().identifier(patientId))
+			.execute();
+
+		assertEquals(1, search1.getTotal());
+		assertEquals(patientId, search1.getEntry().get(0).getResource().getIdElement().getIdPart());
+
+		// Delete
+		outcome = myClient.delete().resource(createdPatient).execute();
+		assertNull(outcome.getResource());
+
+		// Search
+		Bundle search2 = (Bundle) myClient.search()
+			.forResource(Patient.class)
+			.where(Patient.RES_ID.exactly().identifier(patientId))
+			.execute();
+
+		assertTrue(CollectionUtils.isEmpty(search2.getEntry()));
+		assertEquals(0, search2.getTotal());
+	}
+
+	@Test
+	public void testSearchByIdentifier() {
+		Patient p1 = new Patient();
+		p1.addIdentifier().setSystem("urn:system").setValue("testSearchByIdentifier01");
+		p1.addName().setFamily("testSearchByIdentifierFamily01").addGiven("testSearchByIdentifierGiven01");
+		IdType p1Id = (IdType) myClient.create().resource(p1).execute().getId();
+
+		Patient p2 = new Patient();
+		p2.addIdentifier().setSystem("urn:system").setValue("testSearchByIdentifier02");
+		p2.addName().setFamily("testSearchByIdentifierFamily01").addGiven("testSearchByIdentifierGiven02");
+		myClient.create().resource(p2).execute();
+
+		//@formatter:off
+		Bundle actual = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(Patient.IDENTIFIER.exactly().systemAndCode("urn:system", "testSearchByIdentifier01"))
+			.encodedJson()
+			.prettyPrint()
+			.returnBundle(Bundle.class)
+			.execute();
+		//@formatter:on
+
+		assertThat(actual.getEntry()).hasSize(1);
+		assertEquals(myServerBase + "/Patient/" + p1Id.getIdPart(), actual.getEntry().get(0).getFullUrl());
+		assertEquals(p1Id.getIdPart(), actual.getEntry().get(0).getResource().getIdElement().getIdPart());
+		assertEquals(SearchEntryMode.MATCH, actual.getEntry().get(0).getSearch().getModeElement().getValue());
+	}
+
+	@Test
+	public void testSearchByIdentifierWithoutSystem() {
+
+		Patient p1 = new Patient();
+		p1.addIdentifier().setValue("testSearchByIdentifierWithoutSystem01");
+		IdType p1Id = (IdType) myClient.create().resource(p1).execute().getId();
+
+		//@formatter:off
+		Bundle actual = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(Patient.IDENTIFIER.exactly().systemAndCode(null, "testSearchByIdentifierWithoutSystem01"))
+			.encodedJson()
+			.prettyPrint()
+			.returnBundle(Bundle.class)
+			.execute();
+		//@formatter:on
+		assertThat(actual.getEntry()).hasSize(1);
+		assertEquals(p1Id.getIdPart(), actual.getEntry().get(0).getResource().getIdElement().getIdPart());
+
+	}
+
+	@Test
+	public void testSearchByLastUpdated() {
+		String methodName = "testSearchByLastUpdated";
+
+		Patient p = new Patient();
+		p.addName().setFamily(methodName + "1");
+		IIdType pid1 = myClient.create().resource(p).execute().getId().toUnqualifiedVersionless();
+
+		long time1 = System.currentTimeMillis();
+
+		Patient p2 = new Patient();
+		p2.addName().setFamily(methodName + "2");
+		IIdType pid2 = myClient.create().resource(p2).execute().getId().toUnqualifiedVersionless();
+
+		myCaptureQueriesListener.clear();
+
+		assertThat(searchAndReturnVersionlessIds("/Patient?_lastUpdated=lt" + new InstantType(new Date(time1)).getValueAsString()))
+			.containsExactlyInAnyOrder(pid1);
+
+		myCaptureQueriesListener.logSelectQueries();
+
+		assertThat(searchAndReturnVersionlessIds("/Patient?_lastUpdated=gt" + new InstantType(new Date(time1)).getValueAsString()))
+			.containsExactlyInAnyOrder(pid2);
+	}
+
+	/**
+	 * The {@link IIdType} counterpart of
+	 * {@link #searchAndReturnUnqualifiedVersionlessIdValues(String)}.
+	 */
+	private List<IIdType> searchAndReturnVersionlessIds(String thePath) {
+		Bundle bundle = myServer.fhirRequest(thePath).get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+		List<IIdType> ids = toUnqualifiedVersionlessIds(bundle);
+		ourLog.info(ids.toString());
+		return ids;
+	}
+
+	/**
+	 * https://chat.fhir.org/#narrow/stream/implementers/topic/Internal.20error.2C.20when.20executing.20the.20following.20query.20on.20HAPI
+	 */
+	@Test
+	public void testSearchByLastUpdatedGe() {
+		Patient p2 = new Patient();
+		p2.setId("P2");
+		p2.addName().setFamily("P2");
+		myClient.update().resource(p2).execute().getId().toUnqualifiedVersionless();
+
+		Practitioner pract = new Practitioner();
+		pract.setId("PRAC");
+		pract.addName().setFamily("PRACT");
+		myClient.update().resource(pract).execute().getId().toUnqualifiedVersionless();
+
+		Encounter enc = new Encounter();
+		enc.setId("E2");
+		enc.setStatus(EncounterStatus.ARRIVED);
+		enc.setPeriod(new Period().setStart(new Date()).setEnd(new Date()));
+		enc.getSubject().setReference("Patient/P2");
+		enc.addParticipant().getIndividual().setReference("Practitioner/PRAC");
+		myClient.update().resource(enc).execute().getId().toUnqualifiedVersionless();
+
+		assertThat(searchOkAndReturnUnqualifiedVersionlessIdValues("/Encounter?patient=P2&date=ge2017-01-01&_include:recurse=Encounter:practitioner&_lastUpdated=ge2017-11-10"))
+			.containsExactlyInAnyOrder("Practitioner/PRAC", "Encounter/E2");
+
+		assertThat(searchOkAndReturnUnqualifiedVersionlessIdValues("/Encounter?patient=P2&date=ge2017-01-01&_include:recurse=Encounter:practitioner&_lastUpdated=ge2099-11-10"))
+			.isEmpty();
+	}
+
+	@Test
+	public void testSearchByReferenceIds() {
+		Organization o1 = new Organization();
+		o1.setName("testSearchByResourceChainName01");
+		IIdType o1id = myClient.create().resource(o1).execute().getId().toUnqualifiedVersionless();
+		Organization o2 = new Organization();
+		o2.setName("testSearchByResourceChainName02");
+		IIdType o2id = myClient.create().resource(o2).execute().getId().toUnqualifiedVersionless();
+
+		Patient p1 = new Patient();
+		p1.addIdentifier().setSystem("urn:system").setValue("testSearchByReferenceIds01");
+		p1.addName().setFamily("testSearchByReferenceIdsFamily01").addGiven("testSearchByReferenceIdsGiven01");
+		p1.setManagingOrganization(new Reference(o1id.toUnqualifiedVersionless()));
+		IIdType p1Id = myClient.create().resource(p1).execute().getId();
+
+		Patient p2 = new Patient();
+		p2.addIdentifier().setSystem("urn:system").setValue("testSearchByReferenceIds02");
+		p2.addName().setFamily("testSearchByReferenceIdsFamily02").addGiven("testSearchByReferenceIdsGiven02");
+		p2.setManagingOrganization(new Reference(o2id.toUnqualifiedVersionless()));
+		IIdType p2Id = myClient.create().resource(p2).execute().getId();
+
+		//@formatter:off
+		Bundle actual = myClient.search()
+			.forResource(Patient.class)
+			.where(Patient.ORGANIZATION.hasAnyOfIds(Arrays.asList(o1id.getIdPart(), o2id.getIdPart())))
+			.encodedJson().prettyPrint().returnBundle(Bundle.class).execute();
+		//@formatter:on
+		Set<String> expectedIds = new HashSet<>();
+		expectedIds.add(p1Id.getIdPart());
+		expectedIds.add(p2Id.getIdPart());
+		Set<String> actualIds = new HashSet<>();
+		for (BundleEntryComponent ele : actual.getEntry()) {
+			actualIds.add(ele.getResource().getIdElement().getIdPart());
+		}
+		assertThat(actualIds).as("Expects to retrieve the 2 patients which reference the two different organizations").isEqualTo(expectedIds);
+	}
+
+	@Test
+	public void testSearchByResourceChain() {
+
+		Organization o1 = new Organization();
+		o1.setName("testSearchByResourceChainName01");
+		IdType o1id = (IdType) myClient.create().resource(o1).execute().getId().toUnqualifiedVersionless();
+
+		Patient p1 = new Patient();
+		p1.addIdentifier().setSystem("urn:system").setValue("testSearchByResourceChain01");
+		p1.addName().setFamily("testSearchByResourceChainFamily01").addGiven("testSearchByResourceChainGiven01");
+		p1.setManagingOrganization(new Reference(o1id.toUnqualifiedVersionless()));
+		IdType p1Id = (IdType) myClient.create().resource(p1).execute().getId();
+
+		//@formatter:off
+		Bundle actual = myClient.search()
+			.forResource(Patient.class)
+			.where(Patient.ORGANIZATION.hasId(o1id.getIdPart()))
+			.encodedJson().prettyPrint().returnBundle(Bundle.class).execute();
+		//@formatter:on
+		assertThat(actual.getEntry()).hasSize(1);
+		assertEquals(p1Id.getIdPart(), actual.getEntry().get(0).getResource().getIdElement().getIdPart());
+
+		//@formatter:off
+		actual = myClient.search()
+			.forResource(Patient.class)
+			.where(Patient.ORGANIZATION.hasId(o1id.getValue()))
+			.encodedJson().prettyPrint().returnBundle(Bundle.class).execute();
+		//@formatter:on
+		assertThat(actual.getEntry()).hasSize(1);
+		assertEquals(p1Id.getIdPart(), actual.getEntry().get(0).getResource().getIdElement().getIdPart());
+
+	}
+
+	@Test
+	public void testSearchInvalidParam() {
+		Patient patient = new Patient();
+		patient.addIdentifier().setSystem("urn:system").setValue("0");
+		patient.addName().setFamily("testSearchWithMixedParams").addGiven("Joe");
+		myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+
+		// should be subject._id
+		myServer.fhirRequest("/Observation?subject.id=FOO").get()
+				.assertStatus(400)
+				.assertBodyContains("Invalid parameter chain: subject.id");
+	}
+
+	@Test
+	public void testSearchLastUpdatedParamRp() {
+		String methodName = "testSearchLastUpdatedParamRp";
+
+		DateTimeType beforeAny = new DateTimeType(new Date(), TemporalPrecisionEnum.MILLI);
+		IIdType id1a;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			id1a = myClient.create().resource(patient).execute().getId().toUnqualifiedVersionless();
+		}
+		IIdType id1b;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("002");
+			patient.addName().setFamily(methodName + "XXXX").addGiven("Joe");
+			id1b = myClient.create().resource(patient).execute().getId().toUnqualifiedVersionless();
+		}
+
+		DateTimeType beforeR2 = new DateTimeType(new Date(), TemporalPrecisionEnum.MILLI);
+
+		IIdType id2;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("002");
+			patient.addName().setFamily(methodName).addGiven("John");
+			id2 = myClient.create().resource(patient).execute().getId().toUnqualifiedVersionless();
+		}
+
+		{
+			//@formatter:off
+			Bundle found = myClient.search()
+				.forResource(Patient.class)
+				.where(Patient.NAME.matches().value("testSearchLastUpdatedParamRp"))
+				.returnBundle(Bundle.class)
+				.execute();
+			//@formatter:on
+			List<IIdType> patients = toUnqualifiedVersionlessIds(found);
+			assertThat(patients).contains(id1a, id1b, id2);
+		}
+		{
+			//@formatter:off
+			Bundle found = myClient.search()
+				.forResource(Patient.class)
+				.where(Patient.NAME.matches().value("testSearchLastUpdatedParamRp"))
+				.lastUpdated(new DateRangeParam(beforeAny, null))
+				.returnBundle(Bundle.class)
+				.execute();
+			//@formatter:on
+			List<IIdType> patients = toUnqualifiedVersionlessIds(found);
+			assertThat(patients).contains(id1a, id1b, id2);
+		}
+		{
+			//@formatter:off
+			Bundle found = myClient.search()
+				.forResource(Patient.class)
+				.where(Patient.NAME.matches().value("testSearchLastUpdatedParamRp"))
+				.lastUpdated(new DateRangeParam(beforeR2, null))
+				.returnBundle(Bundle.class)
+				.execute();
+			//@formatter:on
+			List<IIdType> patients = toUnqualifiedVersionlessIds(found);
+			assertThat(patients).contains(id2);
+			AssertionsForInterfaceTypes.assertThat(patients).doesNotContainAnyElementsOf(List.of(id1a, id1b));
+		}
+		{
+			//@formatter:off
+			Bundle found = myClient.search()
+				.forResource(Patient.class)
+				.where(Patient.NAME.matches().value("testSearchLastUpdatedParamRp"))
+				.lastUpdated(new DateRangeParam(beforeAny, beforeR2))
+				.returnBundle(Bundle.class)
+				.execute();
+			//@formatter:on
+			List<IIdType> patients = toUnqualifiedVersionlessIds(found);
+			assertThat(patients).doesNotContain(id2);
+			assertThat(patients).contains(id1a, id1b);
+		}
+		{
+			//@formatter:off
+			Bundle found = myClient.search()
+				.forResource(Patient.class)
+				.where(Patient.NAME.matches().value("testSearchLastUpdatedParamRp"))
+				.lastUpdated(new DateRangeParam(null, beforeR2))
+				.returnBundle(Bundle.class)
+				.execute();
+			//@formatter:on
+			List<IIdType> patients = toUnqualifiedVersionlessIds(found);
+			assertThat(patients).doesNotContain(id2);
+			assertThat(patients).contains(id1a, id1b);
+		}
+	}
+
+	/**
+	 * See #441
+	 */
+	@Test
+	public void testSearchMedicationChain() {
+		Medication medication = new Medication();
+		medication.getCode().addCoding().setSystem("SYSTEM").setCode("04823543");
+		IIdType medId = myMedicationDao.create(medication, mySrd).getId().toUnqualifiedVersionless();
+
+		MedicationAdministration ma = new MedicationAdministration();
+		ma.setMedication(new Reference(medId));
+		IIdType moId = myMedicationAdministrationDao.create(ma, mySrd).getId().toUnqualifiedVersionless();
+
+		myServer.fhirRequest("/MedicationAdministration?medication.code=04823543")
+				.get()
+				.assertStatus(200)
+				.assertBodyContains(moId.getIdPart());
+	}
+
+	@Test()
+	public void testSearchNegativeNumbers() {
+		Observation o = new Observation();
+		o.setValue(new Quantity().setValue(new BigDecimal("-10")));
+		String oid1 = myObservationDao.create(o, mySrd).getId().toUnqualifiedVersionless().getValue();
+
+		Observation o2 = new Observation();
+		o2.setValue(new Quantity().setValue(new BigDecimal("-20")));
+		String oid2 = myObservationDao.create(o2, mySrd).getId().toUnqualifiedVersionless().getValue();
+
+		List<String> ids = searchOkAndReturnUnqualifiedVersionlessIdValues("/Observation?value-quantity=gt-15");
+		assertThat(ids).containsExactly(oid1);
+		assertThat(ids).doesNotContain(oid2);
+	}
+
+	@SuppressWarnings("unused")
+	@Test
+	public void testSearchPagingKeepsOldSearches() {
+		String methodName = "testSearchPagingKeepsOldSearches";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		for (int i = 1; i <= 20; i++) {
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue(Integer.toString(i));
+			patient.addName().setFamily("foo" + leftPad(Integer.toString(i), 2, '0')).addGiven("Joe");
+			myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		Set<String> linkNext = new HashSet<>();
+		for (int i = 0; i < 100; i++) {
+			Bundle bundle = myClient
+				.search()
+				.forResource(Patient.class)
+				.where(Patient.NAME.matches().value("foo"))
+				.count(5)
+				.sort(new SortSpec(Patient.SP_FAMILY, SortOrderEnum.ASC))
+				.returnBundle(Bundle.class).execute();
+			assertTrue(isNotBlank(bundle.getLink("next").getUrl()));
+			assertThat(bundle.getEntry()).hasSize(5);
+			List<String> familyNames = extractFamilyNamesFromPatientsInBundle(bundle);
+			assertThat(familyNames).containsExactly("foo01", "foo02", "foo03", "foo04", "foo05");
+			linkNext.add(bundle.getLink("next").getUrl());
+		}
+		assertThat(linkNext).hasSize(100);
+
+		logAllSearches();
+		logAllSearchResults();
+
+		int index = 0;
+		for (String nextLink : linkNext) {
+			ourLog.info("Fetching index {}", index++);
+			Bundle b = myClient.fetchResourceFromUrl(Bundle.class, nextLink);
+			assertThat(b.getEntry()).hasSize(5);
+			List<String> familyNames = extractFamilyNamesFromPatientsInBundle(b);
+			assertThat(familyNames).containsExactly("foo06", "foo07", "foo08", "foo09", "foo10");
+		}
+	}
+
+	private void testSearchReturnsResults(String search) {
+		Bundle bundle = myServer.fhirRequest(search).get().getBodyAsResource(Bundle.class);
+		assertThat(bundle.getEntry().size()).isPositive();
+	}
+
+	@Test
+	public void testSearchReturnsSearchDate() throws Exception {
+		Date before = new Date();
+		sleepAtLeast(10);
+
+		//@formatter:off
+		Bundle found = myClient
+			.search()
+			.forResource(Patient.class)
+			.prettyPrint()
+			.returnBundle(Bundle.class)
+			.execute();
+		//@formatter:on
+
+		sleepAtLeast(10);
+		Date after = new Date();
+
+		InstantType updated = found.getMeta().getLastUpdatedElement();
+		assertNotNull(updated);
+		Date value = updated.getValue();
+		assertNotNull(value);
+		ourLog.info(value.getTime() + "");
+		ourLog.info(before.getTime() + "");
+		assertTrue(value.after(before));
+		assertThat(value.before(after)).as(new InstantDt(value) + " should be before " + new InstantDt(after)).isTrue();
+	}
+
+	@Test
+	public void testSearchWithNormalizedQuantitySearchSupported() {
+
+		myStorageSettings.setNormalizedQuantitySearchLevel(NormalizedQuantitySearchLevel.NORMALIZED_QUANTITY_SEARCH_SUPPORTED);
+		IIdType pid0;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			pid0 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			CodeableConcept cc = obs.getCode();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValueElement(new DecimalType(125.12)).setUnit("CM").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("cm"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			CodeableConcept cc = obs.getCode();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValueElement(new DecimalType(13.45)).setUnit("DM").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("dm"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			CodeableConcept cc = obs.getCode();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValueElement(new DecimalType(1.45)).setUnit("M").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("m"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			CodeableConcept cc = obs.getCode();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValueElement(new DecimalType(25)).setUnit("CM").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("cm"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		// > 1m
+		String uri = "/Observation?code-value-quantity=http://" + UrlUtil.escapeUrlParam("loinc.org|2345-7$gt1|http://unitsofmeasure.org|m");
+		ourLog.info("uri = {}", uri);
+		List<String> ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		assertThat(ids).hasSize(3);
+
+		//>= 100cm
+		uri = "/Observation?code-value-quantity=http://" + UrlUtil.escapeUrlParam("loinc.org|2345-7$gt100|http://unitsofmeasure.org|cm");
+		ourLog.info("uri = {}", uri);
+		ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		assertThat(ids).hasSize(3);
+
+		//>= 10dm
+		uri = "/Observation?code-value-quantity=http://" + UrlUtil.escapeUrlParam("loinc.org|2345-7$gt10|http://unitsofmeasure.org|dm");
+		ourLog.info("uri = {}", uri);
+		ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		assertThat(ids).hasSize(3);
+	}
+
+	@Test
+	public void testSearchWithNormalizedQuantitySearchSupported_CombineUCUMOrNonUCUM() {
+
+		myStorageSettings.setNormalizedQuantitySearchLevel(NormalizedQuantitySearchLevel.NORMALIZED_QUANTITY_SEARCH_SUPPORTED);
+		IIdType pid0;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			pid0 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.setValue(new Quantity().setValueElement(new DecimalType(1)).setUnit("M").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("m"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.setValue(new Quantity().setValueElement(new DecimalType(13.45)).setUnit("DM").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("dm"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.setValue(new Quantity().setValueElement(new DecimalType(1.45)).setUnit("M").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("m"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.setValue(new Quantity().setValueElement(new DecimalType(100)).setUnit("CM").setSystem("http://foo").setCode("cm"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		String uri;
+		List<String> ids;
+
+		// With non-normalized
+		uri = "/Observation?value-quantity=" + UrlUtil.escapeUrlParam("100|http://unitsofmeasure.org|cm,100|http://foo|cm");
+		ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		assertThat(ids).hasSize(1);
+
+		// With normalized
+		uri = "/Observation?value-quantity=" + UrlUtil.escapeUrlParam("1|http://unitsofmeasure.org|m,100|http://foo|cm");
+		ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		assertThat(ids).hasSize(2);
+	}
+
+	@Test
+	public void testSearchWithNormalizedQuantitySearchSupported_DegreeFahrenheit() {
+
+		myStorageSettings.setNormalizedQuantitySearchLevel(NormalizedQuantitySearchLevel.NORMALIZED_QUANTITY_SEARCH_SUPPORTED);
+		IIdType pid0;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			pid0 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.setValue(new Quantity().setValueElement(new DecimalType(99.82)).setUnit("F").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("[degF]"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.setValue(new Quantity().setValueElement(new DecimalType(97.6)).setUnit("F").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("[degF]"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			// missing value
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.setValue(new Quantity().setUnit("CM").setSystem("http://foo").setCode("cm"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		myCaptureQueriesListener.clear();
+		Bundle returnedBundle = myClient
+			.search()
+			.forResource(Observation.class)
+			.where(Observation.VALUE_QUANTITY.withPrefix(ParamPrefixEnum.EQUAL).number("99.82").andUnits("http://unitsofmeasure.org", "[degF]"))
+			.prettyPrint()
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(returnedBundle.getEntry()).hasSize(1);
+
+		//-- check use normalized quantity table to search
+		String searchSql = myCaptureQueriesListener.getSelectQueries().get(0).getSql(true, true);
+		assertThat(searchSql).doesNotContain("HFJ_SPIDX_QUANTITY t0").contains("HFJ_SPIDX_QUANTITY_NRML");
+	}
+
+	@Test
+	public void testSearchReusesNoParams() {
+		List<IBaseResource> resources = new ArrayList<>();
+		for (int i = 0; i < 50; i++) {
+			Organization org = new Organization();
+			org.setName("HELLO");
+			resources.add(org);
+		}
+		myClient.transaction().withResources(resources).prettyPrint().encodedXml().execute();
+
+		myStorageSettings.setReuseCachedSearchResultsForMillis(10000L);
+
+		Bundle result1 = myClient
+			.search()
+			.forResource("Organization")
+			.returnBundle(Bundle.class)
+			.execute();
+
+		final String uuid1 = toSearchUuidFromLinkNext(result1);
+
+		Bundle result2 = myClient
+			.search()
+			.forResource("Organization")
+			.returnBundle(Bundle.class)
+			.execute();
+
+		final String uuid2 = toSearchUuidFromLinkNext(result2);
+
+		assertEquals(uuid1, uuid2);
+	}
+
+	@Test
+	public void testSearchReusesBeforeExpiry() {
+		List<IBaseResource> resources = new ArrayList<>();
+		for (int i = 0; i < 50; i++) {
+			Organization org = new Organization();
+			org.setName("HELLO");
+			resources.add(org);
+		}
+		myClient.transaction().withResources(resources).prettyPrint().encodedXml().execute();
+
+
+		{
+			myStorageSettings.setReuseCachedSearchResultsForMillis(10L);
+			Bundle result1 = myClient
+				.search()
+				.forResource("Organization")
+				.returnBundle(Bundle.class)
+				.execute();
+			final String uuid1 = toSearchUuidFromLinkNext(result1);
+			sleepAtLeast(11L);
+			Bundle result2 = myClient
+				.search()
+				.forResource("Organization")
+				.returnBundle(Bundle.class)
+				.execute();
+			final String uuid2 = toSearchUuidFromLinkNext(result2);
+			assertThat(uuid2).isNotEqualTo(uuid1);
+		}
+
+		{
+			myStorageSettings.setReuseCachedSearchResultsForMillis(1000L);
+			Bundle result1 = myClient
+				.search()
+				.forResource("Organization")
+				.returnBundle(Bundle.class)
+				.execute();
+			final String uuid1 = toSearchUuidFromLinkNext(result1);
+			runInTransaction(() -> {
+				Search search = mySearchEntityDao.findByUuidAndFetchIncludes(uuid1).orElseThrow(IllegalStateException::new);
+				search.setExpiryOrNull(DateUtils.addSeconds(new Date(), -2));
+				mySearchEntityDao.save(search);
+			});
+			sleepOneClick();
+			Bundle result2 = myClient
+				.search()
+				.forResource("Organization")
+				.returnBundle(Bundle.class)
+				.execute();
+
+			final String uuid2 = toSearchUuidFromLinkNext(result2);
+			assertEquals(uuid1, uuid2);
+
+		}
+	}
+
+	@Test
+	public void testSearchReusesResultsDisabled() {
+		List<IBaseResource> resources = new ArrayList<>();
+		for (int i = 0; i < 50; i++) {
+			Organization org = new Organization();
+			org.setName("HELLO");
+			resources.add(org);
+		}
+		myClient.transaction().withResources(resources).prettyPrint().encodedXml().execute();
+
+		myStorageSettings.setReuseCachedSearchResultsForMillis(null);
+
+		Bundle result1 = myClient
+			.search()
+			.forResource("Organization")
+			.where(Organization.NAME.matches().value("HELLO"))
+			.count(5)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		final String uuid1 = toSearchUuidFromLinkNext(result1);
+
+		Bundle result2 = myClient
+			.search()
+			.forResource("Organization")
+			.where(Organization.NAME.matches().value("HELLO"))
+			.count(5)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		final String uuid2 = toSearchUuidFromLinkNext(result2);
+
+		Bundle result3 = myClient
+			.search()
+			.forResource("Organization")
+			.where(Organization.NAME.matches().value("HELLO"))
+			.count(5)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		String uuid3 = toSearchUuidFromLinkNext(result3);
+
+		assertThat(uuid2).isNotEqualTo(uuid1);
+		assertThat(uuid3).isNotEqualTo(uuid1);
+	}
+
+	@Test
+	public void testSearchReusesResultsEnabled() throws Exception {
+		List<IBaseResource> resources = new ArrayList<>();
+		for (int i = 0; i < 50; i++) {
+			Organization org = new Organization();
+			org.setName("HELLO");
+			resources.add(org);
+		}
+		myClient.transaction().withResources(resources).prettyPrint().encodedXml().execute();
+
+		myStorageSettings.setReuseCachedSearchResultsForMillis(1000L);
+
+		Bundle result1 = myClient
+			.search()
+			.forResource("Organization")
+			.where(Organization.NAME.matches().value("HELLO"))
+			.count(5)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		final String uuid1 = toSearchUuidFromLinkNext(result1);
+		Search search1 = newTxTemplate().execute(theStatus -> mySearchEntityDao.findByUuidAndFetchIncludes(uuid1).orElseThrow(() -> new InternalErrorException("")));
+		Date created1 = search1.getCreated();
+
+		Bundle result2 = myClient
+			.search()
+			.forResource("Organization")
+			.where(Organization.NAME.matches().value("HELLO"))
+			.count(5)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		final String uuid2 = toSearchUuidFromLinkNext(result2);
+		Search search2 = newTxTemplate().execute(theStatus -> mySearchEntityDao.findByUuidAndFetchIncludes(uuid2).orElseThrow(() -> new InternalErrorException("")));
+		Date created2 = search2.getCreated();
+
+		assertEquals(created2.getTime(), created1.getTime());
+
+		Thread.sleep(1500);
+
+		Bundle result3 = myClient
+			.search()
+			.forResource("Organization")
+			.where(Organization.NAME.matches().value("HELLO"))
+			.count(5)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		String uuid3 = toSearchUuidFromLinkNext(result3);
+
+		assertEquals(uuid1, uuid2);
+		assertThat(uuid3).isNotEqualTo(uuid1);
+	}
+
+	@Test
+	public void testSearchReusesResultsEnabledNoParams() {
+		List<IBaseResource> resources = new ArrayList<>();
+		for (int i = 0; i < 50; i++) {
+			Organization org = new Organization();
+			org.setName("HELLO");
+			resources.add(org);
+		}
+		myClient.transaction().withResources(resources).prettyPrint().encodedXml().execute();
+
+		myStorageSettings.setReuseCachedSearchResultsForMillis(100000L);
+
+		Bundle result1 = myClient
+			.search()
+			.forResource("Organization")
+			.returnBundle(Bundle.class)
+			.execute();
+
+		final String uuid1 = toSearchUuidFromLinkNext(result1);
+		Search search1 = newTxTemplate().execute(theStatus -> mySearchEntityDao.findByUuidAndFetchIncludes(uuid1).orElseThrow(() -> new InternalErrorException("")));
+		Date created1 = search1.getCreated();
+
+		sleepOneClick();
+
+		Bundle result2 = myClient
+			.search()
+			.forResource("Organization")
+			.returnBundle(Bundle.class)
+			.execute();
+
+		final String uuid2 = toSearchUuidFromLinkNext(result2);
+		Search search2 = newTxTemplate().execute(theStatus -> mySearchEntityDao.findByUuidAndFetchIncludes(uuid2).orElseThrow(() -> new InternalErrorException("")));
+		Date created2 = search2.getCreated();
+
+		assertEquals(created2.getTime(), created1.getTime());
+
+		assertEquals(uuid1, uuid2);
+	}
+
+	/**
+	 * See #316
+	 */
+	@Test
+	public void testSearchThenTagThenSearch() {
+		Patient patient = new Patient();
+		patient.addIdentifier().setSystem("urn:system2").setValue("testSearchTokenParam002");
+		patient.addName().setFamily("Tester").addGiven("testSearchTokenParam2");
+		myClient.create().resource(patient).execute();
+
+		Bundle response = myClient
+			.search()
+			.forResource(Patient.class)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		patient = (Patient) response.getEntry().get(0).getResource();
+
+		myClient
+			.meta()
+			.add()
+			.onResource(patient.getIdElement())
+			.meta(new Meta().addTag("http://system", "tag1", "display"))
+			.execute();
+
+		response = myClient
+			.search()
+			.forResource(Patient.class)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		patient = (Patient) response.getEntry().get(0).getResource();
+		assertThat(patient.getMeta().getTag()).hasSize(1);
+	}
+
+	@Test
+	public void testSearchTokenParamNoValue() {
+		Patient patient = new Patient();
+		patient.addIdentifier().setSystem("urn:system").setValue("testSearchTokenParam001");
+		patient.addName().setFamily("Tester").addGiven("testSearchTokenParam1");
+		patient.addCommunication().getLanguage().setText("testSearchTokenParamComText").addCoding().setCode("testSearchTokenParamCode").setSystem("testSearchTokenParamSystem")
+			.setDisplay("testSearchTokenParamDisplay");
+		myPatientDao.create(patient, mySrd);
+
+		patient = new Patient();
+		patient.addIdentifier().setSystem("urn:system").setValue("testSearchTokenParam002");
+		patient.addName().setFamily("Tester").addGiven("testSearchTokenParam2");
+		myPatientDao.create(patient, mySrd);
+
+		patient = new Patient();
+		patient.addIdentifier().setSystem("urn:system2").setValue("testSearchTokenParam002");
+		patient.addName().setFamily("Tester").addGiven("testSearchTokenParam2");
+		myPatientDao.create(patient, mySrd);
+
+		Bundle response = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(Patient.IDENTIFIER.hasSystemWithAnyCode("urn:system"))
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(response.getEntry()).hasSize(2);
+	}
+
+	@Test
+	@Disabled("Not useful with the search coordinator thread pool removed")
+	public void testSearchWithCountNotSet() {
+		mySearchCoordinatorSvcRaw.setSyncSizeForUnitTests(1);
+
+		for (int i = 0; i < 10; i++) {
+			Patient pat = new Patient();
+			pat.addIdentifier().setSystem("urn:system:rpr4").setValue("test" + i);
+			myClient.create().resource(pat).execute();
+		}
+
+		StopWatch sw = new StopWatch();
+
+		ourLog.info("** About to search with count of 1");
+
+		Bundle found = myClient
+			.search()
+			.forResource(Patient.class)
+			.returnBundle(Bundle.class)
+			.count(1)
+			.execute();
+
+		ourLog.info("** Done searching in {}ms with count of 1", sw.getMillis());
+
+		ourLog.info(myCapturingInterceptor.getLastResponse().getAllHeaders().toString());
+		assertThat(myCapturingInterceptor.getLastResponse().getHeaders(Constants.HEADER_X_CACHE)).isEmpty();
+		assertThat(myCapturingInterceptor.getLastResponse().getHeaders(Constants.HEADER_X_CACHE.toLowerCase())).isEmpty();
+
+		// When we've only got one DB connection available, we are forced to wait for the
+		// search to finish before returning
+		if (TestR4Config.getMaxThreads() > 1) {
+			assertNull(found.getTotalElement().getValue());
+			assertThat(found.getEntry()).hasSize(1);
+			assertThat(sw.getMillis()).isLessThan(1000L);
+		} else {
+			assertThat(sw.getMillis()).isGreaterThan(1000L);
+		}
+
+	}
+
+	@Test
+	@Disabled("Not useful with the search coordinator thread pool removed")
+	public void testSearchWithCountSearchResultsUpTo5() {
+		mySearchCoordinatorSvcRaw.setSyncSizeForUnitTests(1);
+		myStorageSettings.setCountSearchResultsUpTo(5);
+
+		for (int i = 0; i < 10; i++) {
+			Patient pat = new Patient();
+			pat.addIdentifier().setSystem("urn:system:rpr4").setValue("test" + i);
+			myClient.create().resource(pat).execute();
+		}
+
+		StopWatch sw = new StopWatch();
+
+		Bundle found = myClient
+			.search()
+			.forResource(Patient.class)
+			.returnBundle(Bundle.class)
+			.count(1)
+			.execute();
+
+		assertThat(myCapturingInterceptor.getLastResponse().getHeaders(Constants.HEADER_X_CACHE)).isEmpty();
+		assertThat(myCapturingInterceptor.getLastResponse().getHeaders(Constants.HEADER_X_CACHE.toLowerCase())).isEmpty();
+
+		// WHen we've only got one DB connection available, we are forced to wait for the
+		// search to finish before returning
+		if (TestR4Config.getMaxThreads() > 1) {
+			assertNull(found.getTotalElement().getValue());
+			assertThat(found.getEntry()).hasSize(1);
+			assertThat(sw.getMillis()).isLessThan(1500L);
+		} else {
+			assertThat(sw.getMillis()).isGreaterThan(1500L);
+		}
+	}
+
+	@Test
+	public void testSearchWithEmptyParameter() {
+		myStorageSettings.setIndexMissingFields(JpaStorageSettings.IndexEnabledEnum.ENABLED);
+
+		Observation obs = new Observation();
+		obs.setStatus(ObservationStatus.FINAL);
+		obs.getCode().addCoding().setSystem("foo").setCode("bar");
+		myClient.create().resource(obs).execute();
+
+		testSearchWithEmptyParameter("/Observation?value-quantity=");
+		testSearchWithEmptyParameter("/Observation?code=bar&value-quantity=");
+		testSearchWithEmptyParameter("/Observation?value-date=");
+		testSearchWithEmptyParameter("/Observation?code=bar&value-date=");
+		testSearchWithEmptyParameter("/Observation?value-concept=");
+		testSearchWithEmptyParameter("/Observation?code=bar&value-concept=");
+	}
+
+	private void testSearchWithEmptyParameter(String url) {
+		Bundle bundle = myServer.fhirRequest(url).get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+		assertThat(bundle.getEntry()).hasSize(1);
+	}
+
+	@Test
+	public void testSearchWithInclude() {
+		Organization org = new Organization();
+		org.addIdentifier().setSystem("urn:system:rpr4").setValue("testSearchWithInclude01");
+		IdType orgId = (IdType) myClient.create().resource(org).prettyPrint().encodedXml().execute().getId();
+
+		Patient pat = new Patient();
+		pat.addIdentifier().setSystem("urn:system:rpr4").setValue("testSearchWithInclude02");
+		pat.getManagingOrganization().setReferenceElement(orgId.toUnqualifiedVersionless());
+		myClient.create().resource(pat).prettyPrint().encodedXml().execute();
+
+		Bundle found = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(Patient.IDENTIFIER.exactly().systemAndIdentifier("urn:system:rpr4", "testSearchWithInclude02"))
+			.include(Patient.INCLUDE_ORGANIZATION)
+			.prettyPrint()
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(found.getEntry()).hasSize(2);
+		assertEquals(Patient.class, found.getEntry().get(0).getResource().getClass());
+		assertEquals(SearchEntryMode.MATCH, found.getEntry().get(0).getSearch().getMode());
+		assertEquals(Organization.class, found.getEntry().get(1).getResource().getClass());
+		assertEquals(SearchEntryMode.INCLUDE, found.getEntry().get(1).getSearch().getMode());
+	}
+
+	@Test
+	public void testOffsetSearchWithInclude() {
+		Organization org = new Organization();
+		org.addIdentifier().setSystem("urn:system:rpr4").setValue("testSearchWithInclude01");
+		IdType orgId = (IdType) myClient.create().resource(org).prettyPrint().encodedXml().execute().getId();
+
+		Patient pat = new Patient();
+		pat.addIdentifier().setSystem("urn:system:rpr4").setValue("testSearchWithInclude02");
+		pat.getManagingOrganization().setReferenceElement(orgId.toUnqualifiedVersionless());
+		myClient.create().resource(pat).prettyPrint().encodedXml().execute();
+
+		Bundle found = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(Patient.IDENTIFIER.exactly().systemAndIdentifier("urn:system:rpr4", "testSearchWithInclude02"))
+			.include(Patient.INCLUDE_ORGANIZATION)
+			.offset(0)
+			.count(1)
+			.prettyPrint()
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(found.getEntry()).hasSize(2);
+		assertEquals(Patient.class, found.getEntry().get(0).getResource().getClass());
+		assertEquals(SearchEntryMode.MATCH, found.getEntry().get(0).getSearch().getMode());
+		assertEquals(Organization.class, found.getEntry().get(1).getResource().getClass());
+		assertEquals(SearchEntryMode.INCLUDE, found.getEntry().get(1).getSearch().getMode());
+	}
+
+	@Test()
+	public void testSearchWithInvalidNumberPrefix() {
+		try {
+			myClient
+				.search()
+				.forResource(MolecularSequence.class)
+				.where(MolecularSequence.VARIANT_END.withPrefix(ParamPrefixEnum.ENDS_BEFORE).number(100))
+				.prettyPrint()
+				.returnBundle(Bundle.class)
+				.execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("Unable to handle number prefix \"eb\" for value: eb100");
+		}
+
+		try {
+			myClient
+				.search()
+				.forResource(MolecularSequence.class)
+				.where(MolecularSequence.VARIANT_END.withPrefix(ParamPrefixEnum.STARTS_AFTER).number(100))
+				.prettyPrint()
+				.returnBundle(Bundle.class)
+				.execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("Unable to handle number prefix \"sa\" for value: sa100");
+		}
+	}
+
+	@Test()
+	public void testSearchWithInvalidQuantityPrefix() {
+		Observation o = new Observation();
+		o.getCode().setText("testSearchWithInvalidSort");
+		myObservationDao.create(o, mySrd);
+		try {
+			//@formatter:off
+			myClient
+				.search()
+				.forResource(Observation.class)
+				.where(Observation.VALUE_QUANTITY.withPrefix(ParamPrefixEnum.ENDS_BEFORE).number(100).andNoUnits())
+				.prettyPrint()
+				.returnBundle(Bundle.class)
+				.execute();
+			//@formatter:on
+			fail();
+		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("Unable to handle quantity prefix \"eb\" for value: eb100||");
+		}
+	}
+
+	@Test
+	public void testSearchWithCompositeSortWith_CodeValueQuantity() {
+
+		IIdType pid0;
+		IIdType oid1;
+		IIdType oid2;
+		IIdType oid3;
+		IIdType oid4;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			pid0 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.getCode().addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValue(200));
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.getCode().addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValue(300));
+
+			oid2 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.getCode().addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValue(150));
+
+			oid3 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			obs.getCode().addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValue(250));
+
+			oid4 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		String uri = "/Observation?_sort=code-value-quantity";
+		Bundle found = myServer.fhirRequest(uri).get().getBodyAsResource(Bundle.class);
+
+		ourLog.debug("Bundle: {}\n", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(found));
+
+		List<IIdType> list = toUnqualifiedVersionlessIds(found);
+		assertThat(found.getEntry()).hasSize(4);
+		assertEquals(oid3, list.get(0));
+		assertEquals(oid1, list.get(1));
+		assertEquals(oid4, list.get(2));
+		assertEquals(oid2, list.get(3));
+	}
+
+	@Test
+	public void testSearchWithCompositeSortWith_CompCodeValueQuantity() {
+
+		IIdType pid0;
+		IIdType oid1;
+		IIdType oid2;
+		IIdType oid3;
+		IIdType oid4;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			pid0 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+
+			ObservationComponentComponent comp = obs.addComponent();
+			CodeableConcept cc = new CodeableConcept();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			comp.setCode(cc);
+			comp.setValue(new Quantity().setValue(200));
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+
+			ObservationComponentComponent comp = obs.addComponent();
+			CodeableConcept cc = new CodeableConcept();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			comp.setCode(cc);
+			comp.setValue(new Quantity().setValue(300));
+
+			oid2 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+
+			ObservationComponentComponent comp = obs.addComponent();
+			CodeableConcept cc = new CodeableConcept();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			comp.setCode(cc);
+			comp.setValue(new Quantity().setValue(150));
+
+			oid3 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+
+			ObservationComponentComponent comp = obs.addComponent();
+			CodeableConcept cc = new CodeableConcept();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			comp.setCode(cc);
+			comp.setValue(new Quantity().setValue(250));
+			oid4 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		String uri = "/Observation?_sort=combo-code-value-quantity";
+		Bundle found = myServer.fhirRequest(uri).get().getBodyAsResource(Bundle.class);
+
+		ourLog.debug("Bundle: {}\n", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(found));
+
+		List<IIdType> list = toUnqualifiedVersionlessIds(found);
+		assertThat(found.getEntry()).hasSize(4);
+		assertEquals(oid3, list.get(0));
+		assertEquals(oid1, list.get(1));
+		assertEquals(oid4, list.get(2));
+		assertEquals(oid2, list.get(3));
+	}
+
+	@Test
+	public void testSearchWithMissing() {
+		myStorageSettings.setIndexMissingFields(JpaStorageSettings.IndexEnabledEnum.ENABLED);
+		ourLog.info("Starting testSearchWithMissing");
+
+		String methodName = "testSearchWithMissing";
+
+		Organization org = new Organization();
+		IIdType deletedIdMissingTrue = myClient.create().resource(org).execute().getId().toUnqualifiedVersionless();
+		myClient.delete().resourceById(deletedIdMissingTrue).execute();
+
+		org = new Organization();
+		org.setName("Help I'm a Bug");
+		IIdType deletedIdMissingFalse = myClient.create().resource(org).execute().getId().toUnqualifiedVersionless();
+		myClient.delete().resourceById(deletedIdMissingFalse).execute();
+
+		List<IBaseResource> resources = new ArrayList<>();
+		for (int i = 0; i < 20; i++) {
+			org = new Organization();
+			org.setName(methodName + "_0" + i);
+			resources.add(org);
+		}
+		myClient.transaction().withResources(resources).prettyPrint().encodedXml().execute();
+
+		org = new Organization();
+		org.addIdentifier().setSystem("urn:system:rpr4").setValue(methodName + "01");
+		org.setName(methodName + "name");
+		IIdType orgNotMissing = myClient.create().resource(org).prettyPrint().encodedXml().execute().getId().toUnqualifiedVersionless();
+
+		org = new Organization();
+		org.addIdentifier().setSystem("urn:system:rpr4").setValue(methodName + "01");
+		IIdType orgMissing = myClient.create().resource(org).prettyPrint().encodedXml().execute().getId().toUnqualifiedVersionless();
+
+		{
+			//@formatter:off
+			Bundle found = myClient
+				.search()
+				.forResource(Organization.class)
+				.where(Organization.NAME.isMissing(false))
+				.count(100)
+				.prettyPrint()
+				.returnBundle(Bundle.class)
+				.execute();
+			//@formatter:on
+
+			List<IIdType> list = toUnqualifiedVersionlessIds(found);
+			ourLog.info(methodName + ": " + list.toString());
+			ourLog.info("Wanted " + orgNotMissing + " and not " + deletedIdMissingFalse + " but got " + list.size() + ": " + list);
+			assertThat(list).contains(orgNotMissing);
+			assertThat(list).doesNotContain(deletedIdMissingFalse);
+			assertThat(list).doesNotContain(orgMissing);
+		}
+
+		//@formatter:off
+		Bundle found = myClient
+			.search()
+			.forResource(Organization.class)
+			.where(Organization.NAME.isMissing(true))
+			.count(100)
+			.prettyPrint()
+			.returnBundle(Bundle.class)
+			.execute();
+		//@formatter:on
+
+		List<IIdType> list = toUnqualifiedVersionlessIds(found);
+		ourLog.info(methodName + " found: " + list.toString() + " - Wanted " + orgMissing + " but not " + orgNotMissing);
+		assertThat(list).doesNotContain(orgNotMissing).doesNotContain(deletedIdMissingTrue).contains(orgMissing);
+	}
+
+	@Test
+	public void testSearchWithMissing2() {
+		myStorageSettings.setIndexMissingFields(JpaStorageSettings.IndexEnabledEnum.ENABLED);
+		checkParamMissing(Observation.SP_CODE);
+		checkParamMissing(Observation.SP_CATEGORY);
+		checkParamMissing(Observation.SP_VALUE_STRING);
+		checkParamMissing(Observation.SP_ENCOUNTER);
+		checkParamMissing(Observation.SP_DATE);
+	}
+
+	@Test
+	public void testSearchWithMissingDate2() {
+		myStorageSettings.setIndexMissingFields(JpaStorageSettings.IndexEnabledEnum.ENABLED);
+
+		MedicationRequest mr1 = new MedicationRequest();
+		mr1.addCategory().addCoding().setSystem("urn:medicationroute").setCode("oral");
+		mr1.addDosageInstruction().getTiming().addEventElement().setValueAsString("2017-01-01");
+		IIdType id1 = myMedicationRequestDao.create(mr1, mySrd).getId().toUnqualifiedVersionless();
+
+		MedicationRequest mr2 = new MedicationRequest();
+		mr2.addCategory().addCoding().setSystem("urn:medicationroute").setCode("oral");
+		IIdType id2 = myMedicationRequestDao.create(mr2, mySrd).getId().toUnqualifiedVersionless();
+
+		List<String> ids = searchOkAndReturnUnqualifiedVersionlessIdValues("/MedicationRequest?date:missing=false");
+		assertThat(ids).containsExactly(id1.getValue());
+		assertThat(ids).doesNotContain(id2.getValue());
+	}
+
+	/**
+	 * See #411
+	 * <p>
+	 * Let's see if we can reproduce this issue in JPA
+	 */
+	@Test
+	public void testSearchWithMixedParams() {
+		Patient patient = new Patient();
+		patient.addIdentifier().setSystem("urn:system").setValue("0");
+		patient.addName().setFamily("testSearchWithMixedParams").addGiven("Joe");
+		myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+
+		String path = "/Patient/_search?_format=application/xml";
+		myServer.fhirRequest(path)
+			.withHeader(Constants.HEADER_CACHE_CONTROL, Constants.CACHE_CONTROL_NO_CACHE)
+			.withFormParam("name", "Smith")
+			.postForm()
+			.assertStatus(200);
+	}
+
+	@Test
+	public void testSearchWithTextInexactMatch() {
+		Observation obs = new Observation();
+		obs.getCode().setText("THIS_IS_THE_TEXT");
+		obs.getCode().addCoding().setSystem("SYSTEM").setCode("CODE").setDisplay("THIS_IS_THE_DISPLAY");
+		myClient.create().resource(obs).execute();
+
+		testSearchReturnsResults("/Observation?code%3Atext=THIS_IS_THE_TEXT");
+		testSearchReturnsResults("/Observation?code%3Atext=THIS_IS_THE_");
+		testSearchReturnsResults("/Observation?code%3Atext=this_is_the_");
+		testSearchReturnsResults("/Observation?code%3Atext=THIS_IS_THE_DISPLAY");
+		testSearchReturnsResults("/Observation?code%3Atext=THIS_IS_THE_disp");
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {Constants.PARAM_TAG, Constants.PARAM_SECURITY})
+	public void testSearchTagWithInvalidTokenParam(String searchParam) {
+
+		try {
+			myClient
+				.search()
+				.byUrl("Patient?" + searchParam + "=someSystem|")
+				.returnBundle(Bundle.class)
+				.execute();
+			fail();
+		} catch (InvalidRequestException ex) {
+			assertEquals(Constants.STATUS_HTTP_400_BAD_REQUEST, ex.getStatusCode());
+		}
+
+	}
+
+	@Test
+	public void testSearchWithParameterAddedInInterceptor() {
+		Object interceptor = new Object() {
+			@Hook(Pointcut.STORAGE_PRESEARCH_REGISTERED)
+			public void storagePreSearchRegistered(
+					ICachedSearchDetails theCachedSearchDetails,
+					RequestDetails theRequestDetails,
+					ServletRequestDetails theServletRequestDetails,
+					SearchParameterMap theSearchParameterMap) {
+				theSearchParameterMap.add("_security", new TokenParam("http://system", "security1").setModifier(TokenParamModifier.NOT));
+			}
+		};
+		myInterceptorRegistry.registerInterceptor(interceptor);
+
+		try {
+			final Patient patient1 = new Patient().setActive(true);
+			patient1.getMeta().addSecurity("http://system", "security1", "Tag 1");
+			MethodOutcome outcome1 = myPatientDao.create(patient1, mySrd);
+			assertTrue(outcome1.getCreated());
+
+			final Patient patient2 = new Patient().setActive(true);
+			patient2.getMeta().addSecurity("http://system", "security2", "Tag 2");
+			MethodOutcome outcome2 = myPatientDao.create(patient2, mySrd);
+			assertTrue(outcome2.getCreated());
+			String idForPatient2 = outcome2.getId().toUnqualifiedVersionless().getValue();
+
+			IBaseBundle bundle = myClient.search().forResource("Patient").execute();
+			List<String> ids = toUnqualifiedVersionlessIdValues(bundle);
+			assertThat(ids).containsExactly(idForPatient2);
+		} finally {
+			myInterceptorRegistry.unregisterInterceptor(interceptor);
+		}
+	}
+
+	@Test
+	public void testSelfReferentialInclude() {
+		Location loc1 = new Location();
+		loc1.setName("loc1");
+		IIdType loc1id = myClient.create().resource(loc1).execute().getId().toUnqualifiedVersionless();
+
+		Location loc2 = new Location();
+		loc2.setName("loc2");
+		IIdType loc2id = myClient.create().resource(loc2).execute().getId().toUnqualifiedVersionless();
+
+		loc1 = new Location();
+		loc1.setId(loc1id);
+		loc1.setName("loc1");
+		loc1.getPartOf().setReference(loc2id.getValue());
+		myClient.update().resource(loc1).execute().getId().toUnqualifiedVersionless();
+
+		loc2 = new Location();
+		loc2.setId(loc2id);
+		loc2.setName("loc2");
+		loc2.getPartOf().setReference(loc1id.getValue());
+		myClient.update().resource(loc2).execute().getId().toUnqualifiedVersionless();
+
+		IBaseBundle result = myClient
+			.search()
+			.forResource(Location.class)
+			.where(Location.NAME.matches().value("loc1"))
+			.include(Location.INCLUDE_PARTOF.asRecursive())
+			.execute();
+		assertThat(toUnqualifiedVersionlessIdValues(result)).containsExactly(loc1id.getValue(), loc2id.getValue());
+	}
+
+	@Test
+	public void testSelfReferentialRevInclude() {
+		Location loc1 = new Location();
+		loc1.setName("loc1");
+		IIdType loc1id = myClient.create().resource(loc1).execute().getId().toUnqualifiedVersionless();
+
+		Location loc2 = new Location();
+		loc2.setName("loc2");
+		IIdType loc2id = myClient.create().resource(loc2).execute().getId().toUnqualifiedVersionless();
+
+		loc1 = new Location();
+		loc1.setId(loc1id);
+		loc1.setName("loc1");
+		loc1.getPartOf().setReference(loc2id.getValue());
+		myClient.update().resource(loc1).execute().getId().toUnqualifiedVersionless();
+
+		loc2 = new Location();
+		loc2.setId(loc2id);
+		loc2.setName("loc2");
+		loc2.getPartOf().setReference(loc1id.getValue());
+		myClient.update().resource(loc2).execute().getId().toUnqualifiedVersionless();
+
+		IBaseBundle result = myClient
+			.search()
+			.forResource(Location.class)
+			.where(Location.NAME.matches().value("loc1"))
+			.revInclude(Location.INCLUDE_PARTOF.asRecursive())
+			.execute();
+		assertThat(toUnqualifiedVersionlessIdValues(result)).containsExactly(loc1id.getValue(), loc2id.getValue());
+	}
+
+	@Test
+	public void testSmallResultIncludes() {
+		myStorageSettings.setIndexMissingFields(JpaStorageSettings.IndexEnabledEnum.ENABLED);
+
+		Patient p = new Patient();
+		p.setId("p");
+		p.setActive(true);
+		myClient.update().resource(p).execute();
+
+		CarePlan cp = new CarePlan();
+		cp.setId("cp");
+		cp.getSubject().setResource(p);
+		cp.addActivity().getDetail().getCode().addCoding().setSystem("FOO").setCode("BAR");
+		myClient.update().resource(cp).execute();
+
+		Bundle b = myClient
+			.search()
+			.forResource(CarePlan.class)
+			.where(CarePlan.ACTIVITY_CODE.exactly().systemAndCode("FOO", "BAR"))
+			.sort().ascending(CarePlan.SP_ACTIVITY_DATE)
+			.include(CarePlan.INCLUDE_SUBJECT)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(b.getEntry()).hasSize(2);
+
+	}
+
+	/**
+	 * See #198
+	 */
+	@Test
+	public void testSortFromResourceProvider() {
+		Patient p;
+		String methodName = "testSortFromResourceProvider";
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Daniel").setFamily("Adams");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Aaron").setFamily("Alexis");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Carol").setFamily("Allen");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Ruth").setFamily("Black");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Brian").setFamily("Brooks");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Susan").setFamily("Clark");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Amy").setFamily("Clark");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Anthony").setFamily("Coleman");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Steven").setFamily("Coleman");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Lisa").setFamily("Coleman");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Ruth").setFamily("Cook");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Betty").setFamily("Davis");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Joshua").setFamily("Diaz");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Brian").setFamily("Gracia");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Stephan").setFamily("Graham");
+		myClient.create().resource(p).execute();
+
+		p = new Patient();
+		p.addIdentifier().setSystem("urn:system").setValue(methodName);
+		p.addName().addGiven("Sarah").setFamily("Graham");
+		myClient.create().resource(p).execute();
+
+		Bundle resp = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(Patient.IDENTIFIER.exactly().systemAndCode("urn:system", methodName))
+			.sort().ascending(Patient.FAMILY)
+			.sort().ascending(Patient.GIVEN)
+			.count(100)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		List<String> names = toNameList(resp);
+
+		ourLog.info(StringUtils.join(names, '\n'));
+
+		assertThat(names).containsExactly("Daniel Adams", "Aaron Alexis", "Carol Allen", "Ruth Black", "Brian Brooks", "Amy Clark", "Susan Clark", "Anthony Coleman", "Lisa Coleman", "Steven Coleman", "Ruth Cook", "Betty Davis", "Joshua Diaz", "Brian Gracia", "Sarah Graham", "Stephan Graham");
+
+	}
+
+	/**
+	 * Test for issue #60
+	 */
+	@Test
+	public void testStoreUtf8Characters() {
+		Organization org = new Organization();
+		org.setName("測試醫院");
+		org.addIdentifier().setSystem("urn:system").setValue("testStoreUtf8Characters_01");
+		IdType orgId = (IdType) myClient.create().resource(org).prettyPrint().encodedXml().execute().getId();
+
+		// Read back directly from the DAO
+		{
+			Organization returned = myOrganizationDao.read(orgId, mySrd);
+			String val = myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(returned);
+			ourLog.info(val);
+			assertThat(val).contains("<name value=\"測試醫院\"/>");
+		}
+		// Read back through the HTTP API
+		{
+			Organization returned = myClient.read().resource(Organization.class).withId(orgId.getIdPart()).execute();
+			String val = myFhirContext.newXmlParser().setPrettyPrint(true).encodeResourceToString(returned);
+			ourLog.info(val);
+			assertThat(val).contains("<name value=\"測試醫院\"/>");
+		}
+	}
+
+	@Test
+	public void testTransaction() {
+		String contents = ClasspathUtil.loadResource("/update.xml");
+		myServer.fhirRequest("").post(contents, Constants.CT_FHIR_XML).assertStatus(200);
+	}
+
+	@Test
+	public void testCreateResourcesWithAdvancedHSearchIndexingAndIndexMissingFieldsEnableSucceeds() {
+		myStorageSettings.setIndexMissingFields(JpaStorageSettings.IndexEnabledEnum.ENABLED);
+		myStorageSettings.setHibernateSearchIndexSearchParams(true);
+		mySearchParamRegistry.forceRefresh();
+
+		String identifierValue = "someValue";
+		String searchPatientURIWithMissingBirthdate = "Patient?birthdate:missing=true";
+		String searchObsURIWithMissingValueQuantity = "Observation?value-quantity:missing=true";
+
+		//create patient
+		Patient patient = new Patient();
+		patient.addIdentifier().setSystem("urn:system").setValue(identifierValue);
+		MethodOutcome outcome = myClient.create().resource(patient).execute();
+		assertTrue(outcome.getCreated());
+
+		//create observation
+		Observation obs = new Observation();
+		obs.addIdentifier().setSystem("urn:system").setValue(identifierValue);
+		outcome = myClient.create().resource(obs).execute();
+		assertTrue(outcome.getCreated());
+
+		// search
+		Bundle patientsWithMissingBirthdate = myClient.search().byUrl(searchPatientURIWithMissingBirthdate).returnBundle(Bundle.class).execute();
+		assertEquals(1, patientsWithMissingBirthdate.getTotal());
+		Bundle obsWithMissingValueQuantity = myClient.search().byUrl(searchObsURIWithMissingValueQuantity).returnBundle(Bundle.class).execute();
+		assertEquals(1, obsWithMissingValueQuantity.getTotal());
+
+	}
+
+	@Test
+	public void testTryToCreateResourceWithReferenceThatDoesntExist() {
+		Patient p1 = new Patient();
+		p1.addIdentifier().setSystem("urn:system").setValue("testTryToCreateResourceWithReferenceThatDoesntExist01");
+		p1.addName().setFamily("testTryToCreateResourceWithReferenceThatDoesntExistFamily01").addGiven("testTryToCreateResourceWithReferenceThatDoesntExistGiven01");
+		p1.setManagingOrganization(new Reference("Organization/99999999999"));
+
+		try {
+			myClient.create().resource(p1).execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("Organization/99999999999");
+		}
+
+	}
+
+	@Test
+	public void testUpdateInvalidReference() {
+		String methodName = "testUpdateInvalidReference";
+
+		Patient pt = new Patient();
+		pt.addName().setFamily(methodName);
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		OperationOutcome oo = myServer.fhirRequest("/Patient")
+				.put(resource, Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssue().get(0).getDiagnostics()).contains("Can not update resource, request URL must contain an ID element for update (PUT) operation (it must be of the form [base]/[resource type]/[id])");
+	}
+
+	@Test
+	public void testUpdateInvalidReference2() {
+		String methodName = "testUpdateInvalidReference2";
+
+		Patient pt = new Patient();
+		pt.setId("2");
+		pt.addName().setFamily(methodName);
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		myServer.fhirRequest("/Patient")
+				.put(resource, Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertBodyContains(
+					"Can not update resource, request URL must contain an ID element for update (PUT) operation (it must be of the form [base]/[resource type]/[id])",
+					"<OperationOutcome");
+	}
+
+	@Test
+	public void testUpdateNoIdInBody() {
+		String methodName = "testUpdateNoIdInBody";
+
+		Patient pt = new Patient();
+		pt.addName().setFamily(methodName);
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		myServer.fhirRequest("/Patient/FOO")
+				.put(resource, Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertBodyContains(
+					"Can not update resource, resource body must contain an ID element for update (PUT) operation",
+					"<OperationOutcome");
+	}
+
+	@Test
+	public void testUpdateRejectsIncorrectIds() {
+
+		Patient p1 = new Patient();
+		p1.addIdentifier().setSystem("urn:system").setValue("testUpdateRejectsInvalidTypes");
+		p1.addName().setFamily("Tester").addGiven("testUpdateRejectsInvalidTypes");
+		IdType p1id = (IdType) myClient.create().resource(p1).execute().getId();
+		String path = "/Patient/" + p1id.getIdPart();
+
+		// Try to update with the wrong ID in the resource body
+		p1.setId("FOO");
+		p1.addAddress().addLine("NEWLINE");
+
+		String encoded = myFhirContext.newJsonParser().encodeResourceToString(p1);
+		ourLog.info(encoded);
+
+		OperationOutcome oo = myServer.fhirRequest(path)
+				.withHeader(Constants.HEADER_ACCEPT, Constants.CT_FHIR_JSON)
+				.put(encoded, Constants.CT_FHIR_JSON)
+				.assertStatus(400)
+				.assertMimeType(Constants.CT_FHIR_JSON)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssue().get(0).getDiagnostics()).isEqualTo(Msg.code(420) + "Can not update resource, resource body must contain an ID element which matches the request URL for update (PUT) operation - Resource body ID of \"FOO\" does not match URL ID of \""
+			+ p1id.getIdPart() + "\"");
+
+		// Try to update with the no ID in the resource body
+		p1.setId((String) null);
+
+		encoded = myFhirContext.newJsonParser().encodeResourceToString(p1);
+		oo = myServer.fhirRequest(path)
+				.withHeader(Constants.HEADER_ACCEPT, Constants.CT_FHIR_JSON)
+				.put(encoded, Constants.CT_FHIR_JSON)
+				.assertStatus(400)
+				.assertMimeType(Constants.CT_FHIR_JSON)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssue().get(0).getDiagnostics()).isEqualTo(Msg.code(419) + "Can not update resource, resource body must contain an ID element for update (PUT) operation");
+
+		// Try to update with the to correct ID in the resource body
+		p1.setId(p1id.getIdPart());
+
+		encoded = myFhirContext.newJsonParser().encodeResourceToString(p1);
+		myServer.fhirRequest(path).put(encoded, Constants.CT_FHIR_JSON).assertStatus(200);
+	}
+
+	@Test
+	public void testUpdateRejectsInvalidTypes() {
+
+		Patient p1 = new Patient();
+		p1.addIdentifier().setSystem("urn:system").setValue("testUpdateRejectsInvalidTypes");
+		p1.addName().setFamily("Tester").addGiven("testUpdateRejectsInvalidTypes");
+		IdType p1id = (IdType) myClient.create().resource(p1).execute().getId();
+
+		Organization p2 = new Organization();
+		p2.setId(p1id.getIdPart());
+		p2.getNameElement().setValue("testUpdateRejectsInvalidTypes");
+		try {
+			myClient.update().resource(p2).withId("Organization/" + p1id.getIdPart()).execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			// good
+		}
+
+		try {
+			myClient.update().resource(p2).withId("Patient/" + p1id.getIdPart()).execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			// good
+		}
+
+	}
+
+	@Test
+	public void testUpdateResourceConditional() {
+		String methodName = "testUpdateResourceConditional";
+
+		Patient pt = new Patient();
+		pt.addName().setFamily(methodName);
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		String newIdString = myServer.fhirRequest("/Patient?name=" + methodName)
+			.post(resource, Constants.CT_FHIR_XML)
+			.assertStatus(201)
+			.getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Patient/");
+		IdType id = new IdType(newIdString);
+
+		pt.addAddress().addLine("AAAAAAAAAAAAAAAAAAA");
+		resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+		IdType newId = new IdType(myServer.fhirRequest("/Patient?name=" + methodName)
+			.put(resource, Constants.CT_FHIR_XML)
+			.assertStatus(200)
+			.getHeader(Constants.HEADER_CONTENT_LOCATION_LC));
+		assertThat(newId.toVersionless()).isEqualTo(id.toVersionless()); // version shouldn't match for conditional update
+		assertThat(newId).isNotEqualTo(id);
+	}
+
+	@Test
+	public void testUpdateResourceConditionalComplex() {
+		Patient pt = new Patient();
+		pt.addIdentifier().setSystem("http://general-hospital.co.uk/Identifiers").setValue("09832345234543876876");
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		String newIdString = conditionalCreatePatient(resource).assertStatus(201).getHeader(Constants.HEADER_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Patient/");
+		IdType id = new IdType(newIdString);
+
+		pt.addName().setFamily("FOO");
+		resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+		String path = "/Patient?identifier=" + ("http://general-hospital.co.uk/Identifiers|09832345234543876876".replace("|", UrlUtil.escapeUrlParam("|")));
+		newIdString = myServer.fhirRequest(path)
+			.put(resource, Constants.CT_FHIR_XML)
+			.assertStatus(200)
+			.getHeader(Constants.HEADER_CONTENT_LOCATION_LC);
+		assertThat(newIdString).startsWith(myServerBase + "/Patient/");
+		IdType id2 = new IdType(newIdString);
+
+		assertEquals(id.getIdPart(), id2.getIdPart());
+		assertEquals("1", id.getVersionIdPart());
+		assertEquals("2", id2.getVersionIdPart());
+	}
+
+	@Test
+	public void testUpdateResourceWithPrefer() {
+		String methodName = "testUpdateResourceWithPrefer";
+
+		Patient pt = new Patient();
+		pt.addName().setFamily(methodName);
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		IdType id = createPatientAndReturnLocationId(resource);
+
+		Date before = new Date();
+
+		pt = new Patient();
+		pt.setId(id.getIdPart());
+		resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		String prefer = Constants.HEADER_PREFER_RETURN + '=' + Constants.HEADER_PREFER_RETURN_REPRESENTATION;
+		Patient respPt = myServer.fhirRequest("/Patient/" + id.getIdPart())
+				.withHeader(Constants.HEADER_PREFER, prefer)
+				.put(resource, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(Patient.class);
+		assertThat(respPt.getIdElement().getVersionIdPart()).isEqualTo("2");
+
+		InstantType updateTime = respPt.getMeta().getLastUpdatedElement();
+		assertThat(updateTime.getValue()).isAfter(before);
+	}
+
+	@Test
+	public void testUpdateThatCreatesReturnsHttp201() {
+
+		Patient p = new Patient();
+		p.setId("A");
+		p.setActive(true);
+		String encoded = myFhirContext.newJsonParser().encodeResourceToString(p);
+
+		myServer.fhirRequest("/Patient/A").put(encoded, Constants.CT_FHIR_JSON_NEW).assertStatus(201);
+
+		p = new Patient();
+		p.setId("A");
+		p.setActive(false);
+		encoded = myFhirContext.newJsonParser().encodeResourceToString(p);
+
+		myServer.fhirRequest("/Patient/A").put(encoded, Constants.CT_FHIR_JSON_NEW).assertStatus(200);
+	}
+
+	@Test
+	public void testDeleteNonExistentResourceReturns200() {
+		myServer.fhirRequest("/Patient/someIdHereThatIsUnique").delete().assertStatus(200);
+	}
+
+	@Test
+	public void testDeleteSameResourceTwice() {
+		String id = "mySecondUniqueId";
+
+		Patient p = new Patient();
+		p.setId(id);
+		String encoded = myFhirContext.newJsonParser().encodeResourceToString(p);
+
+		myServer.fhirRequest("/Patient/" + id).put(encoded, Constants.CT_FHIR_JSON_NEW).assertStatus(201);
+
+		for (int i = 0; i < 2; i++) {
+			// multiple deletes of the same resource
+			// should always succeed
+			myServer.fhirRequest("/Patient/" + id).delete().assertStatus(200);
+		}
+	}
+
+	@Test
+	public void testUpdateWithClientSuppliedIdWhichDoesntExist() {
+		Patient p1 = new Patient();
+		p1.addIdentifier().setSystem("urn:system").setValue("testUpdateWithClientSuppliedIdWhichDoesntExistrpr4");
+
+		MethodOutcome outcome = myClient.update().resource(p1).withId("testUpdateWithClientSuppliedIdWhichDoesntExistrpr4").execute();
+		assertTrue(outcome.getCreated().booleanValue());
+		IdType p1Id = (IdType) outcome.getId();
+
+		assertThat(p1Id.getValue()).contains("Patient/testUpdateWithClientSuppliedIdWhichDoesntExistrpr4/_history");
+
+		//@formatter:off
+		Bundle actual = myClient
+			.search()
+			.forResource(Patient.class)
+			.where(Patient.IDENTIFIER.exactly().systemAndCode("urn:system", "testUpdateWithClientSuppliedIdWhichDoesntExistrpr4"))
+			.encodedJson()
+			.prettyPrint()
+			.returnBundle(Bundle.class)
+			.execute();
+		//@formatter:on
+
+		assertThat(actual.getEntry()).hasSize(1);
+		assertEquals(p1Id.getIdPart(), actual.getEntry().get(0).getResource().getIdElement().getIdPart());
+
+	}
+
+	@Test
+	public void testUpdateWithSource() {
+		Patient patient = new Patient();
+		patient.setActive(false);
+		IIdType patientid = myClient.create().resource(patient).execute().getId().toUnqualifiedVersionless();
+
+		{
+			Patient readPatient = (Patient) myClient.read().resource("Patient").withId(patientid).execute();
+			assertThat(readPatient.getMeta().getSource()).matches("#[a-zA-Z0-9]+");
+		}
+
+		patient.setId(patientid);
+		patient.setActive(true);
+		myClient.update().resource(patient).execute();
+		{
+			Patient readPatient = (Patient) myClient.read().resource("Patient").withId(patientid).execute();
+			assertThat(readPatient.getMeta().getSource()).matches("#[a-zA-Z0-9]+");
+
+			readPatient.addName().setFamily("testUpdateWithSource");
+			myClient.update().resource(readPatient).execute();
+			readPatient = (Patient) myClient.read().resource("Patient").withId(patientid).execute();
+			assertThat(readPatient.getMeta().getSource()).matches("#[a-zA-Z0-9]+");
+		}
+	}
+
+	@Test
+	public void testUpdateWithETag() {
+		String methodName = "testUpdateWithETag";
+
+		Patient pt = new Patient();
+		pt.addName().setFamily(methodName);
+		IIdType id = myClient.create().resource(pt).execute().getId().toUnqualifiedVersionless();
+
+		pt.addName().setFamily("FAM2");
+		pt.setId(id.toUnqualifiedVersionless());
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		OperationOutcome oo = updateWithIfMatch(id, resource, "W/\"44\"")
+				.assertStatus(409)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssue().get(0).getDiagnostics()).contains("Trying to update Patient/" + id.getIdPart() + "/_history/44 but this is not the current version");
+
+		// Now a good one
+		updateWithIfMatch(id, resource, "W/\"1\"").assertStatus(200);
+	}
+
+	/**
+	 * PUTs the resource with an {@literal If-Match} ETag, for the version-conflict tests.
+	 */
+	private HttpTestResponse updateWithIfMatch(IIdType theId, String theResource, String theETag) {
+		return myServer.fhirRequest("/Patient/" + theId.getIdPart())
+			.withHeader(Constants.HEADER_IF_MATCH, theETag)
+			.put(theResource, Constants.CT_FHIR_XML);
+	}
+
+	/**
+	 * When updating a resource with a non-numeric ETag (e.g. W/"A23"), the server should return
+	 * a 409 Conflict (version mismatch) rather than a 500 Internal Server Error from NumberFormatException.
+	 * See SMILE-8708.
+	 */
+	@Test
+	void testUpdateWithNonNumericETag_returnsConflict() {
+		// Create a patient
+		Patient pt = new Patient();
+		pt.addName().setFamily("testUpdateWithNonNumericETag");
+		IIdType id = myClient.create().resource(pt).execute().getId().toUnqualifiedVersionless();
+
+		// Attempt to update with a non-numeric ETag
+		pt.addName().setFamily("FAM2");
+		pt.setId(id.toUnqualifiedVersionless());
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		// Non-numeric ETag should produce a 409 Conflict, not a 500 error
+		OperationOutcome oo = updateWithIfMatch(id, resource, "W/\"A23\"")
+				.assertStatus(409)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssue().get(0).getDiagnostics())
+			.contains("Trying to update Patient/" + id.getIdPart());
+	}
+
+	/**
+	 * Verify that a numeric wrong ETag still returns 409 as before.
+	 * Adjacent test for SMILE-8708 — this should pass (existing behavior).
+	 */
+	@Test
+	void testUpdateWithWrongNumericETag_returnsConflict() {
+		Patient pt = new Patient();
+		pt.addName().setFamily("testUpdateWithWrongNumericETag");
+		IIdType id = myClient.create().resource(pt).execute().getId().toUnqualifiedVersionless();
+
+		pt.addName().setFamily("FAM2");
+		pt.setId(id.toUnqualifiedVersionless());
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		OperationOutcome oo = updateWithIfMatch(id, resource, "W/\"999\"")
+				.assertStatus(409)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssue().get(0).getDiagnostics())
+			.contains("Trying to update Patient/" + id.getIdPart());
+	}
+
+	/**
+	 * Verify that update with the correct ETag succeeds.
+	 * Adjacent test for SMILE-8708 — this should pass (existing behavior).
+	 */
+	@Test
+	void testUpdateWithCorrectETag_succeeds() {
+		Patient pt = new Patient();
+		pt.addName().setFamily("testUpdateWithCorrectETag");
+		IIdType id = myClient.create().resource(pt).execute().getId().toUnqualifiedVersionless();
+
+		pt.addName().setFamily("FAM2");
+		pt.setId(id.toUnqualifiedVersionless());
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		String responseString = updateWithIfMatch(id, resource, "W/\"1\"").assertStatus(200).getBody();
+	}
+
+	@Test
+	public void testUpdateWrongIdInBody() {
+		String methodName = "testUpdateWrongIdInBody";
+
+		Patient pt = new Patient();
+		pt.setId("333");
+		pt.addName().setFamily(methodName);
+		String resource = myFhirContext.newXmlParser().encodeResourceToString(pt);
+
+		OperationOutcome oo = myServer.fhirRequest("/Patient/A2")
+				.put(resource, Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertMimeType(Constants.CT_FHIR_XML)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssue().get(0).getDiagnostics()).isEqualTo(Msg.code(420) + "Can not update resource, resource body must contain an ID element which matches the request URL for update (PUT) operation - Resource body ID of \"333\" does not match URL ID of \"A2\"");
+	}
+
+	@Test
+	public void testUpdateWrongResourceType() throws IOException {
+		String input = IOUtils.toString(getClass().getResourceAsStream("/dstu3-person.json"), StandardCharsets.UTF_8);
+
+		try {
+			myClient.update().resource(input).withId("Patient/PERSON1").execute();
+		} catch (InvalidRequestException e) {
+			assertEquals("", e.getMessage());
+		}
+
+		MethodOutcome resp = myClient.update().resource(input).withId("Person/PERSON1").execute();
+		assertEquals("Person/PERSON1/_history/1", resp.getId().toUnqualified().getValue());
+	}
+
+	@Test
+	public void testValidateBadInputViaGet() {
+
+		myServer.fhirRequest("/Patient/$validate?mode=create").get()
+				.assertStatus(400)
+				.assertBodyContains("No resource supplied for $validate operation (resource is required unless mode is &quot;delete&quot;)");
+	}
+
+	@Test
+	public void testValidateBadInputViaPost() {
+
+		Parameters input = new Parameters();
+		input.addParameter().setName("mode").setValue(new CodeType("create"));
+
+		String inputStr = myFhirContext.newXmlParser().encodeResourceToString(input);
+		ourLog.info(inputStr);
+
+		myServer.fhirRequest("/Patient/$validate")
+				.post(inputStr, Constants.CT_FHIR_XML)
+				.assertStatus(400)
+				.assertBodyContains("No resource supplied for $validate operation (resource is required unless mode is &quot;delete&quot;)");
+	}
+
+	@Test
+	public void testValidateResourceBaseWithNoIdRaw() {
+
+		Patient patient = new Patient();
+		patient.addName().addGiven("James");
+		patient.setBirthDateElement(new DateType("2011-02-02"));
+
+		String inputStr = myFhirContext.newXmlParser().encodeResourceToString(patient);
+		myServer.fhirRequest("/Patient/$validate")
+				.post(inputStr, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.assertBodyDoesNotContain("Resource has no id");
+	}
+
+	/**
+	 * Make sure we don't filter keys
+	 */
+	@Test
+	public void testValidateJsonWithDuplicateKey() {
+
+		String inputStr = "{\"resourceType\":\"Patient\", \"name\":[{\"text\":\"foo\"}], \"name\":[{\"text\":\"foo\"}] }";
+		myServer.fhirRequest("/Patient/$validate")
+				.post(inputStr, Constants.CT_FHIR_JSON_NEW)
+				.assertStatus(200)
+				.assertBodyContains("The JSON property 'name' is a duplicate and will be ignored");
+	}
+
+	// Y
+	@Test
+	public void testValidateResourceHuge() {
+
+		Patient patient = new Patient();
+		patient.addName().addGiven("James" + leftPad("James", 1000000, 'A'));
+		patient.setBirthDateElement(new DateType("2011-02-02"));
+
+		Parameters input = new Parameters();
+		input.addParameter().setName("resource").setResource(patient);
+
+		String inputStr = myFhirContext.newXmlParser().encodeResourceToString(input);
+		ourLog.debug(inputStr);
+
+		myServer.fhirRequest("/Patient/$validate")
+			.post(inputStr, Constants.CT_FHIR_XML)
+			.assertStatus(200);
+	}
+
+	@Test
+	public void testValidateResourceInstanceOnServer() {
+
+		Patient patient = new Patient();
+		patient.addName().addGiven("James");
+		patient.setBirthDateElement(new DateType("2011-02-02"));
+		patient.addContact().setGender(AdministrativeGender.MALE);
+		patient.addCommunication().setPreferred(true); // missing language
+
+		IIdType id = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+
+		myServer.fhirRequest("/Patient/" + id.getIdPart() + "/$validate")
+				.get()
+				.assertStatus(200)
+				.assertBodyContains("SHALL at least contain a contact's details or a reference to an organization");
+	}
+
+	@Test
+	public void testValidateResourceWithId() {
+
+		Patient patient = new Patient();
+		patient.setId("A123");
+		patient.addName().addGiven("James");
+		patient.setBirthDateElement(new DateType("2011-02-02"));
+		myPatientDao.update(patient, mySrd);
+
+		Parameters input = new Parameters();
+		input.addParameter().setName("resource").setResource(patient);
+
+		String inputStr = myFhirContext.newXmlParser().encodeResourceToString(input);
+		ourLog.info(inputStr);
+
+		myServer.fhirRequest("/Patient/A123/$validate")
+			.post(inputStr, Constants.CT_FHIR_XML)
+			.assertStatus(200);
+	}
+
+	@Test
+	public void testValidateResourceWithNoIdParameters() {
+
+		Patient patient = new Patient();
+		patient.addName().addGiven("James");
+		patient.setBirthDateElement(new DateType("2011-02-02"));
+
+		Parameters input = new Parameters();
+		input.addParameter().setName("resource").setResource(patient);
+
+		String inputStr = myFhirContext.newXmlParser().encodeResourceToString(input);
+		myServer.fhirRequest("/Patient/$validate?_pretty=true")
+				.post(inputStr, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.assertBodyDoesNotContain("Resource has no id", "warn", "error");
+	}
+
+	@Test
+	public void testValidateResourceWithNoIdRaw() {
+
+		Patient patient = new Patient();
+		patient.addName().addGiven("James");
+		patient.setBirthDateElement(new DateType("2011-02-02"));
+
+		String inputStr = myFhirContext.newXmlParser().encodeResourceToString(patient);
+		myServer.fhirRequest("/Patient/$validate")
+				.post(inputStr, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.assertBodyDoesNotContain("Resource has no id")
+				.assertBodyContains(
+					"<td>No issues detected during validation</td>",
+					"<issue>",
+					"<severity value=\"information\"/>",
+					"<code value=\"informational\"/>",
+					"<diagnostics value=\"No issues detected during validation\"/>",
+					"</issue>");
+	}
+
+	@Test
+	public void testValueSetExpandOperation() throws IOException {
+		CodeSystem cs = myFhirContext.newXmlParser().parseResource(CodeSystem.class, new InputStreamReader(ResourceProviderR4Test.class.getResourceAsStream("/extensional-case-3-cs.xml")));
+		myClient.create().resource(cs).execute();
+
+		ValueSet upload = myFhirContext.newXmlParser().parseResource(ValueSet.class, new InputStreamReader(ResourceProviderR4Test.class.getResourceAsStream("/extensional-case-3-vs.xml")));
+		IIdType vsid = myClient.create().resource(upload).execute().getId().toUnqualifiedVersionless();
+
+		myServer.fhirRequest("/ValueSet/" + vsid.getIdPart() + "/$expand")
+				.get()
+				.assertStatus(200)
+				.assertBodyContains(
+					"<ValueSet xmlns=\"http://hl7.org/fhir\">",
+					"<expansion>",
+					"<contains>",
+					"<system value=\"http://acme.org\"/>",
+					"<code value=\"8450-9\"/>",
+					"<display value=\"Systolic blood pressure--expiration\"/>",
+					"</contains>",
+					"<contains>",
+					"<system value=\"http://acme.org\"/>",
+					"<code value=\"11378-7\"/>",
+					"<display value=\"Systolic blood pressure at First encounter\"/>",
+					"</contains>",
+					"</expansion>");
+
+		/*
+		 * Filter with display name
+		 */
+
+		myServer.fhirRequest("/ValueSet/" + vsid.getIdPart() + "/$expand?filter=systolic")
+				.get()
+				.assertStatus(200)
+				.assertBodyContains(
+					"<code value=\"11378-7\"/>",
+					"<display value=\"Systolic blood pressure at First encounter\"/>");
+	}
+
+	@Test
+	public void testUpdateWithNormalizedQuantitySearchSupported() {
+
+		myStorageSettings.setNormalizedQuantitySearchLevel(NormalizedQuantitySearchLevel.NORMALIZED_QUANTITY_SEARCH_SUPPORTED);
+		IIdType pid0;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			pid0 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			CodeableConcept cc = obs.getCode();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValueElement(new DecimalType(125.12)).setUnit("CM").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("cm"));
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+
+			IIdType opid1 = myObservationDao.create(obs, mySrd).getId();
+
+			//-- update quantity
+			obs = new Observation();
+			obs.setId(opid1);
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			cc = obs.getCode();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValueElement(new DecimalType(24.12)).setUnit("CM").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("cm"));
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+
+			myObservationDao.update(obs, mySrd);
+		}
+
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			CodeableConcept cc = obs.getCode();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValueElement(new DecimalType(13.45)).setUnit("DM").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("dm"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			CodeableConcept cc = obs.getCode();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValueElement(new DecimalType(1.45)).setUnit("M").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("m"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		{
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("FOO");
+			obs.getSubject().setReferenceElement(pid0);
+			CodeableConcept cc = obs.getCode();
+			cc.addCoding().setCode("2345-7").setSystem("http://loinc.org");
+			obs.setValue(new Quantity().setValueElement(new DecimalType(25)).setUnit("CM").setSystem(UcumServiceUtil.UCUM_CODESYSTEM_URL).setCode("cm"));
+
+			myObservationDao.create(obs, mySrd);
+
+			ourLog.debug("Observation: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+		}
+
+		// > 1m
+		String uri = "/Observation?code-value-quantity=http://" + UrlUtil.escapeUrlParam("loinc.org|2345-7$gt1|http://unitsofmeasure.org|m");
+		ourLog.info("uri = {}", uri);
+		List<String> ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		assertThat(ids).hasSize(2);
+
+
+		//>= 100cm
+		uri = "/Observation?code-value-quantity=http://" + UrlUtil.escapeUrlParam("loinc.org|2345-7$gt100|http://unitsofmeasure.org|cm");
+		ourLog.info("uri = {}", uri);
+		ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		assertThat(ids).hasSize(2);
+
+		//>= 10dm
+		uri = "/Observation?code-value-quantity=http://" + UrlUtil.escapeUrlParam("loinc.org|2345-7$gt10|http://unitsofmeasure.org|dm");
+		ourLog.info("uri = {}", uri);
+		ids = searchAndReturnUnqualifiedVersionlessIdValues(uri);
+		assertThat(ids).hasSize(2);
+	}
+
+	@Test
+	public void testSearchWithLowerBoundDate() {
+
+		// Issue 2424 test case
+		IIdType pid0;
+		{
+			Patient patient = new Patient();
+			patient.addIdentifier().setSystem("urn:system").setValue("001");
+			patient.addName().setFamily("Tester").addGiven("Joe");
+			patient.setBirthDateElement(new DateType("2073"));
+			pid0 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+
+			ourLog.debug("Patient: {}\n", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(patient));
+
+			ourLog.info("pid0 " + pid0);
+		}
+
+		logPatientSearchBundle("/Patient?_total=accurate&birthdate=gt2072");
+		logPatientSearchBundle("/Patient?_total=accurate&birthdate=gt2072-01-01");
+	}
+
+	private void logPatientSearchBundle(String thePath) {
+		Bundle bundle = myServer.fhirRequest(thePath).get().getBodyAsResource(Bundle.class);
+		ourLog.debug("Patient: {}\n", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(bundle));
+	}
+
+	@Test
+	public void testUpdateHistoryRewriteWithIdNoHistoryVersion() {
+		myStorageSettings.setUpdateWithHistoryRewriteEnabled(true);
+		String testFamilyNameModified = "Jackson";
+
+		// setup
+		IIdType id = createNewPatientWithHistoryTwoVersions();
+
+		// execute updates
+		Patient p = new Patient();
+		p.setActive(true);
+		p.addName().setFamily(testFamilyNameModified);
+
+		try {
+			myClient.update().resource(p).historyRewrite().withId(id).execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("ID must contain a history version");
+		}
+
+		try {
+			myClient.update().resource(p).historyRewrite().withId("1234").execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("ID must contain a history version");
+		}
+
+		p.setId(id);
+		try {
+			myClient.update().resource(p).historyRewrite().execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("ID must contain a history version");
+		}
+	}
+
+	@Test
+	public void testUpdateHistoryRewriteWithIdNull() {
+		myStorageSettings.setUpdateWithHistoryRewriteEnabled(true);
+		String testFamilyNameModified = "Jackson";
+
+		// setup
+		createNewPatientWithHistoryTwoVersions();
+
+		// execute updates
+		Patient p = new Patient();
+		p.setActive(true);
+		p.addName().setFamily(testFamilyNameModified);
+
+		try {
+			myClient.update().resource(p).historyRewrite().withId((IIdType) null).execute();
+			fail();
+		} catch (NullPointerException e) {
+			assertThat(e.getMessage()).contains("can not be null");
+		}
+
+		try {
+			myClient.update().resource(p).historyRewrite().withId((String) null).execute();
+			fail();
+		} catch (NullPointerException e) {
+			assertThat(e.getMessage()).contains("can not be null");
+		}
+
+		try {
+			myClient.update().resource(p).historyRewrite().execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("No ID supplied for resource to update");
+		}
+	}
+
+	@Test
+	public void testUpdateHistoryRewriteWithIdNoIdPart() {
+		myStorageSettings.setUpdateWithHistoryRewriteEnabled(true);
+		String testFamilyNameModified = "Jackson";
+
+		// setup
+		createNewPatientWithHistoryTwoVersions();
+
+		// execute updates
+		Patient p = new Patient();
+		p.setActive(true);
+		p.addName().setFamily(testFamilyNameModified);
+
+		IIdType noIdPartId = new IdDt();
+		try {
+			myClient.update().resource(p).historyRewrite().withId(noIdPartId).execute();
+			fail();
+		} catch (NullPointerException e) {
+			assertThat(e.getMessage()).contains("must not be blank and must contain an ID");
+		}
+
+		try {
+			myClient.update().resource(p).historyRewrite().withId("").execute();
+			fail();
+		} catch (NullPointerException e) {
+			assertThat(e.getMessage()).contains("must not be blank and must contain an ID");
+		}
+
+		p.setId(noIdPartId);
+		try {
+			myClient.update().resource(p).historyRewrite().execute();
+			fail();
+		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("No ID supplied for resource to update");
+		}
+	}
+
+	@Test
+	public void createResource_withPreserveRequestIdEnabled_requestIdIsPreserved() {
+		myStorageSettings.setPreserveRequestIdInResourceBody(true);
+
+		String expectedMetaSource = "mySource#345676";
+		String patientId = "1234a";
+		Patient patient = new Patient();
+		patient.getMeta().setSource(expectedMetaSource);
+
+		patient.setId(patientId);
+		patient.addName().addGiven("Phil").setFamily("Sick");
+
+		MethodOutcome outcome = myClient.update().resource(patient).execute();
+
+		IIdType iIdType = outcome.getId();
+
+		Patient returnedPatient = myClient.read().resource(Patient.class).withId(iIdType).execute();
+
+		String returnedPatientMetaSource = returnedPatient.getMeta().getSource();
+
+		assertEquals(expectedMetaSource, returnedPatientMetaSource);
+	}
+
+	@Test
+	public void createResource_withPreserveRequestIdEnabledAndRequestIdLengthGT16_requestIdIsPreserved() {
+		myStorageSettings.setPreserveRequestIdInResourceBody(true);
+
+		String metaSource = "mySource#123456789012345678901234567890";
+		String expectedMetaSource = "mySource#1234567890123456";
+		String patientId = "1234a";
+		Patient patient = new Patient();
+		patient.getMeta().setSource(metaSource);
+
+		patient.setId(patientId);
+		patient.addName().addGiven("Phil").setFamily("Sick");
+
+		MethodOutcome outcome = myClient.update().resource(patient).execute();
+
+		IIdType iIdType = outcome.getId();
+
+		Patient returnedPatient = myClient.read().resource(Patient.class).withId(iIdType).execute();
+
+		String returnedPatientMetaSource = returnedPatient.getMeta().getSource();
+
+		assertEquals(expectedMetaSource, returnedPatientMetaSource);
+	}
+
+	@Test
+	public void createResource_withPreserveRequestIdDisabled_RequestIdIsOverwritten() {
+		String sourceURL = "mySource";
+		String requestId = "#345676";
+		String patientId = "1234a";
+		Patient patient = new Patient();
+		patient.getMeta().setSource(sourceURL + requestId);
+
+		patient.setId(patientId);
+		patient.addName().addGiven("Phil").setFamily("Sick");
+
+		MethodOutcome outcome = myClient.update().resource(patient).execute();
+
+		IIdType iIdType = outcome.getId();
+
+		Patient returnedPatient = myClient.read().resource(Patient.class).withId(iIdType).execute();
+
+		String returnedPatientMetaSource = returnedPatient.getMeta().getSource();
+
+		assertThat(returnedPatientMetaSource).startsWith(sourceURL);
+		assertFalse(returnedPatientMetaSource.endsWith(requestId));
+	}
+
+	@Test
+	public void searchResource_bySourceAndRequestIdWithPreserveRequestIdEnabled_isSuccess() {
+		myStorageSettings.setPreserveRequestIdInResourceBody(true);
+
+		String sourceUri = "mySource";
+		String requestId = "345676";
+		String expectedSourceUrl = sourceUri + "#" + requestId;
+
+		Patient patient = new Patient();
+		patient.getMeta().setSource(expectedSourceUrl);
+
+		myClient
+			.create()
+			.resource(patient)
+			.execute();
+
+		Bundle results = myClient
+			.search()
+			.byUrl(myServerBase + "/Patient?_source=" + sourceUri + "%23" + requestId)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		Patient returnedPatient = (Patient) results.getEntry().get(0).getResource();
+		String returnedPatientMetaSource = returnedPatient.getMeta().getSource();
+
+		assertThat(results.getEntry()).hasSize(1);
+		assertEquals(expectedSourceUrl, returnedPatientMetaSource);
+	}
+
+	@Test
+	public void searchResource_bySourceAndRequestIdWithPreserveRequestIdDisabled_fails() {
+		String sourceURI = "mySource";
+		String requestId = "345676";
+
+		Patient patient = new Patient();
+		patient.getMeta().setSource(sourceURI + "#" + requestId);
+
+		myClient
+			.create()
+			.resource(patient)
+			.execute();
+
+		Bundle results = myClient
+			.search()
+			.byUrl(myServerBase + "/Patient?_source=" + sourceURI + "%23" + requestId)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(results.getEntry()).isEmpty();
+	}
+
+	@Test
+	public void testSearchHistoryWithAtAndGtParameters() throws Exception {
+
+		// Create Patient
+		Patient patient = new Patient();
+		patient = (Patient) myClient.create().resource(patient).execute().getResource();
+		Long patientId = patient.getIdElement().getIdPartAsLong();
+
+		// Update Patient after delay
+		int delayInMs = 1000;
+		TestUtil.sleepAtLeast(delayInMs + 100);
+		patient.getNameFirstRep().addGiven("Bob");
+		myClient.update().resource(patient).execute();
+		TestUtil.sleepAtLeast(100);
+
+		Patient unrelatedPatient = (Patient) myClient.create().resource(new Patient()).execute().getResource();
+		assertThat(patientId).isNotEqualTo(unrelatedPatient.getIdElement().getIdPartAsLong());
+
+		// ensure the patient has the expected overall history
+		Bundle result = myClient.history()
+			.onInstance("Patient/" + patientId)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(result.getEntry()).hasSize(2);
+
+		Patient patientV1 = (Patient) result.getEntry().get(1).getResource();
+		assertEquals(patientId, patientV1.getIdElement().getIdPartAsLong());
+
+		Patient patientV2 = (Patient) result.getEntry().get(0).getResource();
+		assertEquals(patientId, patientV2.getIdElement().getIdPartAsLong());
+
+		Date dateV1 = patientV1.getMeta().getLastUpdated();
+		Date dateV2 = patientV2.getMeta().getLastUpdated();
+		assertTrue(dateV1.before((dateV2)));
+
+		// Issue 3138 test case, verify behavior of _at
+		verifyAtBehaviourWhenQueriedDateDuringTwoUpdatedDates(patientId, delayInMs, dateV1, dateV2);
+		verifyAtBehaviourWhenQueriedDateAfterTwoUpdatedDates(patientId, delayInMs, dateV1, dateV2);
+		myCaptureQueriesListener.clear();
+		verifyAtBehaviourWhenQueriedDateBeforeTwoUpdatedDates(patientId, delayInMs, dateV1, dateV2);
+		myCaptureQueriesListener.logSelectQueries();
+		// verify behavior of _since
+		verifySinceBehaviourWhenQueriedDateDuringTwoUpdatedDates(patientId, delayInMs, dateV1, dateV2);
+		verifySinceBehaviourWhenQueriedDateAfterTwoUpdatedDates(patientId, delayInMs, dateV1, dateV2);
+		verifySinceBehaviourWhenQueriedDateBeforeTwoUpdatedDates(patientId, delayInMs, dateV1, dateV2);
+
+	}
+
+	private void verifyAtBehaviourWhenQueriedDateDuringTwoUpdatedDates(Long patientId, int delayInMs, Date dateV1, Date dateV2) throws IOException {
+		Date timeBetweenUpdates = DateUtils.addMilliseconds(dateV1, delayInMs / 2);
+		assertTrue(timeBetweenUpdates.after(dateV1));
+		assertTrue(timeBetweenUpdates.before(dateV2));
+		List<String> resultIds = searchAndReturnUnqualifiedIdValues("/Patient/" + patientId + "/_history?_at=gt" + toStr(timeBetweenUpdates));
+		assertThat(resultIds).hasSize(2);
+		assertThat(resultIds).contains("Patient/" + patientId + "/_history/1");
+		assertThat(resultIds).contains("Patient/" + patientId + "/_history/2");
+	}
+
+	private void verifyAtBehaviourWhenQueriedDateAfterTwoUpdatedDates(Long patientId, int delayInMs, Date dateV1, Date dateV2) throws IOException {
+		Date timeBetweenUpdates = DateUtils.addMilliseconds(dateV2, delayInMs);
+		assertTrue(timeBetweenUpdates.after(dateV1));
+		assertTrue(timeBetweenUpdates.after(dateV2));
+		String url = "/Patient/" + patientId + "/_history?_at=gt" + toStr(timeBetweenUpdates);
+		myCaptureQueriesListener.clear();
+		List<String> resultIds = searchAndReturnUnqualifiedIdValues(url);
+		assertThat(resultIds).as(()->describeVersionsAndUrl(url)).hasSize(1);
+		assertThat(resultIds).contains("Patient/" + patientId + "/_history/2");
+	}
+
+	private void verifyAtBehaviourWhenQueriedDateBeforeTwoUpdatedDates(Long patientId, int delayInMs, Date dateV1, Date dateV2) throws IOException {
+		Date timeBetweenUpdates = DateUtils.addMilliseconds(dateV1, -delayInMs);
+		assertTrue(timeBetweenUpdates.before(dateV1));
+		assertTrue(timeBetweenUpdates.before(dateV2));
+		String url = "/Patient/" + patientId + "/_history?_at=gt" + toStr(timeBetweenUpdates);
+		myCaptureQueriesListener.clear();
+		List<String> resultIds = searchAndReturnUnqualifiedIdValues(url);
+		assertThat(resultIds).as(()->describeVersionsAndUrl(url)).hasSize(2);
+		assertThat(resultIds).contains("Patient/" + patientId + "/_history/1");
+		assertThat(resultIds).contains("Patient/" + patientId + "/_history/2");
+	}
+
+	private void verifySinceBehaviourWhenQueriedDateDuringTwoUpdatedDates(Long patientId, int delayInMs, Date dateV1, Date dateV2) throws IOException {
+		Date timeBetweenUpdates = DateUtils.addMilliseconds(dateV1, delayInMs / 2);
+		assertTrue(timeBetweenUpdates.after(dateV1));
+		assertTrue(timeBetweenUpdates.before(dateV2));
+		String url = "/Patient/" + patientId + "/_history?_since=" + toStr(timeBetweenUpdates);
+		myCaptureQueriesListener.clear();
+		List<String> resultIds = searchAndReturnUnqualifiedIdValues(url);
+		assertThat(resultIds).as(()->describeVersionsAndUrl(url)).hasSize(1);
+		assertThat(resultIds).contains("Patient/" + patientId + "/_history/2");
+	}
+
+	private String describeVersionsAndUrl(String theUrl) {
+		return runInTransaction(()->{
+			return "URL: " + theUrl + "\n\nHistory Entries:\n * " +
+				myResourceHistoryTableDao.findAll().stream().map(t->t.toString()).collect(Collectors.joining("\n * ")) +
+				"\n\nSQL Queries:\n * " +
+				myCaptureQueriesListener.getSelectQueries().stream().map(t -> t.getSql(true, false)).collect(Collectors.joining("\n * "));
+		});
+	}
+
+	private void verifySinceBehaviourWhenQueriedDateAfterTwoUpdatedDates(Long patientId, int delayInMs, Date dateV1, Date dateV2) throws IOException {
+		Date timeBetweenUpdates = DateUtils.addMilliseconds(dateV2, delayInMs);
+		assertTrue(timeBetweenUpdates.after(dateV1));
+		assertTrue(timeBetweenUpdates.after(dateV2));
+		List<String> resultIds = searchAndReturnUnqualifiedIdValues("/Patient/" + patientId + "/_history?_since=" + toStr(timeBetweenUpdates));
+		assertThat(resultIds).isEmpty();
+	}
+
+	private void verifySinceBehaviourWhenQueriedDateBeforeTwoUpdatedDates(Long patientId, int delayInMs, Date dateV1, Date dateV2) throws IOException {
+		Date timeBetweenUpdates = DateUtils.addMilliseconds(dateV1, -delayInMs);
+		assertTrue(timeBetweenUpdates.before(dateV1));
+		assertTrue(timeBetweenUpdates.before(dateV2));
+		List<String> resultIds = searchAndReturnUnqualifiedIdValues("/Patient/" + patientId + "/_history?_since=" + toStr(timeBetweenUpdates));
+		assertThat(resultIds).hasSize(2);
+		assertThat(resultIds).contains("Patient/" + patientId + "/_history/1");
+		assertThat(resultIds).contains("Patient/" + patientId + "/_history/2");
+	}
+
+	@ParameterizedTest
+	@MethodSource("createResourceParameters")
+	public void createResource_refIntegrityOnWriteAndRefTargetTypes_throws(CreateResourceInput theInput) {
+		ourLog.info(
+			String.format("Test case : \n%s", theInput.toString())
+		);
+
+		String patientStr = """
+			{
+			  "resourceType": "Patient",
+			  "managingOrganization": {
+			    "reference": "urn:uuid:d8080e87-1842-46b4-aea0-b65803bc2897"
+			  }
+			}
+			""";
+		IParser parser = myFhirContext.newJsonParser();
+		Patient patient = parser.parseResource(Patient.class, patientStr);
+
+		{
+			List<IBaseResource> orgs = myOrganizationDao
+				.search(new SearchParameterMap(), mySrd)
+				.getAllResources();
+
+			assertThat(orgs).isEmpty();
+		}
+
+		boolean isEnforceRefOnWrite = myStorageSettings.isEnforceReferentialIntegrityOnWrite();
+		boolean isEnforceRefTargetTypes = myStorageSettings.isEnforceReferenceTargetTypes();
+		boolean isAutoCreatePlaceholderReferences = myStorageSettings.isAutoCreatePlaceholderReferenceTargets();
+
+		try {
+			// allows resources to be created even if they have local resources that do not exist
+			myStorageSettings.setEnforceReferentialIntegrityOnWrite(theInput.IsEnforceRefOnWrite);
+			// ensures target references are using the correct resource type
+			myStorageSettings.setEnforceReferenceTargetTypes(theInput.IsEnforceRefOnType);
+			// will create the resource if it does not already exist
+			myStorageSettings.setAutoCreatePlaceholderReferenceTargets(theInput.IsAutoCreatePlaceholderReferences);
+
+			// should fail
+			myPatientDao.create(patient, mySrd);
+
+			// a bad reference can never create a new resource
+			{
+				List<IBaseResource> orgs = myOrganizationDao
+					.search(new SearchParameterMap(), mySrd)
+					.getAllResources();
+
+				assertThat(orgs).isEmpty();
+			}
+
+			// only if all 3 are true do we expect this to fail
+			assertThat(theInput.IsAutoCreatePlaceholderReferences
+				&& theInput.IsEnforceRefOnType
+				&& theInput.IsEnforceRefOnWrite).isFalse();
+		} catch (InvalidRequestException ex) {
+			assertThat(ex.getMessage()).as(ex.getMessage()).contains("Invalid resource reference");
+		} finally {
+			myStorageSettings.setEnforceReferentialIntegrityOnWrite(isEnforceRefOnWrite);
+			myStorageSettings.setEnforceReferenceTargetTypes(isEnforceRefTargetTypes);
+			myStorageSettings.setAutoCreatePlaceholderReferenceTargets(isAutoCreatePlaceholderReferences);
+		}
+	}
+
+	@Test
+	public void searchResource_bySourceWithPreserveRequestIdDisabled_isSuccess() {
+		String sourceUri = "http://acme.org";
+		String requestId = "my-fragment";
+
+		Patient p1 = new Patient();
+		p1.getMeta().setSource(sourceUri + "#" + requestId);
+
+		myClient
+			.create()
+			.resource(p1)
+			.execute();
+
+		Bundle results = myClient
+			.search()
+			.byUrl(myServerBase + "/Patient?_source=" + sourceUri)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		Patient returnedPatient = (Patient) results.getEntry().get(0).getResource();
+		String returnedPatientMetaSource = returnedPatient.getMeta().getSource();
+
+		assertThat(results.getEntry()).hasSize(1);
+		assertThat(returnedPatientMetaSource).startsWith(sourceUri);
+		assertFalse(returnedPatientMetaSource.endsWith(requestId));
+	}
+
+	@Test
+	public void searchResource_bySourceWithPreserveRequestIdEnabled_isSuccess() {
+		myStorageSettings.setPreserveRequestIdInResourceBody(true);
+		String sourceUri = "http://acme.org";
+		String requestId = "my-fragment";
+		String expectedSourceUrl = sourceUri + "#" + requestId;
+
+		Patient p1 = new Patient();
+		p1.getMeta().setSource(expectedSourceUrl);
+
+		myClient
+			.create()
+			.resource(p1)
+			.execute();
+
+		Bundle results = myClient
+			.search()
+			.byUrl(myServerBase + "/Patient?_source=" + sourceUri)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		Patient returnedPatient = (Patient) results.getEntry().get(0).getResource();
+		String returnedPatientMetaSource = returnedPatient.getMeta().getSource();
+
+		assertThat(results.getEntry()).hasSize(1);
+		assertEquals(expectedSourceUrl, returnedPatientMetaSource);
+	}
+
+	@Test
+	public void searchResource_byRequestIdWithPreserveRequestIdEnabled_isSuccess() {
+		myStorageSettings.setPreserveRequestIdInResourceBody(true);
+		String sourceUri = "http://acme.org";
+		String requestId = "my-fragment";
+		String expectedSourceUrl = sourceUri + "#" + requestId;
+
+		Patient patient = new Patient();
+		patient.getMeta().setSource(expectedSourceUrl);
+
+		myClient
+			.create()
+			.resource(patient)
+			.execute();
+
+		Bundle results = myClient
+			.search()
+			.byUrl(myServerBase + "/Patient?_source=%23" + requestId)
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(results.getEntry()).hasSize(1);
+
+		Patient returnedPatient = (Patient) results.getEntry().get(0).getResource();
+		String returnedPatientMetaSource = returnedPatient.getMeta().getSource();
+
+		assertEquals(expectedSourceUrl, returnedPatientMetaSource);
+	}
+
+	@Test
+	public void searchResource_bySourceAndWrongRequestIdWithPreserveRequestIdEnabled_fails() {
+		myStorageSettings.setPreserveRequestIdInResourceBody(true);
+		Patient patient = new Patient();
+		patient.getMeta().setSource("urn:source:0#my-fragment123");
+
+		myClient
+			.create()
+			.resource(patient)
+			.execute();
+
+		Bundle results = myClient
+			.search()
+			.byUrl(myServerBase + "/Patient?_source=%23my-fragment000")
+			.returnBundle(Bundle.class)
+			.execute();
+
+		assertThat(results.getEntry()).isEmpty();
+	}
+
+	@Test
+	public void testConceptMapInTransactionBundle() {
+		ConceptMap conceptMap = new ConceptMap();
+		conceptMap.setUrl("http://www.acme.org");
+		conceptMap.setStatus(Enumerations.PublicationStatus.ACTIVE);
+
+		ConceptMap.ConceptMapGroupComponent group = conceptMap.addGroup();
+		group.setSource("http://www.some-source.ca/codeSystem/CS");
+		group.setTarget("http://www.some-target.ca/codeSystem/CS");
+
+		ConceptMap.SourceElementComponent source = group.addElement();
+		source.setCode("TEST1");
+		ConceptMap.TargetElementComponent target = source.addTarget();
+		target.setCode("TEST2");
+		target.setDisplay("TEST CODE");
+		target.setEquivalence(Enumerations.ConceptMapEquivalence.EQUAL);
+
+		Bundle requestBundle = new Bundle();
+		requestBundle.setType(BundleType.TRANSACTION);
+		Bundle.BundleEntryRequestComponent request = new Bundle.BundleEntryRequestComponent();
+		request.setUrl("/ConceptMap?url=http://www.acme.org");
+		request.setMethod(HTTPVerb.POST);
+		requestBundle.addEntry().setResource(conceptMap).setRequest(request);
+
+		Bundle responseBundle = myClient.transaction().withBundle(requestBundle).execute();
+		OperationOutcome oo = (OperationOutcome) responseBundle.getEntry().get(0).getResponse().getOutcome();
+		assertEquals(StorageResponseCodeEnum.SUCCESSFUL_CREATE.name(), oo.getIssueFirstRep().getDetails().getCodingFirstRep().getCode());
+		assertEquals(StorageResponseCodeEnum.SYSTEM, oo.getIssueFirstRep().getDetails().getCodingFirstRep().getSystem());
+		assertThat(responseBundle.getEntry()).hasSize(1);
+
+		IdType id = new IdType(responseBundle.getEntry().get(0).getResponse().getLocationElement());
+		ConceptMap savedConceptMap = (ConceptMap) myClient.read().resource("ConceptMap").withId(id).execute();
+		assertEquals(conceptMap.getUrl(), savedConceptMap.getUrl());
+		assertEquals(conceptMap.getStatus(), savedConceptMap.getStatus());
+		assertThat(savedConceptMap.getGroup()).hasSize(1);
+
+		ConceptMap.ConceptMapGroupComponent savedGroup = savedConceptMap.getGroup().get(0);
+		assertEquals(group.getSource(), savedGroup.getSource());
+		assertEquals(group.getTarget(), savedGroup.getTarget());
+		assertThat(savedGroup.getElement()).hasSize(1);
+
+		ConceptMap.SourceElementComponent savedSource = savedGroup.getElement().get(0);
+		assertEquals(source.getCode(), savedSource.getCode());
+		assertThat(source.getTarget()).hasSize(1);
+
+		ConceptMap.TargetElementComponent savedTarget = savedSource.getTarget().get(0);
+		assertEquals(target.getCode(), savedTarget.getCode());
+		assertEquals(target.getDisplay(), savedTarget.getDisplay());
+		assertEquals(target.getEquivalence(), savedTarget.getEquivalence());
+	}
+
+	@Nonnull
+	private IIdType createNewPatientWithHistoryTwoVersions() {
+		String TEST_SYSTEM_NAME = "testHistoryRewrite";
+		String TEST_FAMILY_NAME = "Johnson";
+		Patient p = new Patient();
+		p.setActive(true);
+		p.addIdentifier().setSystem("urn:system").setValue(TEST_SYSTEM_NAME);
+		IIdType id = myClient.create().resource(p).execute().getId().toUnqualifiedVersionless();
+		ourLog.info("Created patient, got it: {}", id);
+
+		p = new Patient();
+		p.setActive(true);
+		p.addIdentifier().setSystem("urn:system").setValue(TEST_SYSTEM_NAME);
+		p.addName().setFamily(TEST_FAMILY_NAME);
+		p.setId("Patient/" + id.getIdPart());
+
+		myClient.update().resource(p).execute();
+		return id;
+	}
+
+	private String toStr(Date theDate) {
+		return new InstantDt(theDate).getValueAsString();
+	}
+
+	@Test
+	void searchResource_withIncludeDeletedParam() {
+		// Given
+		Patient patient = new Patient();
+		patient.addName(new HumanName().setFamily("TestFamily").addGiven("TestGiven"));
+		patient.setActive(true);
+
+		IIdType id = myPatientDao.create(patient, mySrd).getId();
+		myPatientDao.delete(id, mySrd);
+
+		// When
+		Bundle results = myClient
+			.search()
+			.byUrl(myServerBase + "/Patient?" + Constants.PARAM_INCLUDE_DELETED + SearchIncludeDeletedEnum.EXCLUSIVE.getCode())
+			.returnBundle(Bundle.class)
+			.execute();
+
+		// Then - returns nothing, _includeDeleted is an unsupported search param (for now)
+		assertThat(results.getEntry()).isEmpty();
+	}
+
+	@Test
+	void conditionalUpdate_withIncludeDeletedParam() {
+		// Given
+		Patient patient = new Patient();
+		patient.addName(new HumanName().setFamily("TestFamily").addGiven("TestGiven"));
+		patient.setActive(true);
+
+		IIdType id = myPatientDao.create(patient, mySrd).getId();
+		myPatientDao.delete(id, mySrd);
+
+		// When/Then
+		InvalidRequestException exception = assertThrows(InvalidRequestException.class, () -> myClient
+			.update()
+			.resource(patient)
+			.conditionalByUrl("Patient?" + Constants.PARAM_INCLUDE_DELETED + SearchIncludeDeletedEnum.EXCLUSIVE.getCode())
+			.execute()
+		);
+
+		// _includeDeleted is an unsupported search param (for now)
+		assertThat(exception.getMessage()).contains("URL has no search parameters");
+	}
+
+	static Stream<Arguments> testSearchIdentifierWithEscapedCharactersArguments() {
+		return Stream.of(
+				Pair.of("A|B,C|D", false),
+				Pair.of("A\\|B\\,C\\|D", true),
+				Pair.of("http://foo|123,456|A|B,C|D", false),
+				Pair.of("http://foo\\|123\\,456|A\\|B\\,C\\|D", true),
+				Pair.of("http://foo|123,456|", false),
+				Pair.of("http://foo\\|123\\,456|", true)
+				)
+			.map(t -> Arguments.of("Patient?identifier=" + UrlUtil.escapeUrlParam(t.getKey()), t.getValue()));
+	}
+
+	public static Stream<Arguments> createFhirSearchWithChainingAndCountParams() {
+		// 5 resources with 2 refs; 3 resources with 1 ref
+		Map<Integer, Integer> m1 = Map.of(2, 5, 1, 3);
+		// 10 resources with 2 refs; 2 resources with 1 ref
+		Map<Integer, Integer> m2 = Map.of(2, 10, 1, 2);
+		// 251 resources with 2 refs; 2 resources with 1 ref
+		Map<Integer, Integer> m3 = Map.of(2, 251, 1, 2);
+		// 4 resources with 3 refs; 1 resources with 1 ref
+		Map<Integer, Integer> m4 = Map.of(3, 4, 1, 1);
+		// 2 resources with 3 refs; 2 resources with 2 refs, 3 resources with 1 ref
+		Map<Integer, Integer> m5 = Map.of(3, 2, 2, 2, 1, 3);
+		Map<Integer, Integer> m6 = Map.of(3, 3, 1, 4);
+		Map<Integer, Integer> m7 = Map.of(2, 1, 1, 11);
+
+
+		return Stream.of(
+			// Map of ref count to resource count; the max page size; the pre-fetch thresholds to use
+			Arguments.of(m1, null, null),
+			Arguments.of(m2, null, null),
+			Arguments.of(m3, 500, null),
+			Arguments.of(m4, null, null),
+			Arguments.of(m5, null, null),
+			Arguments.of(m1, null, List.of(9, 13, 503, -1)),
+			Arguments.of(m6, null, null),
+			Arguments.of(m7, null, null)
+		);
+	}
+
+	private static List<CreateResourceInput> createResourceParameters() {
+		boolean[] bools = new boolean[]{true, false};
+		List<CreateResourceInput> input = new ArrayList<>();
+		for (boolean bool : bools) {
+			for (boolean bool2 : bools) {
+				for (boolean bool3 : bools) {
+					input.add(new CreateResourceInput(bool, bool2, bool3));
+				}
+			}
+		}
+		return input;
+	}
+
+	private static class CreateResourceInput {
+		boolean IsEnforceRefOnWrite;
+		boolean IsEnforceRefOnType;
+		boolean IsAutoCreatePlaceholderReferences;
+
+		public CreateResourceInput(
+			boolean theEnforceRefOnWrite,
+			boolean theEnforceRefOnType,
+			boolean theAutoCreatePlaceholders
+		) {
+			IsEnforceRefOnWrite = theEnforceRefOnWrite;
+			IsEnforceRefOnType = theEnforceRefOnType;
+			IsAutoCreatePlaceholderReferences = theAutoCreatePlaceholders;
+		}
+
+		@Override
+		public String toString() {
+			return "IsEnforceReferentialIntegrityOnWrite : "
+				+ IsEnforceRefOnWrite + "\n"
+				+ "IsEnforceReferenceTargetTypes : "
+				+ IsEnforceRefOnType + "\n"
+				+ "IsAutoCreatePlaceholderReferenceTargets : "
+				+ IsAutoCreatePlaceholderReferences + "\n";
+		}
+	}
+
+	@Nested
+	public class IndexStorageOptimizedMissingSearchParameterTests extends MissingSearchParameterTests {
+		@BeforeEach
+		public void init() {
+			super.init();
+			myStorageSettings.setIndexStorageOptimized(true);
+		}
+
+		@AfterEach
+		public void cleanUp() {
+			myPagingProvider.setMaximumPageSize(BasePagingProvider.DEFAULT_MAX_PAGE_SIZE);
+			myStorageSettings.setSearchPreFetchThresholds(JpaStorageSettings.DEFAULT_SEARCH_PRE_FETCH_THRESHOLDS);
+			myStorageSettings.setIndexStorageOptimized(false);
+		}
+	}
+
+	@Nested
+	public class MissingSearchParameterTests {
+
+		private IParser myParser;
+
+		@BeforeEach
+		public void init() {
+			myParser = myFhirContext.newJsonParser();
+			myParser.setPrettyPrint(true);
+
+			myStorageSettings.setIndexMissingFields(JpaStorageSettings.IndexEnabledEnum.DISABLED);
+		}
+
+		/**
+		 * Verifies that the returned Bundle contains the resource
+		 * with the id provided.
+		 *
+		 * @param theBundle - returned bundle
+		 * @param theType   - provided resource id
+		 */
+		private void verifyFoundBundle(Bundle theBundle, IIdType theType) {
+			ourLog.info(myParser.encodeResourceToString(theBundle));
+
+			assertEquals(1, theBundle.getTotal());
+			List<IIdType> list = toUnqualifiedVersionlessIds(theBundle);
+			ourLog.info(list.size() + " resources found");
+			IIdType type = list.get(0);
+			assertEquals(theType.toString(), type.toString());
+		}
+
+		private void verifyBundleIsEmpty(Bundle theBundle) {
+			ourLog.info(myParser.encodeResourceToString(theBundle));
+			assertEquals(0, theBundle.getTotal());
+		}
+
+		private IIdType createResource(Resource theResource) {
+			IIdType id = myClient.create()
+				.resource(theResource)
+				.prettyPrint()
+				.encodedXml()
+				.execute()
+				.getId()
+				.toUnqualifiedVersionless();
+			theResource.setId(id);
+			ourLog.info("Created:\n{}",
+				myParser.encodeResourceToString(theResource));
+			return id;
+		}
+
+		/**
+		 * Runs the search on the given resource type with the given (missing) criteria
+		 *
+		 * @param theResourceClass - the resource type class
+		 * @param theCriteria      - the missing critia to use
+		 * @return - the found bundle
+		 */
+		private Bundle doSearch(Class<? extends BaseResource> theResourceClass, ICriterion<?> theCriteria) {
+			//@formatter:off
+			return myClient
+				.search()
+				.forResource(theResourceClass)
+				.where(theCriteria)
+				.count(100)
+				.prettyPrint()
+				.returnBundle(Bundle.class)
+				.execute();
+			//@formatter:on
+		}
+
+		/**
+		 * Runs the actual test for whichever search parameter and given inputs we want.
+		 */
+		private void runTest(
+			MissingSearchTestParameters theParams,
+			XtoY<Boolean, Resource> theResourceProvider,
+			XtoY<Boolean, Bundle> theRunner
+		) {
+			String testMethod = new Exception().getStackTrace()[1].getMethodName();
+			ourLog.info(
+				"\nStarting {}.\nMissing fields indexed: {},\nHas Field Present: {},\nReturn resources with Missing Field: {}.\nWe expect {} returned result(s).",
+				testMethod,
+				theParams.myEnableMissingFieldsValue.name(),
+				theParams.myIsValuePresentOnResource,
+				theParams.myIsMissing,
+				theParams.myIsValuePresentOnResource == theParams.myIsMissing ? "0" : "1"
+			);
+
+			// setup
+			myStorageSettings.setIndexMissingFields(theParams.myEnableMissingFieldsValue);
+
+			// create our resource
+			Resource resource = theResourceProvider.doTask(theParams.myIsValuePresentOnResource);
+
+			// save the resource
+			IIdType resourceId = createResource(resource);
+
+			// run test
+			Bundle found = theRunner.doTask(theParams.myIsMissing);
+
+			if ((theParams.myIsMissing && !theParams.myIsValuePresentOnResource)
+				|| (theParams.myIsValuePresentOnResource && !theParams.myIsMissing)) {
+				verifyFoundBundle(found, resourceId);
+			} else {
+				verifyBundleIsEmpty(found);
+			}
+		}
+
+		@ParameterizedTest
+		@MethodSource("provideParameters")
+		public void testMissingStringParameter(MissingSearchTestParameters theParams) {
+			runTest(
+				theParams, (hasField) -> {
+					Organization org = new Organization();
+					if (hasField) {
+						org.setName("anything");
+					}
+					return org;
+				}, (isMissing) -> doSearch(Organization.class, Organization.NAME.isMissing(isMissing))
+			);
+		}
+
+		@ParameterizedTest
+		@MethodSource("provideParameters")
+		public void testMissingDateParameter(MissingSearchTestParameters theParams) {
+			runTest(theParams,
+				(hasField) -> {
+					Patient patient = new Patient();
+					if (hasField) {
+						Calendar cal = Calendar.getInstance();
+						cal.set(2000, Calendar.DECEMBER, 25);
+						patient.setBirthDate(cal.getTime());
+					}
+					return patient;
+				}, (isMissing) -> doSearch(Patient.class, Patient.BIRTHDATE.isMissing(isMissing)));
+		}
+
+		@ParameterizedTest
+		@MethodSource("provideParameters")
+		public void testMissingTokenClientParameter(MissingSearchTestParameters theParams) {
+			runTest(theParams,
+				hasField -> {
+					Patient patient = new Patient();
+					if (hasField) {
+						patient.setGender(AdministrativeGender.FEMALE);
+					}
+					return patient;
+				}, isMissing -> doSearch(Patient.class, Patient.GENDER.isMissing(isMissing)));
+		}
+
+		@ParameterizedTest
+		@MethodSource("provideParameters")
+		public void testMissingReferenceClientParameter(MissingSearchTestParameters theParams) {
+			runTest(theParams,
+				hasField -> {
+					Patient patient = new Patient();
+					if (hasField) {
+						Practitioner practitioner = new Practitioner();
+						IIdType practitionerId = createResource(practitioner);
+
+						patient.setGeneralPractitioner(Collections.singletonList(new Reference(practitionerId)));
+					}
+					return patient;
+				}, isMissing -> doSearch(Patient.class, Patient.GENERAL_PRACTITIONER.isMissing(isMissing)));
+		}
+
+		@ParameterizedTest
+		@MethodSource("provideParameters")
+		public void testMissingReferenceClientParameterOnIndexedContainedResources(MissingSearchTestParameters theParams) {
+			myStorageSettings.setIndexOnContainedResources(true);
+			runTest(theParams,
+				hasField -> {
+					Observation obs = new Observation();
+					if (hasField) {
+						Encounter enc = new Encounter();
+						IIdType id = createResource(enc);
+
+						obs.setEncounter(new Reference(id));
+					}
+					return obs;
+				}, isMissing -> {
+					ICriterion<?> criterion = Observation.ENCOUNTER.isMissing(isMissing);
+					return doSearch(Observation.class, criterion);
+				});
+
+			myStorageSettings.setIndexOnContainedResources(false);
+		}
+
+		@ParameterizedTest
+		@MethodSource("provideParameters")
+		public void testMissingURLParameter(MissingSearchTestParameters theParams) {
+			runTest(theParams,
+				hasField -> {
+					String methodName = new Exception().getStackTrace()[0].getMethodName();
+
+					SearchParameter sp = new SearchParameter();
+					sp.addBase("MolecularSequence");
+					sp.setCode(methodName);
+					sp.setType(Enumerations.SearchParamType.NUMBER);
+					sp.setExpression("MolecularSequence.variant-end");
+					sp.setXpathUsage(SearchParameter.XPathUsageType.NORMAL);
+					sp.setStatus(Enumerations.PublicationStatus.ACTIVE);
+					if (hasField) {
+						sp.setUrl("http://example.com");
+					}
+					return sp;
+				}, isMissing -> doSearch(SearchParameter.class, SearchParameter.URL.isMissing(isMissing)));
+		}
+
+		@ParameterizedTest
+		@MethodSource("provideParameters")
+		public void testMissingQuantityClientParameter(MissingSearchTestParameters theParams) {
+			runTest(theParams,
+				hasField -> {
+					Observation obs = new Observation();
+					if (hasField) {
+						obs.setValue(new Quantity(3));
+					}
+					return obs;
+				}, isMissing -> doSearch(Observation.class, Observation.VALUE_QUANTITY.isMissing(isMissing)));
+		}
+
+		@ParameterizedTest
+		@MethodSource("provideParameters")
+		public void testMissingNumberClientParameter(MissingSearchTestParameters theParams) {
+			runTest(theParams,
+				hasField -> {
+					String methodName = new Exception().getStackTrace()[0].getMethodName();
+
+					MolecularSequence molecularSequence = new MolecularSequence();
+					if (hasField) {
+						molecularSequence.setVariant(Collections.singletonList(
+							new MolecularSequence.MolecularSequenceVariantComponent().setEnd(1)
+						));
+					}
+
+					return molecularSequence;
+				}, isMissing -> {
+					NumberClientParam numberClientParam = new NumberClientParam("variant-end");
+					return doSearch(
+						MolecularSequence.class,
+						numberClientParam.isMissing(isMissing)
+					);
+				});
+		}
+
+		private interface XtoY<X, Y> {
+			Y doTask(X theInput);
+		}
+
+		/**
+		 * The method that generates parameters for tests
+		 */
+		private static Stream<Arguments> provideParameters() {
+			return Stream.of(
+				// 1
+				Arguments.of(new MissingSearchTestParameters(JpaStorageSettings.IndexEnabledEnum.ENABLED, true, true)),
+				// 2
+				Arguments.of(new MissingSearchTestParameters(JpaStorageSettings.IndexEnabledEnum.ENABLED, false, false)),
+				// 3
+				Arguments.of(new MissingSearchTestParameters(JpaStorageSettings.IndexEnabledEnum.ENABLED, false, true)),
+				// 4
+				Arguments.of(new MissingSearchTestParameters(JpaStorageSettings.IndexEnabledEnum.ENABLED, true, false)),
+				// 5
+				Arguments.of(new MissingSearchTestParameters(JpaStorageSettings.IndexEnabledEnum.DISABLED, true, true)),
+				// 6
+				Arguments.of(new MissingSearchTestParameters(JpaStorageSettings.IndexEnabledEnum.DISABLED, false, true)),
+				// 7
+				Arguments.of(new MissingSearchTestParameters(JpaStorageSettings.IndexEnabledEnum.DISABLED, true, false)),
+				// 8
+				Arguments.of(new MissingSearchTestParameters(JpaStorageSettings.IndexEnabledEnum.DISABLED, false, false))
+			);
+		}
+
+		public static class MissingSearchTestParameters {
+			/**
+			 * The setting for IndexMissingFields
+			 */
+			public final JpaStorageSettings.IndexEnabledEnum myEnableMissingFieldsValue;
+
+			/**
+			 * Whether to use :missing=true/false
+			 */
+			public final boolean myIsMissing;
+
+			/**
+			 * Whether or not the field is populated or not.
+			 * True -> populate field.
+			 * False -> not populated
+			 */
+			public final boolean myIsValuePresentOnResource;
+
+			public MissingSearchTestParameters(
+				JpaStorageSettings.IndexEnabledEnum theEnableMissingFields,
+				boolean theIsMissing,
+				boolean theHasField
+			) {
+				myEnableMissingFieldsValue = theEnableMissingFields;
+				myIsMissing = theIsMissing;
+				myIsValuePresentOnResource = theHasField;
+			}
+
+			@Override
+			public String toString() {
+				return new ToStringBuilder(this, ToStringStyle.NO_CLASS_NAME_STYLE)
+					.append("valuePresent", myIsValuePresentOnResource)
+					.append("isMissing", myIsMissing)
+					.append("enableMissingFields", myEnableMissingFieldsValue)
+					.toString();
+			}
+		}
+	}
+
+	@Nested
+	class SearchWithIdentifiers {
+		private static final String SYSTEM = "http://acme.org/fhir/identifier/mrn";
+		private static final String VALUE = "123456";
+		private IIdType myPatientId;
+
+		@BeforeEach
+		void beforeEach() {
+			final Patient patient = new Patient();
+			patient.addIdentifier().setValue(VALUE).setSystem(SYSTEM);
+			patient.addName().setUse(HumanName.NameUse.OFFICIAL).setFamily("Abbott").addGiven("Elias").addPrefix("Mr.");
+			patient.setGender(Enumerations.AdministrativeGender.MALE);
+
+			myPatientId = myClient.create().resource(patient).execute().getResource().getIdElement();
+
+			final Observation observation = new Observation();
+			observation.setStatus(Observation.ObservationStatus.FINAL);
+			observation.setCode(new CodeableConcept().addCoding(new Coding().setSystem("http://loinc.org").setCode("15074-8").setDisplay("Glucose [Moles/volume] in Blood")));
+			observation.setSubject(new Reference(myPatientId.toUnqualifiedVersionless()).setIdentifier(new Identifier().setSystem(SYSTEM).setValue(VALUE)));
+
+			myClient.create().resource(observation).execute().getResource().getIdElement();
+		}
+
+		@Test
+		void searchWithIdentifierToIdentifier() {
+			testAndAssertFailureFor("Observation?subject:identifier=http://acme.org/fhir/identifier/mrn|123456");
+		}
+
+		@Test
+		void searchWithIdentifierToId() {
+			testAndAssertFailureFor(String.format("Observation?subject:identifier=%s", myPatientId.getIdPart()));
+		}
+
+		private void testAndAssertFailureFor(String theUrl) {
+			assertThatThrownBy(() ->
+				myClient.search()
+					.byUrl(theUrl)
+					.returnBundle(Bundle.class)
+					.execute())
+				.isInstanceOf(InvalidRequestException.class)
+				.hasMessage("HTTP 400 Bad Request: HAPI-2498: Unsupported search modifier(s): \"[:identifier]\" for resource type \"Observation\". Valid search modifiers are: [:contains, :exact, :in, :iterate, :missing, :not-in, :of-type, :recurse, :text]");
+		}
+	}
+
+
+	@Nonnull
+	private static List<String> extractFamilyNamesFromPatientsInBundle(Bundle bundle) {
+		List<String> familyNames = bundle.getEntry().stream().map(t -> ((Patient)t.getResource()).getName().get(0).getFamily()).toList();
+		return familyNames;
+	}
+
+}

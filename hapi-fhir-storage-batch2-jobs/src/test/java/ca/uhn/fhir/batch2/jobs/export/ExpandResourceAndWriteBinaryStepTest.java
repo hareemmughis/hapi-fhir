@@ -1,0 +1,388 @@
+package ca.uhn.fhir.batch2.jobs.export;
+
+
+import ca.uhn.fhir.batch2.api.IJobDataSink;
+import ca.uhn.fhir.batch2.api.IJobStepExecutionServices;
+import ca.uhn.fhir.batch2.api.RunOutcome;
+import ca.uhn.fhir.batch2.api.StepExecutionDetails;
+import ca.uhn.fhir.batch2.jobs.chunk.TypedPidJson;
+import ca.uhn.fhir.batch2.jobs.export.models.BulkExportBinaryFileId;
+import ca.uhn.fhir.batch2.jobs.export.models.ResourceIdList;
+import ca.uhn.fhir.batch2.jobs.export.v3.ExpandResourceAndWriteBinaryStep;
+import ca.uhn.fhir.batch2.model.JobInstance;
+import ca.uhn.fhir.batch2.model.WorkChunk;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.interceptor.executor.InterceptorService;
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.api.config.JpaStorageSettings;
+import ca.uhn.fhir.jpa.api.dao.DaoRegistry;
+import ca.uhn.fhir.jpa.api.dao.IFhirResourceDao;
+import ca.uhn.fhir.jpa.api.model.DaoMethodOutcome;
+import ca.uhn.fhir.jpa.api.model.PersistentIdToForcedIdMap;
+import ca.uhn.fhir.jpa.api.svc.IIdHelperService;
+import ca.uhn.fhir.jpa.dao.tx.IHapiTransactionService;
+import ca.uhn.fhir.jpa.dao.tx.NonTransactionalHapiTransactionService;
+import ca.uhn.fhir.jpa.model.config.PartitionSettings;
+import ca.uhn.fhir.jpa.model.dao.JpaPid;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
+import ca.uhn.fhir.model.api.IQueryParameterType;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.api.server.SystemRequestDetails;
+import ca.uhn.fhir.rest.api.server.bulk.BulkExportJobParameters;
+import ca.uhn.fhir.rest.api.server.storage.IResourcePersistentId;
+import ca.uhn.fhir.rest.server.SimpleBundleProvider;
+import jakarta.annotation.Nonnull;
+import org.hl7.fhir.instance.model.api.IBaseBinary;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Patient;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.Spy;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.util.StringUtils;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static ca.uhn.fhir.rest.api.Constants.CT_APP_NDJSON;
+import static ca.uhn.fhir.rest.api.Constants.PARAM_ID;
+import static org.apache.commons.lang3.StringUtils.leftPad;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+public class ExpandResourceAndWriteBinaryStepTest {
+
+	@Mock
+	private DaoRegistry myDaoRegistry;
+
+	@Mock
+	IIdHelperService<JpaPid> myIdHelperService;
+
+	@Mock
+	IJobStepExecutionServices myJobStepExecutionServices;
+
+	@SuppressWarnings("unused")
+	@Spy
+	private InterceptorService myInterceptorService = new InterceptorService();
+
+	@Spy
+	private PartitionSettings myPartitionSettings = new PartitionSettings();
+
+	@SuppressWarnings("unused")
+	@Spy
+	private FhirContext myFhirContext = FhirContext.forR4Cached();
+
+	@Spy
+	private JpaStorageSettings myStorageSettings = new JpaStorageSettings();
+
+	@SuppressWarnings("unused")
+	@Spy
+	private IHapiTransactionService myTransactionService = new NonTransactionalHapiTransactionService();
+
+	@InjectMocks
+	private ExpandResourceAndWriteBinaryStep myFinalStep;
+
+	@BeforeEach
+	public void init() {
+		myFinalStep.setIdHelperServiceForUnitTest(myIdHelperService);
+	}
+
+	private BulkExportJobParameters createParameters() {
+		BulkExportJobParameters parameters = new BulkExportJobParameters();
+		parameters.setResourceTypes(Arrays.asList("Patient", "Observation"));
+		parameters.setExportStyle(BulkExportJobParameters.ExportStyle.PATIENT);
+		parameters.setOutputFormat(CT_APP_NDJSON);
+		parameters.setSince(new Date());
+		return parameters;
+	}
+
+	private StepExecutionDetails<BulkExportJobParameters, ResourceIdList> createInput(ResourceIdList theData,
+																					  BulkExportJobParameters theParameters,
+																					  JobInstance theInstance) {
+		return new StepExecutionDetails<>(
+			theParameters,
+			theData,
+			theInstance,
+			new WorkChunk().setId("1"),
+			myJobStepExecutionServices
+		);
+	}
+
+	private IFhirResourceDao<?> mockOutDaoRegistry() {
+		IFhirResourceDao<?> mockDao = mock(IFhirResourceDao.class);
+		when(myDaoRegistry.getResourceDao(anyString()))
+			.thenReturn(mockDao);
+		return mockDao;
+	}
+
+	private RequestPartitionId getPartitionId(boolean thePartitioned) {
+		if (thePartitioned) {
+			return RequestPartitionId.fromPartitionName("Partition-A");
+		} else {
+			return RequestPartitionId.fromPartitionId(null);
+		}
+	}
+
+	@Mock
+	IFhirResourceDao<IBaseBinary> binaryDao;
+	@Mock
+	IJobDataSink<BulkExportBinaryFileId> sink;
+	@Captor
+	ArgumentCaptor<IBaseBinary> binaryCaptor;
+	@Captor
+	ArgumentCaptor<SystemRequestDetails> binaryDaoCreateRequestDetailsCaptor;
+
+	@Test
+	public void testExpandResources_RespectMaximumFileCapacity() {
+		// setup
+		myStorageSettings.setBulkExportFileMaximumCapacity(1000);
+
+		JobInstance instance = new JobInstance();
+		instance.setInstanceId("1");
+		IFhirResourceDao<?> patientDao = mockOutDaoRegistry();
+
+		ResourceIdList idList = new ResourceIdList();
+		ArrayList<IBaseResource> resources = createResourceList(idList, 3000, 0);
+
+		StepExecutionDetails<BulkExportJobParameters, ResourceIdList> input = createInput(
+			idList,
+			createParameters(),
+			instance
+		);
+
+		// when
+		when(patientDao.search(any(), any())).thenAnswer(t -> {
+			SearchParameterMap map = t.getArgument(0, SearchParameterMap.class);
+			List<List<IQueryParameterType>> idsAnd = map.get(PARAM_ID);
+			assertEquals(1, idsAnd.size());
+			List<IQueryParameterType> idsOr = idsAnd.get(0);
+			return new SimpleBundleProvider(resources.subList(0, idsOr.size()));
+		});
+
+		when(myIdHelperService.newPidFromStringIdAndResourceName(any(), anyString(), anyString())).thenAnswer(t -> {
+			String fhirId = t.getArgument(1, String.class);
+			return JpaPid.fromId(Long.parseLong(fhirId));
+		});
+		when(myIdHelperService.translatePidsToForcedIds(any())).thenAnswer(t -> {
+			@SuppressWarnings("unchecked")
+			Set<IResourcePersistentId<JpaPid>> inputSet = t.getArgument(0, Set.class);
+			Map<IResourcePersistentId<?>, Optional<String>> map = new HashMap<>();
+			for (var next : inputSet) {
+				map.put(next, Optional.empty());
+			}
+			return new PersistentIdToForcedIdMap<>(map);
+		});
+		when(myDaoRegistry.getResourceDao(eq("Binary")))
+			.thenReturn(binaryDao);
+		AtomicInteger binaryIdCounter = new AtomicInteger(1);
+		when(binaryDao.update(any(IBaseBinary.class), any(RequestDetails.class)))
+			.thenAnswer(t -> {
+				IIdType binaryId = new IdType("Binary/" + binaryIdCounter.getAndIncrement());
+				DaoMethodOutcome methodOutcome = new DaoMethodOutcome();
+				methodOutcome.setId(binaryId);
+				return methodOutcome;
+			});
+		when(myJobStepExecutionServices.newRequestDetails(any())).thenReturn(new SystemRequestDetails());
+
+		// test
+		RunOutcome outcome = myFinalStep.run(input, sink);
+
+		// verify
+		assertEquals(new RunOutcome(resources.size()).getRecordsProcessed(), outcome.getRecordsProcessed());
+
+		verify(binaryDao, times(3))
+			.update(binaryCaptor.capture(), binaryDaoCreateRequestDetailsCaptor.capture());
+
+		for (int i = 0; i < 3; i++) {
+			String outputString = new String(binaryCaptor.getAllValues().get(i).getContent());
+			assertEquals(1000, StringUtils.countOccurrencesOf(outputString, "\n"));
+		}
+
+	}
+
+	@Test
+	public void testExpandResources_RespectMaximumFileSize() {
+		// setup
+		myStorageSettings.setBulkExportFileMaximumSize(10000);
+
+		JobInstance instance = new JobInstance();
+		instance.setInstanceId("1");
+		IFhirResourceDao<?> patientDao = mockOutDaoRegistry();
+
+		ResourceIdList idList = new ResourceIdList();
+		ArrayList<IBaseResource> resources = createResourceList(idList, 100, 1000);
+
+		StepExecutionDetails<BulkExportJobParameters, ResourceIdList> input = createInput(
+			idList,
+			createParameters(),
+			instance
+		);
+
+		// when
+		when(patientDao.search(any(), any())).thenAnswer(t -> {
+			SearchParameterMap map = t.getArgument(0, SearchParameterMap.class);
+			List<List<IQueryParameterType>> idsAnd = map.get(PARAM_ID);
+			assertEquals(1, idsAnd.size());
+			List<IQueryParameterType> idsOr = idsAnd.get(0);
+			return new SimpleBundleProvider(resources.subList(0, idsOr.size()));
+		});
+
+		when(myIdHelperService.newPidFromStringIdAndResourceName(any(), anyString(), anyString())).thenAnswer(t -> {
+			String fhirId = t.getArgument(1, String.class);
+			return JpaPid.fromId(Long.parseLong(fhirId));
+		});
+		when(myIdHelperService.translatePidsToForcedIds(any())).thenAnswer(t -> {
+			@SuppressWarnings("unchecked")
+			Set<IResourcePersistentId<JpaPid>> inputSet = t.getArgument(0, Set.class);
+			Map<IResourcePersistentId<?>, Optional<String>> map = new HashMap<>();
+			for (var next : inputSet) {
+				map.put(next, Optional.empty());
+			}
+			return new PersistentIdToForcedIdMap<>(map);
+		});
+		when(myDaoRegistry.getResourceDao(eq("Binary")))
+			.thenReturn(binaryDao);
+		AtomicInteger binaryIdCounter = new AtomicInteger(1);
+		when(binaryDao.update(any(IBaseBinary.class), any(RequestDetails.class)))
+			.thenAnswer(t -> {
+				IIdType binaryId = new IdType("Binary/" + binaryIdCounter.getAndIncrement());
+				DaoMethodOutcome methodOutcome = new DaoMethodOutcome();
+				methodOutcome.setId(binaryId);
+				return methodOutcome;
+			});
+		when(myJobStepExecutionServices.newRequestDetails(any())).thenReturn(new SystemRequestDetails());
+
+		// test
+		RunOutcome outcome = myFinalStep.run(input, sink);
+
+		// verify
+		assertEquals(new RunOutcome(resources.size()).getRecordsProcessed(), outcome.getRecordsProcessed());
+
+		verify(binaryDao, atLeast(2))
+			.update(binaryCaptor.capture(), binaryDaoCreateRequestDetailsCaptor.capture());
+
+		assertThat(binaryCaptor.getAllValues()).hasSizeGreaterThan(10);
+
+		int totalRecords = 0;
+		for (int i = 0; i < binaryCaptor.getAllValues().size(); i++) {
+			String outputString = new String(binaryCaptor.getAllValues().get(i).getContent());
+			if (i < binaryCaptor.getAllValues().size() - 1) {
+				// Most files should be close to the maximum size
+				assertThat(outputString).hasSizeGreaterThan(8000);
+			} else {
+				// The very last file might not be since it might not have enough
+				// files to reach the max size
+				assertThat(outputString).isNotBlank();
+			}
+			assertThat(outputString).hasSizeLessThan(10000);
+			totalRecords += StringUtils.countOccurrencesOf(outputString, "\n");
+		}
+
+		assertEquals(100, totalRecords);
+	}
+
+
+	@Test
+	public void run_validInputNoErrors_succeeds() {
+		// setup
+		JobInstance instance = new JobInstance();
+		instance.setInstanceId("1");
+		IFhirResourceDao<?> patientDao = mockOutDaoRegistry();
+
+		ResourceIdList idList = new ResourceIdList();
+		ArrayList<IBaseResource> resources = createResourceList(idList);
+
+		StepExecutionDetails<BulkExportJobParameters, ResourceIdList> input = createInput(
+			idList,
+			createParameters(),
+			instance
+		);
+
+		IIdType binaryId = new IdType("Binary/123");
+		DaoMethodOutcome methodOutcome = new DaoMethodOutcome();
+		methodOutcome.setId(binaryId);
+
+		// when
+		when(patientDao.search(any(), any())).thenReturn(new SimpleBundleProvider(resources));
+		when(myIdHelperService.newPidFromStringIdAndResourceName(any(), anyString(), anyString())).thenReturn(JpaPid.fromId(1L));
+		when(myIdHelperService.translatePidsToForcedIds(any())).thenAnswer(t -> {
+			@SuppressWarnings("unchecked")
+			Set<IResourcePersistentId<JpaPid>> inputSet = t.getArgument(0, Set.class);
+			Map<IResourcePersistentId<?>, Optional<String>> map = new HashMap<>();
+			for (var next : inputSet) {
+				map.put(next, Optional.empty());
+			}
+			return new PersistentIdToForcedIdMap<>(map);
+		});
+		when(myDaoRegistry.getResourceDao(eq("Binary")))
+			.thenReturn(binaryDao);
+		when(binaryDao.update(any(IBaseBinary.class), any(RequestDetails.class)))
+			.thenReturn(methodOutcome);
+		when(myJobStepExecutionServices.newRequestDetails(any())).thenReturn(new SystemRequestDetails());
+
+		// test
+		RunOutcome outcome = myFinalStep.run(input, sink);
+
+		// verify
+		assertEquals(new RunOutcome(resources.size()).getRecordsProcessed(), outcome.getRecordsProcessed());
+
+		verify(binaryDao)
+			.update(binaryCaptor.capture(), binaryDaoCreateRequestDetailsCaptor.capture());
+		String outputString = new String(binaryCaptor.getValue().getContent());
+		assertEquals(resources.size(), StringUtils.countOccurrencesOf(outputString, "\n"));
+
+		ArgumentCaptor<BulkExportBinaryFileId> fileIdArgumentCaptor = ArgumentCaptor.forClass(BulkExportBinaryFileId.class);
+		verify(sink)
+			.accept(fileIdArgumentCaptor.capture());
+		assertEquals(binaryId.getValueAsString(), fileIdArgumentCaptor.getValue().getBinaryId());
+	}
+
+	@Nonnull
+	private static ArrayList<IBaseResource> createResourceList(ResourceIdList idList) {
+		return createResourceList(idList, 100, 0);
+	}
+
+	@Nonnull
+	private static ArrayList<IBaseResource> createResourceList(ResourceIdList idList, int theCount, int theLength) {
+		idList.setResourceType("Patient");
+		ArrayList<IBaseResource> resources = new ArrayList<>();
+		ArrayList<TypedPidJson> batchResourceIds = new ArrayList<>();
+		for (int i = 0; i < theCount; i++) {
+			String stringId = String.valueOf(i);
+			TypedPidJson batchResourceId = new TypedPidJson();
+			batchResourceId.setResourceType("Patient");
+			batchResourceId.setPid(stringId);
+			batchResourceIds.add(batchResourceId);
+
+			Patient patient = new Patient();
+			patient.setId(stringId);
+			patient.addName().setFamily(leftPad("", theLength, 'A'));
+			resources.add(patient);
+		}
+		idList.setIds(batchResourceIds);
+		return resources;
+	}
+}

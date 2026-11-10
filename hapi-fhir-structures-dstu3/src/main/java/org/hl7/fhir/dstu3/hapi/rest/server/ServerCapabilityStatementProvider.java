@@ -1,6 +1,3 @@
-package org.hl7.fhir.dstu3.hapi.rest.server;
-
-import static org.apache.commons.lang3.StringUtils.isBlank;
 /*
  * #%L
  * HAPI FHIR Structures - DSTU2 (FHIR v1.0.0)
@@ -10,9 +7,9 @@ import static org.apache.commons.lang3.StringUtils.isBlank;
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -20,24 +17,35 @@ import static org.apache.commons.lang3.StringUtils.isBlank;
  * limitations under the License.
  * #L%
  */
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
+package org.hl7.fhir.dstu3.hapi.rest.server;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.IdentityHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
-
-import javax.servlet.ServletContext;
-import javax.servlet.http.HttpServletRequest;
-
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.context.RuntimeResourceDefinition;
+import ca.uhn.fhir.context.RuntimeSearchParam;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.parser.DataFormatException;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.annotation.Metadata;
+import ca.uhn.fhir.rest.annotation.Read;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.server.Bindings;
+import ca.uhn.fhir.rest.server.IServerConformanceProvider;
+import ca.uhn.fhir.rest.server.RestfulServer;
+import ca.uhn.fhir.rest.server.RestfulServerConfiguration;
+import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException;
+import ca.uhn.fhir.rest.server.method.IMethodBinding;
+import ca.uhn.fhir.rest.server.method.IParameter;
+import ca.uhn.fhir.rest.server.method.OperationMethodBinding;
+import ca.uhn.fhir.rest.server.method.OperationMethodBinding.ReturnType;
+import ca.uhn.fhir.rest.server.method.OperationParameter;
+import ca.uhn.fhir.rest.server.method.SearchMethodBinding;
+import ca.uhn.fhir.rest.server.method.SearchParameter;
+import ca.uhn.fhir.rest.server.provider.ProviderConstants;
+import ca.uhn.fhir.rest.server.util.BaseServerCapabilityStatementProvider;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.http.HttpServletRequest;
 import org.apache.commons.lang3.StringUtils;
 import org.hl7.fhir.dstu3.model.CapabilityStatement;
 import org.hl7.fhir.dstu3.model.CapabilityStatement.CapabilityStatementKind;
@@ -61,65 +69,65 @@ import org.hl7.fhir.dstu3.model.Reference;
 import org.hl7.fhir.dstu3.model.ResourceType;
 import org.hl7.fhir.exceptions.FHIRException;
 import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
 
-import ca.uhn.fhir.context.FhirVersionEnum;
-import ca.uhn.fhir.context.RuntimeResourceDefinition;
-import ca.uhn.fhir.context.RuntimeSearchParam;
-import ca.uhn.fhir.parser.DataFormatException;
-import ca.uhn.fhir.rest.annotation.IdParam;
-import ca.uhn.fhir.rest.annotation.Initialize;
-import ca.uhn.fhir.rest.annotation.Metadata;
-import ca.uhn.fhir.rest.annotation.Read;
-import ca.uhn.fhir.rest.method.BaseMethodBinding;
-import ca.uhn.fhir.rest.method.DynamicSearchMethodBinding;
-import ca.uhn.fhir.rest.method.IParameter;
-import ca.uhn.fhir.rest.method.OperationMethodBinding;
-import ca.uhn.fhir.rest.method.OperationMethodBinding.ReturnType;
-import ca.uhn.fhir.rest.method.OperationParameter;
-import ca.uhn.fhir.rest.method.RestSearchParameterTypeEnum;
-import ca.uhn.fhir.rest.method.SearchMethodBinding;
-import ca.uhn.fhir.rest.method.SearchParameter;
-import ca.uhn.fhir.rest.server.Constants;
-import ca.uhn.fhir.rest.server.IServerConformanceProvider;
-import ca.uhn.fhir.rest.server.ResourceBinding;
-import ca.uhn.fhir.rest.server.RestfulServer;
-import ca.uhn.fhir.rest.server.RestulfulServerConfiguration;
-import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.TreeSet;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 /**
  * Server FHIR Provider which serves the conformance statement for a RESTful server implementation
- * 
+ *
  * <p>
  * Note: This class is safe to extend, but it is important to note that the same instance of {@link CapabilityStatement} is always returned unless {@link #setCache(boolean)} is called with a value of
  * <code>false</code>. This means that if you are adding anything to the returned conformance instance on each call you should call <code>setCache(false)</code> in your provider constructor.
  * </p>
  */
-public class ServerCapabilityStatementProvider implements IServerConformanceProvider<CapabilityStatement> {
+public class ServerCapabilityStatementProvider extends BaseServerCapabilityStatementProvider
+		implements IServerConformanceProvider<CapabilityStatement> {
 
-	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(ServerCapabilityStatementProvider.class);
-	private boolean myCache = true;
-	private volatile CapabilityStatement myCapabilityStatement;
-	private IdentityHashMap<OperationMethodBinding, String> myOperationBindingToName;
-	private HashMap<String, List<OperationMethodBinding>> myOperationNameToBindings;
+	private static final org.slf4j.Logger ourLog =
+			org.slf4j.LoggerFactory.getLogger(ServerCapabilityStatementProvider.class);
 	private String myPublisher = "Not provided";
-	private RestulfulServerConfiguration myServerConfiguration;
 
-	/*
-	 * Add a no-arg constructor and seetter so that the ServerConfirmanceProvider can be Spring-wired with the RestfulService avoiding the potential reference cycle that would happen.
+	/**
+	 * No-arg constructor and setter so that the ServerConformanceProvider can be Spring-wired with the RestfulService avoiding the potential reference cycle that would happen.
 	 */
 	public ServerCapabilityStatementProvider() {
 		super();
 	}
 
+	/**
+	 * Constructor
+	 *
+	 * @deprecated Use no-args constructor instead. Deprecated in 4.0.0
+	 */
+	@Deprecated
 	public ServerCapabilityStatementProvider(RestfulServer theRestfulServer) {
-		this.myServerConfiguration = theRestfulServer.createConfiguration();
+		this();
 	}
 
-	public ServerCapabilityStatementProvider(RestulfulServerConfiguration theServerConfiguration) {
-		this.myServerConfiguration = theServerConfiguration;
+	/**
+	 * Constructor - This is intended only for JAX-RS server
+	 */
+	public ServerCapabilityStatementProvider(RestfulServerConfiguration theServerConfiguration) {
+		super(theServerConfiguration);
 	}
 
-	private void checkBindingForSystemOps(CapabilityStatementRestComponent rest, Set<SystemRestfulInteraction> systemOps, BaseMethodBinding<?> nextMethodBinding) {
+	private void checkBindingForSystemOps(
+			CapabilityStatementRestComponent rest,
+			Set<SystemRestfulInteraction> systemOps,
+			IMethodBinding nextMethodBinding) {
 		if (nextMethodBinding.getRestOperationType() != null) {
 			String sysOpCode = nextMethodBinding.getRestOperationType().getCode();
 			if (sysOpCode != null) {
@@ -140,37 +148,28 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 		}
 	}
 
-	private Map<String, List<BaseMethodBinding<?>>> collectMethodBindings() {
-		Map<String, List<BaseMethodBinding<?>>> resourceToMethods = new TreeMap<String, List<BaseMethodBinding<?>>>();
-		for (ResourceBinding next : myServerConfiguration.getResourceBindings()) {
-			String resourceName = next.getResourceName();
-			for (BaseMethodBinding<?> nextMethodBinding : next.getMethodBindings()) {
-				if (resourceToMethods.containsKey(resourceName) == false) {
-					resourceToMethods.put(resourceName, new ArrayList<BaseMethodBinding<?>>());
-				}
-				resourceToMethods.get(resourceName).add(nextMethodBinding);
-			}
-		}
-		for (BaseMethodBinding<?> nextMethodBinding : myServerConfiguration.getServerBindings()) {
-			String resourceName = "";
-			if (resourceToMethods.containsKey(resourceName) == false) {
-				resourceToMethods.put(resourceName, new ArrayList<BaseMethodBinding<?>>());
-			}
-			resourceToMethods.get(resourceName).add(nextMethodBinding);
-		}
-		return resourceToMethods;
-	}
-
-	private DateTimeType conformanceDate() {
-		String buildDate = myServerConfiguration.getConformanceDate();
-		if (buildDate != null) {
+	private DateTimeType conformanceDate(RequestDetails theRequestDetails) {
+		IPrimitiveType<Date> buildDate =
+				getServerConfiguration(theRequestDetails).getConformanceDate();
+		if (buildDate != null && buildDate.getValue() != null) {
 			try {
-				return new DateTimeType(buildDate);
+				return new DateTimeType(buildDate.getValueAsString());
 			} catch (DataFormatException e) {
 				// fall through
 			}
 		}
 		return DateTimeType.now();
+	}
+
+	private String createNamedQueryName(SearchMethodBinding searchMethodBinding) {
+		StringBuilder retVal = new StringBuilder();
+		if (searchMethodBinding.getResourceName() != null) {
+			retVal.append(searchMethodBinding.getResourceName());
+		}
+		retVal.append("-query-");
+		retVal.append(searchMethodBinding.getQueryName());
+
+		return retVal.toString();
 	}
 
 	private String createOperationName(OperationMethodBinding theMethodBinding) {
@@ -187,10 +186,10 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 			retVal.append('s');
 		}
 		retVal.append('-');
-		
+
 		// Exclude the leading $
 		retVal.append(theMethodBinding.getName(), 1, theMethodBinding.getName().length());
-		
+
 		return retVal.toString();
 	}
 
@@ -202,56 +201,81 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 		return myPublisher;
 	}
 
+	/**
+	 * Sets the value of the "publisher" that will be placed in the generated conformance statement. As this is a mandatory element, the value should not be null (although this is not enforced). The
+	 * value defaults to "Not provided" but may be set to null, which will cause this element to be omitted.
+	 */
+	public void setPublisher(String thePublisher) {
+		myPublisher = thePublisher;
+	}
+
+	@SuppressWarnings("EnumSwitchStatementWhichMissesCases")
 	@Override
 	@Metadata
-	public CapabilityStatement getServerConformance(HttpServletRequest theRequest) {
-		if (myCapabilityStatement != null && myCache) {
-			return myCapabilityStatement;
-		}
+	public CapabilityStatement getServerConformance(HttpServletRequest theRequest, RequestDetails theRequestDetails) {
+		RestfulServerConfiguration serverConfiguration = getServerConfiguration(theRequestDetails);
+		Bindings bindings = serverConfiguration.provideBindings();
 
 		CapabilityStatement retVal = new CapabilityStatement();
 
 		retVal.setPublisher(myPublisher);
-		retVal.setDateElement(conformanceDate());
+		retVal.setDateElement(conformanceDate(theRequestDetails));
 		retVal.setFhirVersion(FhirVersionEnum.DSTU3.getFhirVersionString());
 		retVal.setAcceptUnknown(UnknownContentCode.EXTENSIONS); // TODO: make this configurable - this is a fairly big
-																					// effort since the parser
+		// effort since the parser
 		// needs to be modified to actually allow it
 
-		retVal.getImplementation().setDescription(myServerConfiguration.getImplementationDescription());
+		ServletContext servletContext = (ServletContext)
+				(theRequest == null ? null : theRequest.getAttribute(RestfulServer.SERVLET_CONTEXT_ATTRIBUTE));
+		String serverBase =
+				serverConfiguration.getServerAddressStrategy().determineServerBase(servletContext, theRequest);
+		retVal.getImplementation()
+				.setUrl(serverBase)
+				.setDescription(serverConfiguration.getImplementationDescription());
+
 		retVal.setKind(CapabilityStatementKind.INSTANCE);
-		retVal.getSoftware().setName(myServerConfiguration.getServerName());
-		retVal.getSoftware().setVersion(myServerConfiguration.getServerVersion());
+		retVal.getSoftware().setName(serverConfiguration.getServerName());
+		retVal.getSoftware().setVersion(serverConfiguration.getServerVersion());
 		retVal.addFormat(Constants.CT_FHIR_XML_NEW);
 		retVal.addFormat(Constants.CT_FHIR_JSON_NEW);
+		retVal.addFormat(Constants.FORMAT_JSON);
+		retVal.addFormat(Constants.FORMAT_XML);
 		retVal.setStatus(PublicationStatus.ACTIVE);
 
 		CapabilityStatementRestComponent rest = retVal.addRest();
 		rest.setMode(RestfulCapabilityMode.SERVER);
 
-		Set<SystemRestfulInteraction> systemOps = new HashSet<SystemRestfulInteraction>();
-		Set<String> operationNames = new HashSet<String>();
+		Set<SystemRestfulInteraction> systemOps = new HashSet<>();
+		Set<String> operationNames = new HashSet<>();
 
-		Map<String, List<BaseMethodBinding<?>>> resourceToMethods = collectMethodBindings();
-		for (Entry<String, List<BaseMethodBinding<?>>> nextEntry : resourceToMethods.entrySet()) {
+		Map<String, List<IMethodBinding>> resourceToMethods = collectMethodBindings(theRequestDetails);
+		Map<String, Class<? extends IBaseResource>> resourceNameToSharedSupertype =
+				serverConfiguration.getNameToSharedSupertype();
+		for (Entry<String, List<IMethodBinding>> nextEntry : resourceToMethods.entrySet()) {
 
 			if (nextEntry.getKey().isEmpty() == false) {
-				Set<TypeRestfulInteraction> resourceOps = new HashSet<TypeRestfulInteraction>();
+				Set<TypeRestfulInteraction> resourceOps = new HashSet<>();
 				CapabilityStatementRestResourceComponent resource = rest.addResource();
 				String resourceName = nextEntry.getKey();
-				RuntimeResourceDefinition def = myServerConfiguration.getFhirContext().getResourceDefinition(resourceName);
+
+				RuntimeResourceDefinition def;
+				FhirContext context = serverConfiguration.getFhirContext();
+				if (resourceNameToSharedSupertype.containsKey(resourceName)) {
+					def = context.getResourceDefinition(resourceNameToSharedSupertype.get(resourceName));
+				} else {
+					def = context.getResourceDefinition(resourceName);
+				}
 				resource.getTypeElement().setValue(def.getName());
-				ServletContext servletContext = (ServletContext) (theRequest == null ? null : theRequest.getAttribute(RestfulServer.SERVLET_CONTEXT_ATTRIBUTE));
-				String serverBase = myServerConfiguration.getServerAddressStrategy().determineServerBase(servletContext, theRequest);
 				resource.getProfile().setReference((def.getResourceProfile(serverBase)));
 
-				TreeSet<String> includes = new TreeSet<String>();
+				TreeSet<String> includes = new TreeSet<>();
 
 				// Map<String, CapabilityStatement.RestResourceSearchParam> nameToSearchParam = new HashMap<String,
 				// CapabilityStatement.RestResourceSearchParam>();
-				for (BaseMethodBinding<?> nextMethodBinding : nextEntry.getValue()) {
+				for (IMethodBinding nextMethodBinding : nextEntry.getValue()) {
 					if (nextMethodBinding.getRestOperationType() != null) {
-						String resOpCode = nextMethodBinding.getRestOperationType().getCode();
+						String resOpCode =
+								nextMethodBinding.getRestOperationType().getCode();
 						if (resOpCode != null) {
 							TypeRestfulInteraction resOp;
 							try {
@@ -275,21 +299,21 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 
 								if (nextMethodBinding.isSupportsConditional()) {
 									switch (resOp) {
-									case CREATE:
-										resource.setConditionalCreate(true);
-										break;
-									case DELETE:
-										if (nextMethodBinding.isSupportsConditionalMultiple()) {
-											resource.setConditionalDelete(ConditionalDeleteStatus.MULTIPLE);
-										} else {
-											resource.setConditionalDelete(ConditionalDeleteStatus.SINGLE);
-										}
-										break;
-									case UPDATE:
-										resource.setConditionalUpdate(true);
-										break;
-									default:
-										break;
+										case CREATE:
+											resource.setConditionalCreate(true);
+											break;
+										case DELETE:
+											if (nextMethodBinding.isSupportsConditionalMultiple()) {
+												resource.setConditionalDelete(ConditionalDeleteStatus.MULTIPLE);
+											} else {
+												resource.setConditionalDelete(ConditionalDeleteStatus.SINGLE);
+											}
+											break;
+										case UPDATE:
+											resource.setConditionalUpdate(true);
+											break;
+										default:
+											break;
 									}
 								}
 							}
@@ -299,19 +323,37 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 					checkBindingForSystemOps(rest, systemOps, nextMethodBinding);
 
 					if (nextMethodBinding instanceof SearchMethodBinding) {
-						handleSearchMethodBinding(rest, resource, resourceName, def, includes, (SearchMethodBinding) nextMethodBinding);
-					} else if (nextMethodBinding instanceof DynamicSearchMethodBinding) {
-						handleDynamicSearchMethodBinding(resource, def, includes, (DynamicSearchMethodBinding) nextMethodBinding);
+						SearchMethodBinding methodBinding = (SearchMethodBinding) nextMethodBinding;
+						if (methodBinding.getQueryName() != null) {
+							String queryName =
+									bindings.getNamedSearchMethodBindingToName().get(methodBinding);
+							if (operationNames.add(queryName)) {
+								rest.addOperation()
+										.setName(methodBinding.getQueryName())
+										.setDefinition(new Reference("OperationDefinition/" + queryName));
+							}
+						} else {
+							handleNamelessSearchMethodBinding(
+									rest,
+									resource,
+									resourceName,
+									def,
+									includes,
+									(SearchMethodBinding) nextMethodBinding,
+									theRequestDetails);
+						}
 					} else if (nextMethodBinding instanceof OperationMethodBinding) {
 						OperationMethodBinding methodBinding = (OperationMethodBinding) nextMethodBinding;
-						String opName = myOperationBindingToName.get(methodBinding);
+						String opName = bindings.getOperationBindingToId().get(methodBinding);
 						if (operationNames.add(opName)) {
 							// Only add each operation (by name) once
-							rest.addOperation().setName(methodBinding.getName().substring(1)).setDefinition(new Reference("OperationDefinition/" + opName));
+							rest.addOperation()
+									.setName(methodBinding.getName().substring(1))
+									.setDefinition(new Reference("OperationDefinition/" + opName));
 						}
 					}
 
-					Collections.sort(resource.getInteraction(), new Comparator<ResourceInteractionComponent>() {
+					resource.getInteraction().sort(new Comparator<ResourceInteractionComponent>() {
 						@Override
 						public int compare(ResourceInteractionComponent theO1, ResourceInteractionComponent theO2) {
 							TypeRestfulInteraction o1 = theO1.getCode();
@@ -328,81 +370,45 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 							return o1.ordinal() - o2.ordinal();
 						}
 					});
-
 				}
 
 				for (String nextInclude : includes) {
 					resource.addSearchInclude(nextInclude);
 				}
 			} else {
-				for (BaseMethodBinding<?> nextMethodBinding : nextEntry.getValue()) {
+				for (IMethodBinding nextMethodBinding : nextEntry.getValue()) {
 					checkBindingForSystemOps(rest, systemOps, nextMethodBinding);
 					if (nextMethodBinding instanceof OperationMethodBinding) {
 						OperationMethodBinding methodBinding = (OperationMethodBinding) nextMethodBinding;
-						String opName = myOperationBindingToName.get(methodBinding);
+						String opName = bindings.getOperationBindingToId().get(methodBinding);
 						if (operationNames.add(opName)) {
 							ourLog.debug("Found bound operation: {}", opName);
-							rest.addOperation().setName(methodBinding.getName().substring(1)).setDefinition(new Reference("OperationDefinition/" + opName));
+							rest.addOperation()
+									.setName(methodBinding.getName().substring(1))
+									.setDefinition(new Reference("OperationDefinition/" + opName));
 						}
 					}
 				}
 			}
 		}
 
-		myCapabilityStatement = retVal;
+		maybeAddBulkDataDeclarationToConformingToIg(retVal, serverConfiguration.getServerBindings());
+
 		return retVal;
 	}
 
-	private void handleDynamicSearchMethodBinding(CapabilityStatementRestResourceComponent resource, RuntimeResourceDefinition def, TreeSet<String> includes, DynamicSearchMethodBinding searchMethodBinding) {
-		includes.addAll(searchMethodBinding.getIncludes());
-
-		List<RuntimeSearchParam> searchParameters = new ArrayList<RuntimeSearchParam>();
-		searchParameters.addAll(searchMethodBinding.getSearchParams());
-		sortRuntimeSearchParameters(searchParameters);
-
-		if (!searchParameters.isEmpty()) {
-
-			for (RuntimeSearchParam nextParameter : searchParameters) {
-
-				String nextParamName = nextParameter.getName();
-
-				// String chain = null;
-				String nextParamUnchainedName = nextParamName;
-				if (nextParamName.contains(".")) {
-					// chain = nextParamName.substring(nextParamName.indexOf('.') + 1);
-					nextParamUnchainedName = nextParamName.substring(0, nextParamName.indexOf('.'));
-				}
-
-				String nextParamDescription = nextParameter.getDescription();
-
-				/*
-				 * If the parameter has no description, default to the one from the resource
-				 */
-				if (StringUtils.isBlank(nextParamDescription)) {
-					RuntimeSearchParam paramDef = def.getSearchParam(nextParamUnchainedName);
-					if (paramDef != null) {
-						nextParamDescription = paramDef.getDescription();
-					}
-				}
-
-				CapabilityStatementRestResourceSearchParamComponent param = resource.addSearchParam();
-
-				param.setName(nextParamName);
-				// if (StringUtils.isNotBlank(chain)) {
-				// param.addChain(chain);
-				// }
-				param.setDocumentation(nextParamDescription);
-				// param.setType(nextParameter.getParamType());
-			}
-		}
-	}
-
-	private void handleSearchMethodBinding(CapabilityStatementRestComponent rest, CapabilityStatementRestResourceComponent resource, String resourceName, RuntimeResourceDefinition def, TreeSet<String> includes,
-			SearchMethodBinding searchMethodBinding) {
+	private void handleNamelessSearchMethodBinding(
+			CapabilityStatementRestComponent rest,
+			CapabilityStatementRestResourceComponent resource,
+			String resourceName,
+			RuntimeResourceDefinition def,
+			TreeSet<String> includes,
+			SearchMethodBinding searchMethodBinding,
+			RequestDetails theRequestDetails) {
 		includes.addAll(searchMethodBinding.getIncludes());
 
 		List<IParameter> params = searchMethodBinding.getParameters();
-		List<SearchParameter> searchParameters = new ArrayList<SearchParameter>();
+		List<SearchParameter> searchParameters = new ArrayList<>();
 		for (IParameter nextParameter : params) {
 			if ((nextParameter instanceof SearchParameter)) {
 				searchParameters.add((SearchParameter) nextParameter);
@@ -449,25 +455,28 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 
 				CapabilityStatementRestResourceSearchParamComponent param = resource.addSearchParam();
 				param.setName(nextParamUnchainedName);
-				
-//				if (StringUtils.isNotBlank(chain)) {
-//					param.addChain(chain);
-//				}
-//
-//				if (nextParameter.getParamType() == RestSearchParameterTypeEnum.REFERENCE) {
-//					for (String nextWhitelist : new TreeSet<String>(nextParameter.getQualifierWhitelist())) {
-//						if (nextWhitelist.startsWith(".")) {
-//							param.addChain(nextWhitelist.substring(1));
-//						}
-//					}
-//				}
+
+				//				if (StringUtils.isNotBlank(chain)) {
+				//					param.addChain(chain);
+				//				}
+				//
+				//				if (nextParameter.getParamType() == RestSearchParameterTypeEnum.REFERENCE) {
+				//					for (String nextWhitelist : new TreeSet<String>(nextParameter.getQualifierWhitelist())) {
+				//						if (nextWhitelist.startsWith(".")) {
+				//							param.addChain(nextWhitelist.substring(1));
+				//						}
+				//					}
+				//				}
 
 				param.setDocumentation(nextParamDescription);
 				if (nextParameter.getParamType() != null) {
-					param.getTypeElement().setValueAsString(nextParameter.getParamType().getCode());
+					param.getTypeElement()
+							.setValueAsString(nextParameter.getParamType().getCode());
 				}
 				for (Class<? extends IBaseResource> nextTarget : nextParameter.getDeclaredTypes()) {
-					RuntimeResourceDefinition targetDef = myServerConfiguration.getFhirContext().getResourceDefinition(nextTarget);
+					RuntimeResourceDefinition targetDef = getServerConfiguration(theRequestDetails)
+							.getFhirContext()
+							.getResourceDefinition(nextTarget);
 					if (targetDef != null) {
 						ResourceType code;
 						try {
@@ -475,67 +484,104 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 						} catch (FHIRException e) {
 							code = null;
 						}
-//						if (code != null) {
-//							param.addTarget(targetDef.getName());
-//						}
+						//						if (code != null) {
+						//							param.addTarget(targetDef.getName());
+						//						}
 					}
-				}
-			}
-		}
-	}
-
-	@Initialize
-	public void initializeOperations() {
-		myOperationBindingToName = new IdentityHashMap<OperationMethodBinding, String>();
-		myOperationNameToBindings = new HashMap<String, List<OperationMethodBinding>>();
-
-		Map<String, List<BaseMethodBinding<?>>> resourceToMethods = collectMethodBindings();
-		for (Entry<String, List<BaseMethodBinding<?>>> nextEntry : resourceToMethods.entrySet()) {
-			List<BaseMethodBinding<?>> nextMethodBindings = nextEntry.getValue();
-			for (BaseMethodBinding<?> nextMethodBinding : nextMethodBindings) {
-				if (nextMethodBinding instanceof OperationMethodBinding) {
-					OperationMethodBinding methodBinding = (OperationMethodBinding) nextMethodBinding;
-					if (myOperationBindingToName.containsKey(methodBinding)) {
-						continue;
-					}
-
-					String name = createOperationName(methodBinding);
-					ourLog.debug("Detected operation: {}", name);
-
-					myOperationBindingToName.put(methodBinding, name);
-					if (myOperationNameToBindings.containsKey(name) == false) {
-						myOperationNameToBindings.put(name, new ArrayList<OperationMethodBinding>());
-					}
-					myOperationNameToBindings.get(name).add(methodBinding);
 				}
 			}
 		}
 	}
 
 	@Read(type = OperationDefinition.class)
-	public OperationDefinition readOperationDefinition(@IdParam IdType theId) {
+	public OperationDefinition readOperationDefinition(@IdParam IdType theId, RequestDetails theRequestDetails) {
 		if (theId == null || theId.hasIdPart() == false) {
-			throw new ResourceNotFoundException(theId);
-		}
-		List<OperationMethodBinding> sharedDescriptions = myOperationNameToBindings.get(theId.getIdPart());
-		if (sharedDescriptions == null || sharedDescriptions.isEmpty()) {
-			throw new ResourceNotFoundException(theId);
+			throw new ResourceNotFoundException(Msg.code(628) + theId);
 		}
 
+		RestfulServerConfiguration serverConfiguration = getServerConfiguration(theRequestDetails);
+		Bindings bindings = serverConfiguration.provideBindings();
+
+		List<OperationMethodBinding> operationBindings =
+				bindings.getOperationIdToBindings().get(theId.getIdPart());
+		if (operationBindings != null && !operationBindings.isEmpty()) {
+			return readOperationDefinitionForOperation(operationBindings);
+		}
+		List<SearchMethodBinding> searchBindings =
+				bindings.getSearchNameToBindings().get(theId.getIdPart());
+		if (searchBindings != null && !searchBindings.isEmpty()) {
+			return readOperationDefinitionForNamedSearch(searchBindings);
+		}
+		throw new ResourceNotFoundException(Msg.code(2257) + theId);
+	}
+
+	private OperationDefinition readOperationDefinitionForNamedSearch(List<SearchMethodBinding> bindings) {
+		OperationDefinition op = new OperationDefinition();
+		op.setStatus(PublicationStatus.ACTIVE);
+		op.setKind(OperationKind.QUERY);
+		op.setIdempotent(true);
+
+		op.setSystem(false);
+		op.setType(false);
+		op.setInstance(false);
+
+		Set<String> inParams = new HashSet<>();
+
+		for (SearchMethodBinding binding : bindings) {
+			if (isNotBlank(binding.getDescription())) {
+				op.setDescription(binding.getDescription());
+			}
+			if (isBlank(binding.getResourceProviderResourceName())) {
+				op.setSystem(true);
+			} else {
+				op.setType(true);
+				op.addResourceElement().setValue(binding.getResourceProviderResourceName());
+			}
+			op.setCode(binding.getQueryName());
+			for (IParameter nextParamUntyped : binding.getParameters()) {
+				if (nextParamUntyped instanceof SearchParameter) {
+					SearchParameter nextParam = (SearchParameter) nextParamUntyped;
+					if (!inParams.add(nextParam.getName())) {
+						continue;
+					}
+					OperationDefinitionParameterComponent param = op.addParameter();
+					param.setUse(OperationParameterUse.IN);
+					param.setType("string");
+					param.getSearchTypeElement()
+							.setValueAsString(nextParam.getParamType().getCode());
+					param.setMin(nextParam.isRequired() ? 1 : 0);
+					param.setMax("1");
+					param.setName(nextParam.getName());
+				}
+			}
+
+			if (isBlank(op.getName())) {
+				if (isNotBlank(op.getDescription())) {
+					op.setName(op.getDescription());
+				} else {
+					op.setName(op.getCode());
+				}
+			}
+		}
+
+		return op;
+	}
+
+	private OperationDefinition readOperationDefinitionForOperation(List<OperationMethodBinding> bindings) {
 		OperationDefinition op = new OperationDefinition();
 		op.setStatus(PublicationStatus.ACTIVE);
 		op.setKind(OperationKind.OPERATION);
 		op.setIdempotent(true);
-		
+
 		// We reset these to true below if we find a binding that can handle the level
 		op.setSystem(false);
 		op.setType(false);
 		op.setInstance(false);
 
-		Set<String> inParams = new HashSet<String>();
-		Set<String> outParams = new HashSet<String>();
+		Set<String> inParams = new HashSet<>();
+		Set<String> outParams = new HashSet<>();
 
-		for (OperationMethodBinding sharedDescription : sharedDescriptions) {
+		for (OperationMethodBinding sharedDescription : bindings) {
 			if (isNotBlank(sharedDescription.getDescription())) {
 				op.setDescription(sharedDescription.getDescription());
 			}
@@ -565,10 +611,10 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 			for (IParameter nextParamUntyped : sharedDescription.getParameters()) {
 				if (nextParamUntyped instanceof OperationParameter) {
 					OperationParameter nextParam = (OperationParameter) nextParamUntyped;
-					OperationDefinitionParameterComponent param = op.addParameter();
 					if (!inParams.add(nextParam.getName())) {
 						continue;
 					}
+					OperationDefinitionParameterComponent param = op.addParameter();
 					param.setUse(OperationParameterUse.IN);
 					if (nextParam.getParamType() != null) {
 						param.setType(nextParam.getParamType());
@@ -604,14 +650,14 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 				op.setName(op.getCode());
 			}
 		}
-		
+
 		if (op.hasSystem() == false) {
 			op.setSystem(false);
 		}
 		if (op.hasInstance() == false) {
 			op.setInstance(false);
 		}
-		
+
 		return op;
 	}
 
@@ -620,35 +666,16 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 	 * <p>
 	 * See the class documentation for an important note if you are extending this class
 	 * </p>
+	 *
+	 * @deprecated Since 4.0.0 this doesn't do anything
 	 */
-	public void setCache(boolean theCache) {
-		myCache = theCache;
-	}
-
-	/**
-	 * Sets the value of the "publisher" that will be placed in the generated conformance statement. As this is a mandatory element, the value should not be null (although this is not enforced). The
-	 * value defaults to "Not provided" but may be set to null, which will cause this element to be omitted.
-	 */
-	public void setPublisher(String thePublisher) {
-		myPublisher = thePublisher;
+	public ServerCapabilityStatementProvider setCache(boolean theCache) {
+		return this;
 	}
 
 	@Override
 	public void setRestfulServer(RestfulServer theRestfulServer) {
-		myServerConfiguration = theRestfulServer.createConfiguration();
-	}
-
-	RestulfulServerConfiguration getServerConfiguration() {
-		return myServerConfiguration;
-	}
-
-	private void sortRuntimeSearchParameters(List<RuntimeSearchParam> searchParameters) {
-		Collections.sort(searchParameters, new Comparator<RuntimeSearchParam>() {
-			@Override
-			public int compare(RuntimeSearchParam theO1, RuntimeSearchParam theO2) {
-				return theO1.getName().compareTo(theO2.getName());
-			}
-		});
+		// ignore
 	}
 
 	private void sortSearchParameters(List<SearchParameter> searchParameters) {
@@ -664,5 +691,18 @@ public class ServerCapabilityStatementProvider implements IServerConformanceProv
 				return 1;
 			}
 		});
+	}
+
+	private void maybeAddBulkDataDeclarationToConformingToIg(
+			CapabilityStatement theCapabilityStatement, List<IMethodBinding> theServerBindings) {
+		boolean bulkExportEnabled = theServerBindings.stream()
+				.filter(OperationMethodBinding.class::isInstance)
+				.map(OperationMethodBinding.class::cast)
+				.map(OperationMethodBinding::getName)
+				.anyMatch(ProviderConstants.OPERATION_EXPORT::equals);
+
+		if (bulkExportEnabled) {
+			theCapabilityStatement.addInstantiates(Constants.BULK_DATA_ACCESS_IG_URL);
+		}
 	}
 }

@@ -1,17 +1,15 @@
-package ca.uhn.fhir.model.primitive;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,15 +17,15 @@ package ca.uhn.fhir.model.primitive;
  * limitations under the License.
  * #L%
  */
-
-import java.net.URI;
-import java.net.URISyntaxException;
-
-import org.apache.commons.lang3.StringUtils;
+package ca.uhn.fhir.model.primitive;
 
 import ca.uhn.fhir.model.api.BasePrimitive;
 import ca.uhn.fhir.model.api.annotation.DatatypeDef;
 import ca.uhn.fhir.model.api.annotation.SimpleSetter;
+import org.apache.commons.lang3.StringUtils;
+
+import java.net.URI;
+import java.net.URISyntaxException;
 
 @DatatypeDef(name = "uri")
 public class UriDt extends BasePrimitive<String> {
@@ -56,12 +54,9 @@ public class UriDt extends BasePrimitive<String> {
 
 	@Override
 	public boolean equals(Object obj) {
-		if (this == obj)
-			return true;
-		if (obj == null)
-			return false;
-		if (getClass() != obj.getClass())
-			return false;
+		if (this == obj) return true;
+		if (obj == null) return false;
+		if (getClass() != obj.getClass()) return false;
 
 		UriDt other = (UriDt) obj;
 		if (getValue() == null && other.getValue() == null) {
@@ -123,7 +118,7 @@ public class UriDt extends BasePrimitive<String> {
 	/**
 	 * Creates a new UriDt instance which uses the given OID as the content (and prepends "urn:oid:" to the OID string
 	 * in the value of the newly created UriDt, per the FHIR specification).
-	 * 
+	 *
 	 * @param theOid
 	 *           The OID to use (<code>null</code> is acceptable and will result in a UriDt instance with a
 	 *           <code>null</code> value)
@@ -135,5 +130,4 @@ public class UriDt extends BasePrimitive<String> {
 		}
 		return new UriDt("urn:oid:" + theOid);
 	}
-
 }

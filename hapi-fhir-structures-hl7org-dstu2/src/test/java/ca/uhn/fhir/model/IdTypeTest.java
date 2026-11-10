@@ -1,19 +1,18 @@
 package ca.uhn.fhir.model;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import ca.uhn.fhir.context.FhirContext;
+import org.hl7.fhir.dstu2.model.IdType;
+import org.hl7.fhir.dstu2.model.Patient;
+import org.hl7.fhir.dstu2.model.Reference;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 
-import org.hl7.fhir.instance.model.IdType;
-import org.hl7.fhir.instance.model.Patient;
-import org.hl7.fhir.instance.model.Reference;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
-import ca.uhn.fhir.context.FhirContext;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class IdTypeTest {
 
@@ -41,7 +40,7 @@ public class IdTypeTest {
 	 @Test
 	  public void testConstructorsWithNullArguments() {
 	    IdType id = new IdType(null, null, null);
-	    assertEquals(null, id.getValue());
+			assertNull(id.getValue());
 	  }
 
 	@Test
@@ -83,7 +82,55 @@ public class IdTypeTest {
 		assertEquals("Patient/cid:Patient-72/_history/1", id2.getIdPart());
 
 	}
-	
+
+	@Test
+	public void testNormal() {
+		IdType id = new IdType("foo");
+		assertEquals("foo", id.getValueAsString());
+		assertEquals("foo", id.getIdPart());
+		assertEquals("foo", id.toUnqualified().getValueAsString());
+		assertEquals("foo", id.toUnqualifiedVersionless().getValueAsString());
+		assertNull(id.getVersionIdPart());
+		assertNull(id.getResourceType());
+		assertNull(id.getBaseUrl());
+
+		assertEquals("Patient/foo", id.withResourceType("Patient").getValue());
+		assertEquals("http://foo/Patient/foo", id.withServerBase("http://foo", "Patient").getValue());
+		assertEquals("foo/_history/2", id.withVersion("2").getValue());
+	}
+
+	@Test
+	public void testBaseUrlFoo1() {
+		IdType id = new IdType("http://my.org/foo");
+		assertEquals("http://my.org/foo", id.getValueAsString());
+		assertNull(id.getIdPart());
+		assertEquals("foo", id.toUnqualified().getValueAsString());
+		assertEquals("foo", id.toUnqualifiedVersionless().getValueAsString());
+		assertNull(id.getVersionIdPart());
+		assertEquals("foo", id.getResourceType());
+		assertEquals("http://my.org", id.getBaseUrl());
+
+		assertEquals("Patient", id.withResourceType("Patient").getValue());
+		assertEquals("http://foo/Patient", id.withServerBase("http://foo", "Patient").getValue());
+		assertEquals("http://my.org/foo//_history/2", id.withVersion("2").getValue());
+	}
+
+	@Test
+	public void testBaseUrlFoo2() {
+		IdType id = new IdType("http://my.org/a/b/c/foo");
+		assertEquals("http://my.org/a/b/c/foo", id.getValueAsString());
+		assertEquals("foo", id.getIdPart());
+		assertEquals("c/foo", id.toUnqualified().getValueAsString());
+		assertEquals("c/foo", id.toUnqualifiedVersionless().getValueAsString());
+		assertNull(id.getVersionIdPart());
+		assertEquals("c", id.getResourceType());
+		assertEquals("http://my.org/a/b", id.getBaseUrl());
+
+		assertEquals("Patient/foo", id.withResourceType("Patient").getValue());
+		assertEquals("http://foo/Patient/foo", id.withServerBase("http://foo", "Patient").getValue());
+		assertEquals("http://my.org/a/b/c/foo/_history/2", id.withVersion("2").getValue());
+	}
+
 	@Test
 	public void testDetermineBase() {
 
@@ -96,7 +143,7 @@ public class IdTypeTest {
 		assertEquals("http://foo/fhir", rr.getBaseUrl());
 		
 		rr = new IdType("Organization/123/_history/123");
-		assertEquals(null, rr.getBaseUrl());
+		assertNull(rr.getBaseUrl());
 
 	}
 
@@ -134,7 +181,7 @@ public class IdTypeTest {
 		Reference ref = actual.getManagingOrganization();
 		assertEquals("Organization", ref.getReferenceElement().getResourceType());
 		assertEquals("123", ref.getReferenceElement().getIdPart());
-		assertEquals(null, ref.getReferenceElement().getVersionIdPart());
+		assertNull(ref.getReferenceElement().getVersionIdPart());
 
 	}
 
@@ -156,9 +203,9 @@ public class IdTypeTest {
 
 		Patient actual = parseAndEncode(patient);
 		Reference ref = actual.getManagingOrganization();
-		assertEquals(null, ref.getReferenceElement().getResourceType());
+		assertNull(ref.getReferenceElement().getResourceType());
 		assertEquals("123", ref.getReferenceElement().getIdPart());
-		assertEquals(null, ref.getReferenceElement().getVersionIdPart());
+		assertNull(ref.getReferenceElement().getVersionIdPart());
 
 	}
 
@@ -171,7 +218,7 @@ public class IdTypeTest {
 
 		Patient actual = parseAndEncode(patient);
 		Reference ref = actual.getManagingOrganization();
-		assertEquals(null, ref.getReferenceElement().getResourceType());
+		assertNull(ref.getReferenceElement().getResourceType());
 		assertEquals("123", ref.getReferenceElement().getIdPart());
 
 	}
@@ -185,7 +232,7 @@ public class IdTypeTest {
 
 		Patient actual = parseAndEncode(patient);
 		Reference ref = actual.getManagingOrganization();
-		assertEquals(null, ref.getReferenceElement().getResourceType());
+		assertNull(ref.getReferenceElement().getResourceType());
 		assertEquals("123", ref.getReferenceElement().getIdPart());
 
 	}
@@ -224,7 +271,7 @@ public class IdTypeTest {
 		return ourCtx.newXmlParser().parseResource(Patient.class, encoded);
 	}
 
-	@BeforeClass
+	@BeforeAll
 	public static void beforeClass() {
 		ourCtx = FhirContext.forDstu2Hl7Org();
 	}

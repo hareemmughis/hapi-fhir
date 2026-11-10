@@ -1,0 +1,557 @@
+package ca.uhn.fhir.rest.server;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.api.Include;
+import ca.uhn.fhir.model.api.ResourceMetadataKeyEnum;
+import ca.uhn.fhir.model.valueset.BundleEntrySearchModeEnum;
+import ca.uhn.fhir.narrative.DefaultThymeleafNarrativeGenerator;
+import ca.uhn.fhir.rest.annotation.IncludeParam;
+import ca.uhn.fhir.rest.annotation.OptionalParam;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.api.SearchStyleEnum;
+import ca.uhn.fhir.rest.api.SummaryEnum;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import ca.uhn.fhir.rest.client.interceptor.LoggingInterceptor;
+import ca.uhn.fhir.rest.gclient.StringClientParam;
+import ca.uhn.fhir.rest.param.TokenAndListParam;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import ca.uhn.fhir.test.utilities.HttpTestRequest;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.UrlUtil;
+import ca.uhn.fhir.validation.FhirValidator;
+import ca.uhn.fhir.validation.ValidationResult;
+import com.google.common.collect.Lists;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.HumanName;
+import org.hl7.fhir.r4.model.Medication;
+import org.hl7.fhir.r4.model.MedicationRequest;
+import org.hl7.fhir.r4.model.OperationOutcome;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Reference;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.fail;
+
+
+public class SearchR4Test {
+
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(SearchR4Test.class);
+	private static TokenAndListParam ourIdentifiers;
+	private static String ourLastMethod;
+	private final FhirContext myCtx = FhirContext.forR4Cached();
+
+	private final DummyPatientResourceProvider myDummyPatientResourceProvider = new DummyPatientResourceProvider();
+
+	@RegisterExtension
+	public RestfulServerExtension myRestfulServerExtension = new RestfulServerExtension(myCtx)
+		.registerProvider(myDummyPatientResourceProvider)
+		.registerProvider(new DummyMedicationRequestResourceProvider())
+		.withServer(t -> t.setDefaultResponseEncoding(EncodingEnum.JSON))
+		.withServer(t -> t.setPagingProvider(new FifoMemoryPagingProvider(10)));
+
+	private int myPort;
+
+	@BeforeEach
+	public void before() {
+		ourLastMethod = null;
+		ourIdentifiers = null;
+		myPort = myRestfulServerExtension.getPort();
+		myCtx.setNarrativeGenerator(new DefaultThymeleafNarrativeGenerator());
+		// this is default for some reason
+		myDummyPatientResourceProvider.setSearchModeTypeForResources(BundleEntrySearchModeEnum.INCLUDE);
+	}
+
+	@AfterEach
+	public void after() {
+		myCtx.setNarrativeGenerator(null);
+	}
+
+	private Bundle executeSearchAndValidateHasLinkNext(HttpTestRequest theRequest, EncodingEnum theExpectEncoding) {
+		Bundle bundle = executeSearch(theRequest, theExpectEncoding);
+		String linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertNotNull(linkNext);
+
+		assertThat(bundle.getEntry()).hasSize(10);
+		return bundle;
+	}
+
+	private Bundle executeSearch(HttpTestRequest theRequest, EncodingEnum theExpectEncoding) {
+		HttpTestResponse response = theRequest.get().assertStatus(200);
+		EncodingEnum ct = EncodingEnum.forContentType(response.getMimeType());
+		assertThat(ct).isEqualTo(theExpectEncoding);
+		Bundle bundle = response.getBodyAsResource(Bundle.class);
+		validate(bundle);
+		return bundle;
+	}
+
+	/**
+	 * A paging request that incorrectly executes at the type level shouldn't be grabbed by the search method binding
+	 */
+	@Test
+	public void testPageRequestCantTriggerSearchAccidentally() {
+		String responseContent = myRestfulServerExtension.fhirRequest("/Patient?" + Constants.PARAM_PAGINGACTION + "=12345")
+			.get()
+			.assertStatus(400)
+			.getBody();
+		assertThat(responseContent).contains("not know how to handle GET operation[Patient] with parameters [[_getpages]]");
+	}
+
+
+	/**
+	 * See #1763
+	 */
+	@Test
+	public void testSummaryCount() {
+		HttpTestRequest request = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar&" + Constants.PARAM_SUMMARY + "=" + SummaryEnum.COUNT.getCode());
+		Bundle bundle = executeSearch(request, EncodingEnum.JSON);
+		ourLog.info(toJson(bundle));
+		assertEquals("searchset", bundle.getType().toCode());
+		assertThat(bundle.getEntry()).isEmpty();
+	}
+
+
+	@Test
+	public void testPagingPreservesElements() {
+		// setup
+		HttpTestRequest request;
+		String linkNext;
+		Bundle bundle;
+		String linkSelf;
+
+		myDummyPatientResourceProvider.setSearchModeTypeForResources(null);
+
+		// Initial search
+		request = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar&_elements=identifier,name&_elements:exclude=birthDate,active");
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		assertThat(toJson(bundle)).doesNotContain("\"active\"");
+		linkSelf = bundle.getLink(Constants.LINK_SELF).getUrl();
+		assertThat(linkSelf).contains("_elements=identifier%2Cname");
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_elements=identifier,name");
+
+		ourLog.info(toJson(bundle));
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		assertThat(toJson(bundle)).doesNotContain("\"active\"");
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_elements=identifier,name");
+		assertThat(linkNext).contains("_elements:exclude=active,birthDate");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		assertThat(toJson(bundle)).doesNotContain("\"active\"");
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_elements=identifier,name");
+		assertThat(linkNext).contains("_elements:exclude=active,birthDate");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		assertThat(toJson(bundle)).doesNotContain("\"active\"");
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_elements=identifier,name");
+		assertThat(linkNext).contains("_elements:exclude=active,birthDate");
+
+	}
+
+	/**
+	 * See #836
+	 */
+	@Test
+	public void testIncludeSingleParameter() {
+		HttpTestRequest request;
+		Bundle bundle;
+
+		// No include specified
+		request = myRestfulServerExtension.fhirRequest("/MedicationRequest");
+		bundle = executeAndReturnBundle(request);
+		assertThat(bundle.getEntry()).hasSize(1);
+	}
+
+	/**
+	 * See #836
+	 */
+	@Test
+	public void testIncludeSingleParameterWithIncludeStar() {
+		HttpTestRequest request;
+		Bundle bundle;
+
+		// * include specified
+		request = myRestfulServerExtension.fhirRequest("/MedicationRequest").withQueryParam("_include", "*");
+		bundle = executeAndReturnBundle(request);
+		assertThat(bundle.getEntry()).hasSize(2);
+	}
+
+	/**
+	 * See #836
+	 */
+	@Test
+	public void testIncludeSingleParameterWithIncludeByName() {
+		HttpTestRequest request;
+		Bundle bundle;
+
+		// MedicationRequest:medication include specified
+		request = myRestfulServerExtension.fhirRequest("/MedicationRequest")
+				.withQueryParam("_include", MedicationRequest.INCLUDE_MEDICATION.getValue());
+		bundle = executeAndReturnBundle(request);
+		assertThat(bundle.getEntry()).hasSize(2);
+
+	}
+
+	private Bundle executeAndReturnBundle(HttpTestRequest theRequest) {
+		return theRequest.get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+	}
+
+	@Test
+	public void testPagingPreservesEncodingApplicationJsonFhir() {
+		HttpTestRequest request;
+		String linkNext;
+		Bundle bundle;
+		myDummyPatientResourceProvider.setSearchModeTypeForResources(null);
+
+		// Initial search
+		request = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar&_format=" + Constants.CT_FHIR_JSON_NEW);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=" + UrlUtil.escapeUrlParam(Constants.CT_FHIR_JSON_NEW));
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=" + UrlUtil.escapeUrlParam(Constants.CT_FHIR_JSON_NEW));
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=" + UrlUtil.escapeUrlParam(Constants.CT_FHIR_JSON_NEW));
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=" + UrlUtil.escapeUrlParam(Constants.CT_FHIR_JSON_NEW));
+
+	}
+
+	@Test
+	public void testPagingPreservesEncodingJson() {
+		HttpTestRequest request;
+		String linkNext;
+		Bundle bundle;
+		myDummyPatientResourceProvider.setSearchModeTypeForResources(null);
+
+		// Initial search
+		request = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar&_format=json");
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		assertThat(toJson(bundle)).contains("active");
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=json");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=json");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=json");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=json");
+
+	}
+
+	@Test
+	public void testPagingPreservesEncodingNone() {
+		HttpTestRequest request;
+		String linkNext;
+		Bundle bundle;
+		myDummyPatientResourceProvider.setSearchModeTypeForResources(null);
+
+		// Initial search
+		request = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar");
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).doesNotContain("_format");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).doesNotContain("_format");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).doesNotContain("_format");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.JSON);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).doesNotContain("_format");
+
+	}
+
+	@Test
+	public void testPagingPreservesEncodingNoneWithBrowserAcceptHeader() {
+		HttpTestRequest request;
+		String linkNext;
+		Bundle bundle;
+		myDummyPatientResourceProvider.setSearchModeTypeForResources(null);
+
+		// Initial search
+		request = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar");
+		request.withHeader(Constants.HEADER_ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8");
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.XML);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).doesNotContain("_format");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		request.withHeader(Constants.HEADER_ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8");
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.XML);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).doesNotContain("_format");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		request.withHeader(Constants.HEADER_ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8");
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.XML);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).doesNotContain("_format");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		request.withHeader(Constants.HEADER_ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8");
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.XML);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).doesNotContain("_format");
+
+	}
+
+	@Test
+	public void testPagingPreservesEncodingXml() {
+		HttpTestRequest request;
+		String linkNext;
+		Bundle bundle;
+		myDummyPatientResourceProvider.setSearchModeTypeForResources(null);
+
+		// Initial search
+		request = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar&_format=xml");
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.XML);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=xml");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.XML);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=xml");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.XML);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=xml");
+
+		// Fetch the next page
+		request = myRestfulServerExtension.fhirRequestToUrl(linkNext);
+		bundle = executeSearchAndValidateHasLinkNext(request, EncodingEnum.XML);
+		linkNext = bundle.getLink(Constants.LINK_NEXT).getUrl();
+		assertThat(linkNext).contains("_format=xml");
+
+	}
+
+	@Test
+	public void testSearchNormal() {
+		Bundle bundle = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar&_pretty=true")
+				.get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
+		validate(bundle);
+
+		assertThat(ourLastMethod).isEqualTo("search");
+
+		assertThat(ourIdentifiers.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens().get(0).getSystem()).isEqualTo("foo");
+		assertThat(ourIdentifiers.getValuesAsQueryTokens().get(0).getValuesAsQueryTokens().get(0).getValue()).isEqualTo("bar");
+
+	}
+
+	@Test
+	public void testRequestIdGeneratedAndReturned() {
+		HttpTestResponse response = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar&_pretty=true")
+			.get()
+			.assertStatus(200);
+		String requestId = response.getHeader(Constants.HEADER_REQUEST_ID);
+		assertThat(requestId).matches("[a-zA-Z0-9]{16}");
+	}
+
+	@Test
+	public void testRequestIdSuppliedAndReturned() {
+		HttpTestResponse response = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar&_pretty=true")
+			.withHeader(Constants.HEADER_REQUEST_ID, "help im a bug")
+			.get()
+			.assertStatus(200);
+		String requestId = response.getHeader(Constants.HEADER_REQUEST_ID);
+		assertThat(requestId).matches("help im a bug");
+	}
+
+	@Test
+	public void testRequestIdSuppliedAndReturned_Invalid() {
+		HttpTestResponse response = myRestfulServerExtension.fhirRequest("/Patient?identifier=foo%7Cbar&_pretty=true")
+			.withHeader(Constants.HEADER_REQUEST_ID, "help i'm a bug")
+			.get()
+			.assertStatus(200);
+		String requestId = response.getHeader(Constants.HEADER_REQUEST_ID);
+		assertThat(requestId).matches("[a-zA-Z0-9]{16}");
+	}
+
+	@Test
+	public void testSearchWithInvalidChain() {
+		OperationOutcome oo = myRestfulServerExtension.fhirRequest("/Patient?identifier.chain=foo%7Cbar")
+				.get()
+				.assertStatus(400)
+				.getBodyAsResource(OperationOutcome.class);
+		assertThat(oo.getIssueFirstRep().getDiagnostics()).isEqualTo(Msg.code(1935) + "Invalid search parameter \"identifier.chain\". Parameter contains a chain (.chain) and chains are not supported for this parameter (chaining is only allowed on reference parameters)");
+
+	}
+
+	@Test
+	public void testSearchWithPostAndInvalidParameters() {
+		IGenericClient client = myCtx.newRestfulGenericClient("http://localhost:" + myPort);
+		LoggingInterceptor interceptor = new LoggingInterceptor();
+		interceptor.setLogRequestSummary(true);
+		interceptor.setLogRequestBody(true);
+		interceptor.setLogRequestHeaders(false);
+		interceptor.setLogResponseBody(false);
+		interceptor.setLogResponseHeaders(false);
+		interceptor.setLogResponseSummary(false);
+		client.registerInterceptor(interceptor);
+		try {
+			client
+				.search()
+				.forResource(Patient.class)
+				.where(new StringClientParam("foo").matches().value("bar"))
+				.prettyPrint()
+				.usingStyle(SearchStyleEnum.POST)
+				.returnBundle(org.hl7.fhir.r4.model.Bundle.class)
+				.encodedJson()
+				.execute();
+			fail();		} catch (InvalidRequestException e) {
+			assertThat(e.getMessage()).contains("Invalid request: The FHIR endpoint on this server does not know how to handle POST operation[Patient/_search] with parameters [[_pretty, foo]]");
+		}
+
+	}
+
+	private String toJson(Bundle theBundle) {
+		return myCtx.newJsonParser().setPrettyPrint(true).encodeResourceToString(theBundle);
+	}
+
+	protected void validate(IBaseResource theResource) {
+		FhirValidator validatorModule = myCtx.newValidator();
+		ValidationResult result = validatorModule.validateWithResult(theResource);
+		if (!result.isSuccessful()) {
+			fail(myCtx.newXmlParser().setPrettyPrint(true).encodeResourceToString(result.toOperationOutcome()));
+		}
+	}
+
+	public static class DummyPatientResourceProvider implements IResourceProvider {
+
+		private BundleEntrySearchModeEnum mySearchModeEnum;
+
+		@Override
+		public Class<? extends IBaseResource> getResourceType() {
+			return Patient.class;
+		}
+
+		public void setSearchModeTypeForResources(BundleEntrySearchModeEnum theType) {
+			mySearchModeEnum = theType;
+		}
+
+		@SuppressWarnings("rawtypes")
+		@Search()
+		public List search(
+			@OptionalParam(name = Patient.SP_IDENTIFIER) TokenAndListParam theIdentifiers) {
+			ourLastMethod = "search";
+			ourIdentifiers = theIdentifiers;
+			ArrayList<Patient> retVal = new ArrayList<>();
+
+			for (int i = 0; i < 200; i++) {
+				Patient patient = new Patient();
+				patient.getIdElement().setValue("Patient/" + i + "/_history/222");
+				if (mySearchModeEnum != null) {
+					ResourceMetadataKeyEnum.ENTRY_SEARCH_MODE.put(patient, mySearchModeEnum);
+				}
+				patient.addName(new HumanName().setFamily("FAMILY"));
+				patient.addIdentifier().setSystem("http://foo").setValue("bar");
+				patient.setActive(true);
+				retVal.add(patient);
+			}
+			return retVal;
+		}
+
+	}
+
+	public static class DummyMedicationRequestResourceProvider implements IResourceProvider {
+
+		@Override
+		public Class<? extends IBaseResource> getResourceType() {
+			return MedicationRequest.class;
+		}
+
+		@Search()
+		public List<IBaseResource> search(
+			@IncludeParam Set<Include> theIncludes
+		) {
+			MedicationRequest mr = new MedicationRequest();
+			mr.setId("1");
+			mr.setStatus(MedicationRequest.MedicationRequestStatus.ACTIVE);
+
+			Medication m = new Medication();
+			m.setId("2");
+			m.setStatus(Medication.MedicationStatus.ENTEREDINERROR);
+
+			mr.setMedication(new Reference(m));
+
+			ArrayList<IBaseResource> retVal = Lists.newArrayList(mr);
+
+			if (theIncludes.contains(MedicationRequest.INCLUDE_MEDICATION)) {
+				retVal.add(m);
+			}
+
+			return retVal;
+		}
+
+	}
+
+}

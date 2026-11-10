@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.param;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,6 +17,9 @@ package ca.uhn.fhir.rest.param;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.param;
+
+import ca.uhn.fhir.rest.api.Constants;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -27,36 +28,41 @@ import java.util.Map;
  * Modifiers for {@link TokenParam}
  */
 public enum TokenParamModifier {
-	/** 
+	/**
 	 * :above
 	 */
 	ABOVE(":above"),
-	
-	/** 
+
+	/**
 	 * :above
 	 */
 	BELOW(":below"),
-	
-	/** 
+
+	/**
 	 * :in
 	 */
 	IN(":in"),
-	
-	/** 
+
+	/**
 	 * :not
 	 */
 	NOT(":not"),
-	
-	/** 
+
+	/**
 	 * :not-in
 	 */
 	NOT_IN(":not-in"),
-	
-	/** 
+
+	/**
 	 * :text
 	 */
-	TEXT(":text");
-	
+	TEXT(Constants.PARAMQUALIFIER_TOKEN_TEXT),
+
+	/**
+	 * :of-type
+	 */
+	OF_TYPE(Constants.PARAMQUALIFIER_TOKEN_OF_TYPE);
+
 	private static final Map<String, TokenParamModifier> VALUE_TO_ENUM;
 
 	static {
@@ -66,18 +72,36 @@ public enum TokenParamModifier {
 		}
 		VALUE_TO_ENUM = valueToEnum;
 	}
+
 	private final String myValue;
 
 	private TokenParamModifier(String theValue) {
 		myValue = theValue;
 	}
-	
+
 	public String getValue() {
 		return myValue;
+	}
+
+	/**
+	 * The modifier without the :
+	 * @return the string after the leading :
+	 */
+	public String getBareModifier() {
+		return myValue.substring(1);
 	}
 
 	public static TokenParamModifier forValue(String theValue) {
 		return VALUE_TO_ENUM.get(theValue);
 	}
-	
+
+	public boolean isNegative() {
+		switch (this) {
+			case NOT:
+			case NOT_IN:
+				return true;
+			default:
+				return false;
+		}
+	}
 }

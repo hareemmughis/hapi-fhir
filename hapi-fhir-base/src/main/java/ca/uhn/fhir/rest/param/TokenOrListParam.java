@@ -1,24 +1,15 @@
-package ca.uhn.fhir.rest.param;
-
-import java.util.ArrayList;
-import java.util.List;
-
-import ca.uhn.fhir.model.base.composite.BaseCodingDt;
-import ca.uhn.fhir.model.base.composite.BaseIdentifierDt;
-import ca.uhn.fhir.util.CoverageIgnore;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -26,9 +17,18 @@ import ca.uhn.fhir.util.CoverageIgnore;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.param;
+
+import ca.uhn.fhir.model.base.composite.BaseCodingDt;
+import ca.uhn.fhir.model.base.composite.BaseIdentifierDt;
+import ca.uhn.fhir.util.CoverageIgnore;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 
 /**
- * This class represents a restful search operation parameter for an "OR list" of tokens (in other words, a 
+ * This class represents a restful search operation parameter for an "OR list" of tokens (in other words, a
  * list which can contain one-or-more tokens, where the server should return results matching any of the tokens)
  */
 public class TokenOrListParam extends BaseOrListParam<TokenOrListParam, TokenParam> {
@@ -36,12 +36,11 @@ public class TokenOrListParam extends BaseOrListParam<TokenOrListParam, TokenPar
 	/**
 	 * Create a new empty token "OR list"
 	 */
-	public TokenOrListParam() {
-	}
+	public TokenOrListParam() {}
 
 	/**
 	 * Create a new token "OR list" with a single token, or multiple tokens which have the same system value
-	 * 
+	 *
 	 * @param theSystem
 	 *            The system to use for the one token to pre-populate in this list
 	 * @param theValues
@@ -50,6 +49,15 @@ public class TokenOrListParam extends BaseOrListParam<TokenOrListParam, TokenPar
 	public TokenOrListParam(String theSystem, String... theValues) {
 		for (String next : theValues) {
 			add(theSystem, next);
+		}
+	}
+
+	/**
+	 * Create a new token "OR list" with the given tokens
+	 */
+	public TokenOrListParam(Collection<TokenParam> theTokenParams) {
+		for (TokenParam next : theTokenParams) {
+			add(next);
 		}
 	}
 
@@ -69,14 +77,20 @@ public class TokenOrListParam extends BaseOrListParam<TokenOrListParam, TokenPar
 
 	/**
 	 * Add a new token to this list
-	 * 
-	 * @param theSystem
+	 *  @param theSystem
 	 *            The system to use for the one token to pre-populate in this list
-	 * @param theValue
-	 *            The value to use for the one token to pre-populate in this list
 	 */
-	public void add(String theSystem, String theValue) {
+	public TokenOrListParam add(String theSystem, String theValue) {
 		add(new TokenParam(theSystem, theValue));
+		return this;
+	}
+
+	/**
+	 * Add a new token to this list
+	 */
+	public TokenOrListParam add(String theValue) {
+		add(new TokenParam(null, theValue));
+		return this;
 	}
 
 	public List<BaseCodingDt> getListAsCodings() {
@@ -107,12 +121,11 @@ public class TokenOrListParam extends BaseOrListParam<TokenOrListParam, TokenPar
 		}
 		return false;
 	}
-	
+
 	@CoverageIgnore
 	@Override
 	public TokenOrListParam addOr(TokenParam theParameter) {
 		add(theParameter);
 		return this;
 	}
-
 }

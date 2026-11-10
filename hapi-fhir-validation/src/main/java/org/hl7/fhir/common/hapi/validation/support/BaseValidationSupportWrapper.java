@@ -1,0 +1,183 @@
+package org.hl7.fhir.common.hapi.validation.support;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.support.ConceptValidationOptions;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.LookupCodeRequest;
+import ca.uhn.fhir.context.support.TranslateConceptResults;
+import ca.uhn.fhir.context.support.ValidateCodeRequest;
+import ca.uhn.fhir.context.support.ValidationSupportContext;
+import ca.uhn.fhir.context.support.ValueSetExpansionOptions;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+
+import java.util.List;
+
+/**
+ * This class is a wrapper for an existing {@link IValidationSupport} object, intended to be
+ * subclassed in order to layer functionality on top of the existing validation support object.
+ *
+ * @since 5.0.0
+ */
+public abstract class BaseValidationSupportWrapper extends BaseValidationSupport {
+	private final IValidationSupport myWrap;
+
+	/**
+	 * Constructor
+	 *
+	 * @param theFhirContext The FhirContext object (must be initialized for the appropriate FHIR version)
+	 * @param theWrap The validation support object to wrap
+	 */
+	protected BaseValidationSupportWrapper(FhirContext theFhirContext, IValidationSupport theWrap) {
+		super(theFhirContext);
+		Validate.notNull(theWrap, "theWrap must not be null");
+
+		myWrap = theWrap;
+	}
+
+	@Override
+	public List<IBaseResource> fetchAllConformanceResources() {
+		return myWrap.fetchAllConformanceResources();
+	}
+
+	@Nullable
+	@Override
+	public <T extends IBaseResource> List<T> fetchAllNonBaseStructureDefinitions() {
+		return myWrap.fetchAllNonBaseStructureDefinitions();
+	}
+
+	@Override
+	public <T extends IBaseResource> List<T> fetchAllStructureDefinitions() {
+		return myWrap.fetchAllStructureDefinitions();
+	}
+
+	@Nullable
+	@Override
+	public <T extends IBaseResource> List<T> fetchAllSearchParameters() {
+		return myWrap.fetchAllSearchParameters();
+	}
+
+	@Override
+	public <T extends IBaseResource> T fetchResource(Class<T> theClass, String theUri) {
+		return myWrap.fetchResource(theClass, theUri);
+	}
+
+	@Override
+	public byte[] fetchBinary(String theBinaryKey) {
+		return myWrap.fetchBinary(theBinaryKey);
+	}
+
+	@Override
+	public boolean isCodeSystemSupported(ValidationSupportContext theValidationSupportContext, String theSystem) {
+		return myWrap.isCodeSystemSupported(theValidationSupportContext, theSystem);
+	}
+
+	/**
+	 * {@inheritDoc}
+	 * <p>
+	 * Forwarded with the version, so that the wrapped support decides whether it holds that version. The
+	 * interface default would fall back to asking with the URL on its own, which lets a wrapped support that
+	 * holds another version answer for this one.
+	 * </p>
+	 */
+	// Created by Claude Opus 5
+	@Override
+	public boolean isCodeSystemSupported(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nullable String theSystem,
+			@Nullable String theVersion) {
+		return myWrap.isCodeSystemSupported(theValidationSupportContext, theSystem, theVersion);
+	}
+
+	@Override
+	public CodeValidationResult validateCode(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nonnull ConceptValidationOptions theOptions,
+			String theCodeSystem,
+			String theCode,
+			String theDisplay,
+			String theValueSetUrl) {
+		return myWrap.validateCode(
+				theValidationSupportContext, theOptions, theCodeSystem, theCode, theDisplay, theValueSetUrl);
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	@Nullable
+	public CodeValidationResult validateCode(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nonnull ConceptValidationOptions theOptions,
+			@Nonnull ValidateCodeRequest theRequest) {
+		return myWrap.validateCode(theValidationSupportContext, theOptions, theRequest);
+	}
+
+	@Override
+	public IValidationSupport.CodeValidationResult validateCodeInValueSet(
+			ValidationSupportContext theValidationSupportContext,
+			ConceptValidationOptions theValidationOptions,
+			String theCodeSystem,
+			String theCode,
+			String theDisplay,
+			@Nonnull IBaseResource theValueSet) {
+		return myWrap.validateCodeInValueSet(
+				theValidationSupportContext, theValidationOptions, theCodeSystem, theCode, theDisplay, theValueSet);
+	}
+
+	@Override
+	public LookupCodeResult lookupCode(
+			ValidationSupportContext theValidationSupportContext, @Nonnull LookupCodeRequest theLookupCodeRequest) {
+		return myWrap.lookupCode(theValidationSupportContext, theLookupCodeRequest);
+	}
+
+	@Override
+	public boolean isValueSetSupported(ValidationSupportContext theValidationSupportContext, String theValueSetUrl) {
+		return myWrap.isValueSetSupported(theValidationSupportContext, theValueSetUrl);
+	}
+
+	@Override
+	public IValidationSupport.ValueSetExpansionOutcome expandValueSet(
+			ValidationSupportContext theValidationSupportContext,
+			ValueSetExpansionOptions theExpansionOptions,
+			@Nonnull IBaseResource theValueSetToExpand) {
+		return myWrap.expandValueSet(theValidationSupportContext, theExpansionOptions, theValueSetToExpand);
+	}
+
+	/*
+	 * The version-aware fetchCodeSystem and isValueSetSupported are deliberately left to their interface
+	 * defaults, which pack the version into the URL and route through the methods below.
+	 * Forwarding them straight to the wrapped support would skip whatever a subclass does in those methods -
+	 * HapiToHl7OrgDstu2ValidatingSupportWrapper converts the resource it returns, for one.
+	 */
+	// Created by Claude Opus 5
+	@Override
+	public IBaseResource fetchCodeSystem(String theSystem) {
+		return myWrap.fetchCodeSystem(theSystem);
+	}
+
+	@Override
+	public IBaseResource fetchValueSet(String theUri) {
+		return myWrap.fetchValueSet(theUri);
+	}
+
+	@Override
+	public IBaseResource fetchStructureDefinition(String theUrl) {
+		return myWrap.fetchStructureDefinition(theUrl);
+	}
+
+	@Override
+	public IBaseResource generateSnapshot(
+			ValidationSupportContext theValidationSupportContext,
+			IBaseResource theInput,
+			String theUrl,
+			String theWebUrl,
+			String theProfileName) {
+		return myWrap.generateSnapshot(theValidationSupportContext, theInput, theUrl, theWebUrl, theProfileName);
+	}
+
+	@Override
+	public TranslateConceptResults translateConcept(TranslateCodeRequest theRequest) {
+		return myWrap.translateConcept(theRequest);
+	}
+}

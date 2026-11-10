@@ -1,0 +1,321 @@
+/*-
+ * #%L
+ * HAPI FHIR JPA Server
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.dao;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.jpa.api.dao.DaoRegistry;
+import ca.uhn.fhir.jpa.api.dao.IFhirResourceDao;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
+import ca.uhn.fhir.jpa.term.TermReadSvcUtil;
+import ca.uhn.fhir.rest.api.SortOrderEnum;
+import ca.uhn.fhir.rest.api.SortSpec;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.api.server.SystemRequestDetails;
+import ca.uhn.fhir.rest.param.StringParam;
+import ca.uhn.fhir.rest.param.TokenParam;
+import ca.uhn.fhir.rest.param.UriParam;
+import ca.uhn.fhir.util.UrlUtil;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import jakarta.annotation.PostConstruct;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.instance.model.api.IAnyResource;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.StructureDefinition;
+import org.hl7.fhir.r4.model.ValueSet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.function.Supplier;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.hl7.fhir.common.hapi.validation.support.ValidationConstants.LOINC_LOW;
+import static org.hl7.fhir.instance.model.api.IAnyResource.SP_RES_LAST_UPDATED;
+
+/**
+ * This class is a {@link IValidationSupport Validation support} module that loads
+ * validation resources (StructureDefinition, ValueSet, CodeSystem, etc.) from the resources
+ * persisted in the JPA server.
+ *
+ * Note that this class is aware of the resource business version (not to be confused with the FHIR version or
+ * meta.versionId) for CodeSystem, ValueSet, and StructureDefinition resources.
+ * For example, a request for <code>http://example.com/StructureDefinition/ABC|1.2.3</code> will
+ * return the resource that matches the URL http://example.com/StructureDefinition/ABC and version 1.2.3.
+ * Unversioned URLs will match the most recently updated resource by using the meta.lastUpdated field.
+ *
+ */
+public class JpaPersistedResourceValidationSupport implements IValidationSupport {
+
+	private static final Logger ourLog = LoggerFactory.getLogger(JpaPersistedResourceValidationSupport.class);
+
+	private final FhirContext myFhirContext;
+	private final DaoRegistry myDaoRegistry;
+
+	private Class<? extends IBaseResource> myCodeSystemType;
+	private Class<? extends IBaseResource> myStructureDefinitionType;
+	private Class<? extends IBaseResource> myValueSetType;
+
+	/**
+	 * Constructor
+	 */
+	public JpaPersistedResourceValidationSupport(FhirContext theFhirContext, DaoRegistry theDaoRegistry) {
+		super();
+		Validate.notNull(theFhirContext, "theFhirContext must not be null");
+		Validate.notNull(theDaoRegistry, "theDaoRegistry must not be null");
+		myFhirContext = theFhirContext;
+		myDaoRegistry = theDaoRegistry;
+	}
+
+	@Override
+	public String getName() {
+		return myFhirContext.getVersion().getVersion() + " JPA Validation Support";
+	}
+
+	@Override
+	public IBaseResource fetchCodeSystem(String theSystem) {
+		IBaseResource retVal = fetchResource(myCodeSystemType, theSystem);
+
+		if (retVal == null && TermReadSvcUtil.isLoincUnversioned(theSystem)) {
+			IIdType id = myFhirContext.getVersion().newIdType("CodeSystem", LOINC_LOW);
+			retVal = findResourceByIdWithNoException(id, myCodeSystemType);
+		}
+
+		return retVal;
+	}
+
+	@Override
+	public IBaseResource fetchValueSet(String theValueSetUrl) {
+		IBaseResource retVal = fetchResource(myValueSetType, theValueSetUrl);
+
+		if (retVal == null && TermReadSvcUtil.isLoincUnversioned(theValueSetUrl)) {
+			Optional<String> vsIdOpt = TermReadSvcUtil.getValueSetId(theValueSetUrl);
+			if (vsIdOpt.isEmpty()) {
+				return null;
+			}
+			IIdType id = myFhirContext.getVersion().newIdType("ValueSet", vsIdOpt.get());
+			retVal = findResourceByIdWithNoException(id, myValueSetType);
+		}
+
+		return retVal;
+	}
+
+	/**
+	 * Performs a lookup by ID, with no exception thrown (since that can mark the active
+	 * transaction as rollback).
+	 */
+	@Nullable
+	private IBaseResource findResourceByIdWithNoException(IIdType id, Class<? extends IBaseResource> type) {
+		SearchParameterMap map = SearchParameterMap.newSynchronous()
+				.setLoadSynchronousUpTo(1)
+				.add(IAnyResource.SP_RES_ID, new TokenParam(id.getValue()));
+		IFhirResourceDao<? extends IBaseResource> dao = myDaoRegistry.getResourceDao(type);
+		IBundleProvider outcome = dao.search(map, new SystemRequestDetails());
+		List<IBaseResource> resources = outcome.getResources(0, 1);
+		if (resources.isEmpty()) {
+			return null;
+		} else {
+			return resources.get(0);
+		}
+	}
+
+	@Override
+	public IBaseResource fetchStructureDefinition(String theUrl) {
+		assert myStructureDefinitionType != null;
+		return fetchResource(myStructureDefinitionType, theUrl);
+	}
+
+	@SuppressWarnings("unchecked")
+	@Nullable
+	@Override
+	public <T extends IBaseResource> List<T> fetchAllStructureDefinitions() {
+		if (!myDaoRegistry.isResourceTypeSupported("StructureDefinition")) {
+			return null;
+		}
+		IBundleProvider search = myDaoRegistry
+				.getResourceDao("StructureDefinition")
+				.search(new SearchParameterMap().setLoadSynchronousUpTo(1000), new SystemRequestDetails());
+		return (List<T>) search.getResources(0, 1000);
+	}
+
+	@Override
+	@SuppressWarnings({"unchecked", "unused"})
+	public <T extends IBaseResource> T fetchResource(@Nullable Class<T> theClass, String theUri) {
+		if (isBlank(theUri)) {
+			return null;
+		}
+
+		return (T) doFetchResource(theClass, theUri);
+	}
+
+	private <T extends IBaseResource> IBaseResource doFetchResource(@Nullable Class<T> theClass, String theUri) {
+		if (theClass == null) {
+			List<Supplier<IBaseResource>> fetchers = List.of(
+					() -> doFetchResource(myValueSetType, theUri),
+					() -> doFetchResource(myCodeSystemType, theUri),
+					() -> doFetchResource(myStructureDefinitionType, theUri));
+			return fetchers.stream()
+					.map(Supplier::get)
+					.filter(Objects::nonNull)
+					.findFirst()
+					.orElse(null);
+		}
+
+		IdType id = new IdType(theUri);
+		boolean localReference = id.hasBaseUrl() == false && id.hasIdPart() == true;
+
+		/*
+		 * This method is used to fetch conformance resources that are needed by
+		 * the validator by canonical URL. The general pattern here is to allow
+		 * both unversioned URLs (http://foo) and versioned URLs (http://foo|1.2.3).
+		 * For historical reasons and to reflect patterns that are still common
+		 * in real-world use, we also allow local and fetch references
+		 * (e.g. Questionnaire/foo) for some types.
+		 */
+
+		String resourceName = myFhirContext.getResourceType(theClass);
+		IBundleProvider search;
+		switch (resourceName) {
+			case "ValueSet" -> {
+				if (localReference) {
+					SearchParameterMap params = new SearchParameterMap();
+					params.setLoadSynchronousUpTo(1);
+					params.add(IAnyResource.SP_RES_ID, new StringParam(theUri));
+					search = myDaoRegistry.getResourceDao(resourceName).search(params, new SystemRequestDetails());
+					if (search.isEmpty()) {
+						params = new SearchParameterMap();
+						params.setLoadSynchronousUpTo(1);
+						params.add(ValueSet.SP_URL, new UriParam(theUri));
+						search = myDaoRegistry.getResourceDao(resourceName).search(params, new SystemRequestDetails());
+					}
+				} else {
+					SearchParameterMap params = createSearchParameterMapForCanonicalUrl(theUri);
+					search = myDaoRegistry.getResourceDao(resourceName).search(params, new SystemRequestDetails());
+
+					/*
+					 * The ValueSet#url parameter was called "system" in older FHIR
+					 */
+					if (search.isEmpty()
+							&& myFhirContext.getVersion().getVersion().isOlderThan(FhirVersionEnum.DSTU3)) {
+						params = new SearchParameterMap();
+						params.setLoadSynchronousUpTo(1);
+
+						UrlUtil.CanonicalUrlParts canonicalUrl = UrlUtil.parseCanonicalUrl(theUri);
+						if (canonicalUrl.versionId().isPresent()) {
+							params.add(
+									ValueSet.SP_VERSION,
+									new TokenParam(canonicalUrl.versionId().get()));
+						}
+						params.add(
+								ca.uhn.fhir.model.dstu2.resource.ValueSet.SP_SYSTEM, new UriParam(canonicalUrl.url()));
+						params.setSort(new SortSpec(SP_RES_LAST_UPDATED).setOrder(SortOrderEnum.DESC));
+						search = myDaoRegistry.getResourceDao(resourceName).search(params, new SystemRequestDetails());
+					}
+				}
+			}
+			case "StructureDefinition" -> {
+				// Don't allow the core FHIR definitions to be overwritten
+				if (theUri.startsWith(URL_PREFIX_STRUCTURE_DEFINITION)) {
+					String typeName = theUri.substring(URL_PREFIX_STRUCTURE_DEFINITION.length());
+					if (myFhirContext.getElementDefinition(typeName) != null) {
+						return null;
+					}
+				}
+				SearchParameterMap params = createSearchParameterMapForCanonicalUrl(theUri);
+				search = myDaoRegistry.getResourceDao("StructureDefinition").search(params, new SystemRequestDetails());
+			}
+			case "Questionnaire" -> {
+				SearchParameterMap params;
+				if (localReference || myFhirContext.getVersion().getVersion().isEquivalentTo(FhirVersionEnum.DSTU2)) {
+					params = new SearchParameterMap();
+					params.setLoadSynchronousUpTo(1);
+					params.add(IAnyResource.SP_RES_ID, new StringParam("Questionnaire/" + id.getIdPart()));
+				} else {
+					params = createSearchParameterMapForCanonicalUrl(theUri);
+				}
+				search = myDaoRegistry.getResourceDao("Questionnaire").search(params, new SystemRequestDetails());
+			}
+			default -> {
+				SearchParameterMap params = createSearchParameterMapForCanonicalUrl(theUri);
+				search = myDaoRegistry.getResourceDao(resourceName).search(params, new SystemRequestDetails());
+			}
+		}
+
+		Integer size = search.size();
+		if (size == null || size == 0) {
+			return null;
+		}
+
+		if (size > 1) {
+			ourLog.warn("Found multiple {} instances with URL search value of: {}", resourceName, theUri);
+		}
+
+		return search.getResources(0, 1).get(0);
+	}
+
+	@Override
+	public FhirContext getFhirContext() {
+		return myFhirContext;
+	}
+
+	@PostConstruct
+	public void start() {
+		myStructureDefinitionType =
+				myFhirContext.getResourceDefinition("StructureDefinition").getImplementingClass();
+		myValueSetType = myFhirContext.getResourceDefinition("ValueSet").getImplementingClass();
+
+		if (myFhirContext.getVersion().getVersion().isNewerThan(FhirVersionEnum.DSTU2)) {
+			myCodeSystemType = myFhirContext.getResourceDefinition("CodeSystem").getImplementingClass();
+		} else {
+			myCodeSystemType = myFhirContext.getResourceDefinition("ValueSet").getImplementingClass();
+		}
+	}
+
+	/**
+	 * Creates a {@link SearchParameterMap} for a canonical URL, which can be either
+	 * unversioned (<code>http://foo</code>) or versioned (<code>http://foo|1.2.3</code>).
+	 * The version separator may appear as a literal <code>|</code> or percent-encoded as <code>%7C</code>.
+	 */
+	@Nonnull
+	private static SearchParameterMap createSearchParameterMapForCanonicalUrl(String theUri) {
+		UrlUtil.CanonicalUrlParts parsedCanonicalUrl = UrlUtil.parseCanonicalUrl(theUri);
+
+		SearchParameterMap params = new SearchParameterMap();
+		params.setLoadSynchronousUpTo(1);
+		if (parsedCanonicalUrl.versionId().isPresent()) {
+			params.add(
+					StructureDefinition.SP_VERSION,
+					new TokenParam(parsedCanonicalUrl.versionId().get()));
+			params.add(StructureDefinition.SP_URL, new UriParam(parsedCanonicalUrl.url()));
+		} else {
+			params.add(StructureDefinition.SP_URL, new UriParam(parsedCanonicalUrl.url()));
+			// When no version is specified, we will take the most recently updated resource as the current
+			// version
+			params.setSort(new SortSpec(SP_RES_LAST_UPDATED).setOrder(SortOrderEnum.DESC));
+		}
+		return params;
+	}
+}

@@ -1,17 +1,9 @@
 package ca.uhn.fhir.model.dstu2;
 
-import static org.junit.Assert.assertEquals;
-
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-
-import org.junit.AfterClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.BaseRuntimeDeclaredChildDefinition;
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.context.RuntimeResourceDefinition;
+import ca.uhn.fhir.i18n.Msg;
 import ca.uhn.fhir.model.dstu2.composite.CodeableConceptDt;
 import ca.uhn.fhir.model.dstu2.composite.CodingDt;
 import ca.uhn.fhir.model.dstu2.composite.IdentifierDt;
@@ -21,8 +13,20 @@ import ca.uhn.fhir.model.dstu2.resource.Claim;
 import ca.uhn.fhir.model.dstu2.resource.Patient;
 import ca.uhn.fhir.model.dstu2.resource.Practitioner;
 import ca.uhn.fhir.model.dstu2.resource.Practitioner.PractitionerRole;
+import ca.uhn.fhir.model.primitive.InstantDt;
+import ca.uhn.fhir.parser.DataFormatException;
 import ca.uhn.fhir.util.FhirTerser;
 import ca.uhn.fhir.util.TestUtil;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
+
 
 public class ModelDstu2Test {
 
@@ -68,10 +72,24 @@ public class ModelDstu2Test {
 		try {
 			ourCtx.newXmlParser().encodeResourceToString(p);
 		} catch (ClassCastException e) {
-			assertEquals("Found instance of class java.lang.String - Did you set a field value to the incorrect type? Expected org.hl7.fhir.instance.model.api.IBase", e.getMessage());
+			assertEquals(Msg.code(1748) + "Found instance of class java.lang.String - Did you set a field value to the incorrect type? Expected org.hl7.fhir.instance.model.api.IBase", e.getMessage());
 		}
 	}
-	
+
+
+	@Test
+	public void testInstantPrecision() {
+		new InstantDt("2019-01-01T00:00:00Z");
+		new InstantDt("2019-01-01T00:00:00.0Z");
+		new InstantDt("2019-01-01T00:00:00.000Z");
+		try {
+			new InstantDt("2019-01-01T00:00Z");
+			fail();		} catch (DataFormatException e) {
+			// good
+		}
+	}
+
+
 	/**
 	 * See #354
 	 */
@@ -81,9 +99,9 @@ public class ModelDstu2Test {
 		claim.setIdentifier(new ArrayList<IdentifierDt>()).setCondition(new ArrayList<CodingDt>());
 	}
 	
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 

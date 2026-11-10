@@ -1,47 +1,38 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.junit.Assert.assertEquals;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.hl7.fhir.dstu3.model.HumanName;
-import org.hl7.fhir.dstu3.model.Patient;
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.rest.annotation.Search;
 import ca.uhn.fhir.rest.annotation.Sort;
 import ca.uhn.fhir.rest.api.SortOrderEnum;
 import ca.uhn.fhir.rest.api.SortSpec;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
 import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.dstu3.model.HumanName;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class SearchSortDstu3Test {
 
-	private static CloseableHttpClient ourClient;
-	private static FhirContext ourCtx = FhirContext.forDstu3();
-	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(SearchSortDstu3Test.class);
-	private static int ourPort;
-	private static Server ourServer;
+	private static final FhirContext ourCtx = FhirContext.forDstu3Cached();
 	private static String ourLastMethod;
 	private static SortSpec ourLastSortSpec;
 
-	@Before
+	@RegisterExtension
+	private RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		 .registerProvider(new DummyPatientResourceProvider())
+		 .withPagingProvider(new FifoMemoryPagingProvider(100))
+		 .setDefaultPrettyPrint(false);
+
+	@BeforeEach
 	public void before() {
 		ourLastMethod = null;
 		ourLastSortSpec = null;
@@ -49,60 +40,29 @@ public class SearchSortDstu3Test {
 
 	@Test
 	public void testSearch() throws Exception {
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient?_sort=param1,-param2,param3,-param4");
-		CloseableHttpResponse status = ourClient.execute(httpGet);
-		try {
-			String responseContent = IOUtils.toString(status.getEntity().getContent());
-			ourLog.info(responseContent);
-			assertEquals(200, status.getStatusLine().getStatusCode());
-			assertEquals("search", ourLastMethod);
+		String responseContent = ourServer.fhirRequest("/Patient?_sort=param1,-param2,param3,-param4")
+			.get()
+			.assertStatus(200)
+			.getBody();
+		assertThat(ourLastMethod).isEqualTo("search");
 
-			assertEquals("param1", ourLastSortSpec.getParamName());
-			assertEquals(SortOrderEnum.ASC, ourLastSortSpec.getOrder());
+		assertThat(ourLastSortSpec.getParamName()).isEqualTo("param1");
+		assertThat(ourLastSortSpec.getOrder()).isEqualTo(SortOrderEnum.ASC);
 
-			assertEquals("param2", ourLastSortSpec.getChain().getParamName());
-			assertEquals(SortOrderEnum.DESC, ourLastSortSpec.getChain().getOrder());
+		assertThat(ourLastSortSpec.getChain().getParamName()).isEqualTo("param2");
+		assertThat(ourLastSortSpec.getChain().getOrder()).isEqualTo(SortOrderEnum.DESC);
 
-			assertEquals("param3", ourLastSortSpec.getChain().getChain().getParamName());
-			assertEquals(SortOrderEnum.ASC, ourLastSortSpec.getChain().getChain().getOrder());
+		assertThat(ourLastSortSpec.getChain().getChain().getParamName()).isEqualTo("param3");
+		assertThat(ourLastSortSpec.getChain().getChain().getOrder()).isEqualTo(SortOrderEnum.ASC);
 
-			assertEquals("param4", ourLastSortSpec.getChain().getChain().getChain().getParamName());
-			assertEquals(SortOrderEnum.DESC, ourLastSortSpec.getChain().getChain().getChain().getOrder());
-
-		} finally {
-			IOUtils.closeQuietly(status.getEntity().getContent());
-		}
+		assertThat(ourLastSortSpec.getChain().getChain().getChain().getParamName()).isEqualTo("param4");
+		assertThat(ourLastSortSpec.getChain().getChain().getChain().getOrder()).isEqualTo(SortOrderEnum.DESC);
 
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
-	}
-
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		DummyPatientResourceProvider patientProvider = new DummyPatientResourceProvider();
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-		servlet.setPagingProvider(new FifoMemoryPagingProvider(10));
-
-		servlet.setResourceProviders(patientProvider);
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 	public static class DummyPatientResourceProvider implements IResourceProvider {

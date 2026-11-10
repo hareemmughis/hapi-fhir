@@ -1,48 +1,40 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.entity.ByteArrayEntity;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.annotation.Create;
+import ca.uhn.fhir.rest.annotation.ResourceParam;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.api.MethodOutcome;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
 import org.hl7.fhir.dstu3.model.Binary;
 import org.hl7.fhir.dstu3.model.IdType;
 import org.hl7.fhir.dstu3.model.Patient;
 import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.rest.annotation.Create;
-import ca.uhn.fhir.rest.annotation.ResourceParam;
-import ca.uhn.fhir.rest.api.MethodOutcome;
-import ca.uhn.fhir.util.PortUtil;
-import ca.uhn.fhir.util.TestUtil;
+import java.nio.charset.StandardCharsets;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class CreateBinaryDstu3Test {
-	private static CloseableHttpClient ourClient;
-	private static FhirContext ourCtx = FhirContext.forDstu3();
+	private static final FhirContext ourCtx = FhirContext.forDstu3Cached();
 	private static Binary ourLastBinary;
 	private static byte[] ourLastBinaryBytes;
 	private static String ourLastBinaryString;
-	private static int ourPort;
-	private static Server ourServer;
 
-	@Before
+	@RegisterExtension
+	private RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		 .setDefaultResponseEncoding(EncodingEnum.XML)
+		 .registerProvider(new BinaryProvider())
+		 .withPagingProvider(new FifoMemoryPagingProvider(100))
+		 .setDefaultPrettyPrint(false);
+
+	@BeforeEach
 	public void before() {
 		ourLastBinary = null;
 		ourLastBinaryBytes = null;
@@ -50,41 +42,27 @@ public class CreateBinaryDstu3Test {
 	}
 
 	@Test
-	public void testRawBytesBinaryContentType() throws Exception {
-		HttpPost post = new HttpPost("http://localhost:" + ourPort + "/Binary");
-		post.setEntity(new ByteArrayEntity(new byte[] { 0, 1, 2, 3, 4 }));
-		post.addHeader("Content-Type", "application/foo");
-		CloseableHttpResponse status = ourClient.execute(post);
-		try {
-			assertEquals("application/foo", ourLastBinary.getContentType());
-			assertArrayEquals(new byte[] { 0, 1, 2, 3, 4 }, ourLastBinary.getContent());
-			assertArrayEquals(new byte[] { 0, 1, 2, 3, 4 }, ourLastBinaryBytes);
-		} finally {
-			IOUtils.closeQuietly(status);
-		}
+	public void testRawBytesBinaryContentType() {
+		ourServer.fhirRequest("/Binary").post(new byte[] { 0, 1, 2, 3, 4 }, "application/foo");
+		assertThat(ourLastBinary.getContentType()).isEqualTo("application/foo");
+		assertThat(ourLastBinary.getContent()).containsExactly(new byte[]{0, 1, 2, 3, 4});
+		assertThat(ourLastBinaryBytes).containsExactly(new byte[]{0, 1, 2, 3, 4});
 	}
 
 	/**
 	 * Technically the client shouldn't be doing it this way, but we'll be accepting
 	 */
 	@Test
-	public void testRawBytesFhirContentType() throws Exception {
+	public void testRawBytesFhirContentType() {
 
 		Binary b = new Binary();
 		b.setContentType("application/foo");
 		b.setContent(new byte[] { 0, 1, 2, 3, 4 });
 		String encoded = ourCtx.newJsonParser().encodeResourceToString(b);
 
-		HttpPost post = new HttpPost("http://localhost:" + ourPort + "/Binary");
-		post.setEntity(new StringEntity(encoded));
-		post.addHeader("Content-Type", Constants.CT_FHIR_JSON);
-		CloseableHttpResponse status = ourClient.execute(post);
-		try {
-			assertEquals("application/foo", ourLastBinary.getContentType());
-			assertArrayEquals(new byte[] { 0, 1, 2, 3, 4 }, ourLastBinary.getContent());
-		} finally {
-			IOUtils.closeQuietly(status);
-		}
+		ourServer.fhirRequest("/Binary").post(encoded.getBytes(StandardCharsets.UTF_8), Constants.CT_FHIR_JSON);
+		assertThat(ourLastBinary.getContentType()).isEqualTo("application/foo");
+		assertThat(ourLastBinary.getContent()).containsExactly(new byte[]{0, 1, 2, 3, 4});
 	}
 
 	@Test
@@ -98,58 +76,23 @@ public class CreateBinaryDstu3Test {
 		b.setContent(ourCtx.newXmlParser().encodeResourceToString(p).getBytes("UTF-8"));
 		String encoded = ourCtx.newJsonParser().encodeResourceToString(b);
 
-		HttpPost post = new HttpPost("http://localhost:" + ourPort + "/Binary");
-		post.setEntity(new StringEntity(encoded));
-		post.addHeader("Content-Type", Constants.CT_FHIR_JSON);
-		CloseableHttpResponse status = ourClient.execute(post);
-		try {
-			assertEquals("application/xml+fhir", ourLastBinary.getContentType());
-			assertArrayEquals(b.getContent(), ourLastBinary.getContent());
-			assertEquals(encoded, ourLastBinaryString);
-			assertArrayEquals(encoded.getBytes("UTF-8"), ourLastBinaryBytes);
-		} finally {
-			IOUtils.closeQuietly(status);
-		}
+		ourServer.fhirRequest("/Binary").post(encoded.getBytes(StandardCharsets.UTF_8), Constants.CT_FHIR_JSON);
+		assertThat(ourLastBinary.getContentType()).isEqualTo(Constants.CT_FHIR_XML);
+		assertThat(ourLastBinary.getContent()).containsExactly(b.getContent());
+		assertThat(ourLastBinaryString).isEqualTo(encoded);
+		assertThat(ourLastBinaryBytes).containsExactly(encoded.getBytes("UTF-8"));
 	}
 
 	@Test
-	public void testRawBytesNoContentType() throws Exception {
-		HttpPost post = new HttpPost("http://localhost:" + ourPort + "/Binary");
-		post.setEntity(new ByteArrayEntity(new byte[] { 0, 1, 2, 3, 4 }));
-		CloseableHttpResponse status = ourClient.execute(post);
-		try {
-			assertNull(ourLastBinary.getContentType());
-			assertArrayEquals(new byte[] { 0, 1, 2, 3, 4 }, ourLastBinary.getContent());
-		} finally {
-			IOUtils.closeQuietly(status);
-		}
+	public void testRawBytesNoContentType() {
+		ourServer.fhirRequest("/Binary").method("POST", new byte[] { 0, 1, 2, 3, 4 }, null);
+		assertThat(ourLastBinary.getContentType()).isNull();
+		assertThat(ourLastBinary.getContent()).containsExactly(new byte[]{0, 1, 2, 3, 4});
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
-	}
-
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		BinaryProvider binaryProvider = new BinaryProvider();
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-		servlet.setResourceProviders(binaryProvider);
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 	public static class BinaryProvider implements IResourceProvider {

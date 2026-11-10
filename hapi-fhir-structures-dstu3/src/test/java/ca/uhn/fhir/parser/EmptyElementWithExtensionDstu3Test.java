@@ -1,16 +1,15 @@
 package ca.uhn.fhir.parser;
 
-import static org.junit.Assert.assertEquals;
-
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.util.TestUtil;
 import org.hl7.fhir.dstu3.model.Coding;
 import org.hl7.fhir.dstu3.model.Extension;
 import org.hl7.fhir.dstu3.model.Observation;
 import org.hl7.fhir.dstu3.model.StringType;
-import org.junit.AfterClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
 
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.util.TestUtil;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Created by Bill de Beaubien on 12/20/2015.
@@ -21,14 +20,14 @@ public class EmptyElementWithExtensionDstu3Test {
 	private static FhirContext ctx = FhirContext.forDstu3();
 
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 
 	@Test
-	public void testNullFlavorCompositeJson() throws Exception {
+	public void testNullFlavorCompositeJson() {
 		Observation observation = new Observation();
 		observation.getCode().addCoding().addExtension(new Extension("http://hl7.org/fhir/StructureDefinition/iso21090-nullFlavor", new StringType("UNK")));
 		IParser parser = ctx.newJsonParser().setPrettyPrint(true);
@@ -37,7 +36,7 @@ public class EmptyElementWithExtensionDstu3Test {
 		ourLog.info(json);
 
 		observation = (Observation) parser.parseResource(json);
-		assertEquals(1, observation.getCode().getCoding().get(0).getExtension().size());
+		assertThat(observation.getCode().getCoding().get(0).getExtension()).hasSize(1);
 	}
 
 	@Test
@@ -50,7 +49,7 @@ public class EmptyElementWithExtensionDstu3Test {
 		ourLog.info(xml);
 
 		observation = (Observation) parser.parseResource(xml);
-		assertEquals(1, observation.getCode().getCoding().get(0).getExtension().size());
+		assertThat(observation.getCode().getCoding().get(0).getExtension()).hasSize(1);
 	}
 
 	@Test
@@ -64,7 +63,7 @@ public class EmptyElementWithExtensionDstu3Test {
 		ourLog.info(json);
 
 		observation = (Observation) parser.parseResource(json);
-		assertEquals(1, observation.getStatusElement().getExtension().size());
+		assertThat(observation.getStatusElement().getExtension()).hasSize(1);
 	}
 
 	@Test
@@ -78,7 +77,7 @@ public class EmptyElementWithExtensionDstu3Test {
 		ourLog.info(xml);
 
 		observation = (Observation) parser.parseResource(xml);
-		assertEquals(1, observation.getStatusElement().getExtension().size());
+		assertThat(observation.getStatusElement().getExtension()).hasSize(1);
 	}
 
 }

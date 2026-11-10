@@ -1,46 +1,15 @@
 package ca.uhn.fhir.tinder.parser;
 
-import static org.apache.commons.lang.StringUtils.defaultString;
-import static org.apache.commons.lang.StringUtils.isNotBlank;
-
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.lang.annotation.Annotation;
-import java.lang.reflect.Constructor;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
-
-import org.apache.commons.lang.WordUtils;
-import org.apache.commons.lang3.ObjectUtils;
-import org.apache.commons.lang3.StringUtils;
-import org.apache.maven.plugin.MojoFailureException;
-import org.apache.velocity.VelocityContext;
-import org.apache.velocity.app.VelocityEngine;
-import org.apache.velocity.tools.generic.EscapeTool;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.i18n.Msg;
 import ca.uhn.fhir.model.api.ExtensionDt;
 import ca.uhn.fhir.model.api.IResource;
 import ca.uhn.fhir.model.api.annotation.SimpleSetter;
-import ca.uhn.fhir.model.dstu.composite.ResourceReferenceDt;
-import ca.uhn.fhir.model.dstu.resource.Binary;
+import ca.uhn.fhir.model.dstu2.composite.ResourceReferenceDt;
+import ca.uhn.fhir.model.dstu2.resource.Binary;
 import ca.uhn.fhir.model.primitive.BoundCodeDt;
-import ca.uhn.fhir.model.primitive.BoundCodeableConceptDt;
+import ca.uhn.fhir.tinder.TinderResourceGeneratorMojo;
 import ca.uhn.fhir.tinder.TinderStructuresMojo;
 import ca.uhn.fhir.tinder.ValueSetGenerator;
 import ca.uhn.fhir.tinder.VelocityHelper;
@@ -53,10 +22,47 @@ import ca.uhn.fhir.tinder.model.Resource;
 import ca.uhn.fhir.tinder.model.ResourceBlock;
 import ca.uhn.fhir.tinder.model.SimpleChild;
 import ca.uhn.fhir.tinder.model.SimpleSetter.Parameter;
+import com.google.common.base.Charsets;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.text.WordUtils;
+import org.apache.maven.plugin.MojoFailureException;
+import org.apache.velocity.VelocityContext;
+import org.apache.velocity.app.VelocityEngine;
+import org.apache.velocity.runtime.RuntimeConstants;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Constructor;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+
+import static org.apache.commons.lang3.ObjectUtils.getIfNull;
+import static org.apache.commons.lang3.StringUtils.defaultString;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 public abstract class BaseStructureParser {
 
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BaseStructureParser.class);
+	protected List<BaseRootType> myResources = new ArrayList<BaseRootType>();
 	private String myBaseDir;
 	private ArrayList<Extension> myExtensions;
 	private TreeSet<String> myImports = new TreeSet<String>();
@@ -65,7 +71,6 @@ public abstract class BaseStructureParser {
 	private TreeMap<String, String> myNameToDatatypeClass = new TreeMap<String, String>();
 	private TreeMap<String, String> myNameToResourceClass = new TreeMap<String, String>();
 	private String myPackageBase;
-	protected List<BaseRootType> myResources = new ArrayList<BaseRootType>();
 	private String myVersion;
 	private boolean myIsRi;
 	private FhirContext myCtx;
@@ -76,26 +81,25 @@ public abstract class BaseStructureParser {
 	private String myVelocityPath = null;
 	private String myVelocityProperties = null;
 
-	public BaseStructureParser(String theVersion, String theBaseDir) {
+	public BaseStructureParser(String theVersion, String theBaseDir) throws MojoFailureException {
 		myVersion = theVersion;
 		myBaseDir = theBaseDir;
-		myIsRi = myVersion.equals("dstu3");
 
-		if (myVersion.equals("dstu3")) {
-			myCtx = FhirContext.forDstu3();
+		if (myVersion.equals("r4")) {
+			myCtx = FhirContext.forR4Cached();
+		} else if (myVersion.equals("dstu3")) {
+			myCtx = FhirContext.forDstu3Cached();
 		} else if (myVersion.equals("dstu2")) {
-			myCtx = FhirContext.forDstu2();
-		} else if (myVersion.equals("dstu")) {
-			myCtx = FhirContext.forDstu1();
+			myCtx = FhirContext.forDstu2Cached();
+		} else if (myVersion.equals("r4b")) {
+			myCtx = FhirContext.forR4BCached();
+		} else if (myVersion.equals("r5")) {
+			myCtx = FhirContext.forR5Cached();
+		} else {
+			throw new MojoFailureException(Msg.code(151) + "Unknown version: " + myVersion);
 		}
-	}
 
-	public FhirContext getCtx() {
-		return myCtx;
-	}
-
-	public String getVersion() {
-		return myVersion;
+		myIsRi = myCtx.getVersion().getVersion().isEqualOrNewerThan(FhirVersionEnum.DSTU3);
 	}
 
 	private void addImport(String bindingClass) {
@@ -116,7 +120,9 @@ public abstract class BaseStructureParser {
 				myLocallyDefinedClassNames.put(bindingClass, "valueset");
 			} else {
 				ourLog.debug("No binding found for: {}", theElement.getBinding());
-				ourLog.debug(" * Valid: {}", new TreeSet<String>(theVsp.getValueSets().keySet()));
+				ourLog.debug(
+						" * Valid: {}",
+						new TreeSet<String>(theVsp.getValueSets().keySet()));
 			}
 		}
 		for (BaseElement next : theElement.getChildren()) {
@@ -137,117 +143,8 @@ public abstract class BaseStructureParser {
 		theStructureParser.myNameToDatatypeClass.putAll(myNameToDatatypeClass);
 	}
 
-	private ca.uhn.fhir.model.api.annotation.SimpleSetter.Parameter findAnnotation(Class<?> theBase, Annotation[] theAnnotations, Class<ca.uhn.fhir.model.api.annotation.SimpleSetter.Parameter> theClass) {
-		for (Annotation next : theAnnotations) {
-			if (theClass.equals(next.annotationType())) {
-				return (ca.uhn.fhir.model.api.annotation.SimpleSetter.Parameter) next;
-			}
-		}
-		throw new IllegalArgumentException(theBase.getCanonicalName() + " has @" + SimpleSetter.class.getCanonicalName() + " constructor with no/invalid parameter annotation");
-	}
-
-	/**
-	 * Example: Encounter has an internal block class named "Location", but it also has a reference to the Location
-	 * resource type, so we need to use the fully qualified name for that resource reference
-	 */
-	private void fixResourceReferenceClassNames(BaseElement theNext, String thePackageBase) {
-		for (BaseElement next : theNext.getChildren()) {
-			fixResourceReferenceClassNames(next, thePackageBase);
-		}
-
-		if (theNext.isResourceRef()) {
-			for (int i = 0; i < theNext.getType().size(); i++) {
-				String nextTypeName = theNext.getType().get(i);
-				if ("Any".equals(nextTypeName)) {
-					continue;
-				}
-				// if ("Location".equals(nextTypeName)) {
-				// ourLog.info("***** Checking for Location");
-				// ourLog.info("***** Imports are: {}", new
-				// TreeSet<String>(myImports));
-				// }
-				boolean found = false;
-				for (String nextImport : myImports) {
-					if (nextImport.endsWith(".resource." + nextTypeName)) {
-						// ourLog.info("***** Found match " + nextImport);
-						theNext.getType().set(i, nextImport);
-						found = true;
-					}
-				}
-				if (!found) {
-					theNext.getType().set(i, thePackageBase + ".resource." + nextTypeName);
-				}
-			}
-		}
-	}
-
-	protected String getFilenamePrefix() {
-		return myFilenamePrefix != null ? myFilenamePrefix : "";
-	}
-
-	protected String getFilenameSuffix() {
-		return myFilenameSuffix != null ? myFilenameSuffix : "";
-	}
-
-	public Map<String, String> getLocalImports() {
-		return myLocallyDefinedClassNames;
-	}
-
-	public TreeMap<String, String> getNameToDatatypeClass() {
-		return myNameToDatatypeClass;
-	}
-
-	public List<BaseRootType> getResources() {
-		return myResources;
-	}
-
-	protected String getTemplate() {
-		return myTemplate;
-	}
-
-	protected File getTemplateFile() {
-		return myTemplateFile;
-	}
-
-	protected String getVelocityPath() {
-		return myVelocityPath;
-	}
-
-	protected boolean isSpreadsheet(String theFileName) {
-		return true;
-	}
-
-	public void markResourcesForImports() {
-		for (BaseRootType next : myResources) {
-			if (next instanceof Resource) {
-				myLocallyDefinedClassNames.put(next.getName(), "resource");
-			} else if (next instanceof Composite) {
-				myLocallyDefinedClassNames.put(next.getName() + "Dt", "composite");
-			} else {
-				throw new IllegalStateException(next.getClass() + "");
-			}
-		}
-	}
-
-	private void scanForCorrections(BaseRootType theNext) {
-		if (theNext.getElementName().equals("ResourceReference")) {
-			for (BaseElement next : theNext.getChildren()) {
-				if (next.getElementName().equals("reference")) {
-					next.clearTypes();
-					next.setTypeFromString("id");
-					scanForSimpleSetters((Child) next);
-				}
-			}
-		}
-	}
-
-	private String scanForImportNamesAndReturnFqn(String theNextType) throws MojoFailureException {
-		String retVal = doScanForImportNamesAndReturnFqn(theNextType);
-		if (myVersion.equals("dstu2")) {
-			retVal = retVal.replace(".dev.", ".dstu2.");
-		}
-
-		return retVal;
+	protected FhirVersionEnum determineVersionEnum() throws MojoFailureException {
+		return determineVersionEnum(myVersion);
 	}
 
 	private String doScanForImportNamesAndReturnFqn(String theNextType) throws MojoFailureException {
@@ -258,14 +155,16 @@ public abstract class BaseStructureParser {
 			if (theNextType.endsWith("Dt")) {
 				unqualifiedTypeName = theNextType.substring(0, theNextType.length() - 2);
 				try {
-					return Class.forName("org.hl7.fhir.dstu3.model." + unqualifiedTypeName + "Type").getName();
+					return Class.forName("org.hl7.fhir.dstu3.model." + unqualifiedTypeName + "Type")
+							.getName();
 				} catch (ClassNotFoundException e1) {
 					// not found
 				}
 			}
 
 			try {
-				return Class.forName("org.hl7.fhir.dstu3.model." + unqualifiedTypeName).getName();
+				return Class.forName("org.hl7.fhir.dstu3.model." + unqualifiedTypeName)
+						.getName();
 			} catch (ClassNotFoundException e) {
 				// not found
 			}
@@ -333,17 +232,21 @@ public abstract class BaseStructureParser {
 										Class.forName(type);
 										return (type);
 									} catch (ClassNotFoundException e6) {
-										String fileName = myBaseDir + "/src/main/java/" + myPackageBase.replace('.', '/') + "/composite/" + nextType + ".java";
+										String fileName = myBaseDir + "/src/main/java/"
+												+ myPackageBase.replace('.', '/') + "/composite/" + nextType + ".java";
 										File file = new File(fileName);
 										if (file.exists()) {
 											return myPackageBase + ".composite." + nextType;
 										}
-										fileName = myBaseDir + "/src/main/java/ca/uhn/fhir/model/primitive/" + nextType + ".java";
+										fileName = myBaseDir + "/src/main/java/ca/uhn/fhir/model/primitive/" + nextType
+												+ ".java";
 										file = new File(fileName);
 										if (file.exists()) {
 											return "ca.uhn.fhir.model.primitive." + nextType;
 										}
-										throw new MojoFailureException("Unknown type: " + nextType + " - Have locally defined names: " + new TreeSet<String>(myLocallyDefinedClassNames.keySet()));
+										throw new MojoFailureException(Msg.code(152) + "Unknown type: " + nextType
+												+ " - Have locally defined names: "
+												+ new TreeSet<String>(myLocallyDefinedClassNames.keySet()));
 									}
 								}
 							}
@@ -352,6 +255,151 @@ public abstract class BaseStructureParser {
 				}
 			}
 		}
+	}
+
+	private ca.uhn.fhir.model.api.annotation.SimpleSetter.Parameter findAnnotation(
+			Class<?> theBase,
+			Annotation[] theAnnotations,
+			Class<ca.uhn.fhir.model.api.annotation.SimpleSetter.Parameter> theClass) {
+		for (Annotation next : theAnnotations) {
+			if (theClass.equals(next.annotationType())) {
+				return (ca.uhn.fhir.model.api.annotation.SimpleSetter.Parameter) next;
+			}
+		}
+		throw new IllegalArgumentException(Msg.code(153) + theBase.getCanonicalName() + " has @"
+				+ SimpleSetter.class.getCanonicalName() + " constructor with no/invalid parameter annotation");
+	}
+
+	/**
+	 * Example: Encounter has an internal block class named "Location", but it also has a reference to the Location
+	 * resource type, so we need to use the fully qualified name for that resource reference
+	 */
+	private void fixResourceReferenceClassNames(BaseElement theNext, String thePackageBase) {
+		for (BaseElement next : theNext.getChildren()) {
+			fixResourceReferenceClassNames(next, thePackageBase);
+		}
+
+		if (theNext.isResourceRef()) {
+			for (int i = 0; i < theNext.getType().size(); i++) {
+				String nextTypeName = theNext.getType().get(i);
+				if ("Any".equals(nextTypeName)) {
+					continue;
+				}
+				// if ("Location".equals(nextTypeName)) {
+				// ourLog.info("***** Checking for Location");
+				// ourLog.info("***** Imports are: {}", new
+				// TreeSet<String>(myImports));
+				// }
+				boolean found = false;
+				for (String nextImport : myImports) {
+					if (nextImport.endsWith(".resource." + nextTypeName)) {
+						// ourLog.info("***** Found match " + nextImport);
+						theNext.getType().set(i, nextImport);
+						found = true;
+					}
+				}
+				if (!found) {
+					theNext.getType().set(i, thePackageBase + ".resource." + nextTypeName);
+				}
+			}
+		}
+	}
+
+	public FhirContext getCtx() {
+		return myCtx;
+	}
+
+	protected String getFilenamePrefix() {
+		return myFilenamePrefix != null ? myFilenamePrefix : "";
+	}
+
+	public void setFilenamePrefix(String theFilenamePrefix) {
+		myFilenamePrefix = theFilenamePrefix;
+	}
+
+	protected String getFilenameSuffix() {
+		return myFilenameSuffix != null ? myFilenameSuffix : "";
+	}
+
+	public void setFilenameSuffix(String theFilenameSuffix) {
+		myFilenameSuffix = theFilenameSuffix;
+	}
+
+	public Map<String, String> getLocalImports() {
+		return myLocallyDefinedClassNames;
+	}
+
+	public TreeMap<String, String> getNameToDatatypeClass() {
+		return myNameToDatatypeClass;
+	}
+
+	public List<BaseRootType> getResources() {
+		return myResources;
+	}
+
+	protected String getTemplate() {
+		return myTemplate;
+	}
+
+	public void setTemplate(String theTemplate) {
+		myTemplate = theTemplate;
+	}
+
+	protected File getTemplateFile() {
+		return myTemplateFile;
+	}
+
+	public void setTemplateFile(File theTemplateFile) {
+		myTemplateFile = theTemplateFile;
+	}
+
+	protected String getVelocityPath() {
+		return myVelocityPath;
+	}
+
+	public void setVelocityPath(String theVelocityPath) {
+		myVelocityPath = theVelocityPath;
+	}
+
+	public String getVersion() {
+		return myVersion;
+	}
+
+	protected boolean isSpreadsheet(String theFileName) {
+		return true;
+	}
+
+	public void markResourcesForImports() {
+		for (BaseRootType next : myResources) {
+			if (next instanceof Resource) {
+				myLocallyDefinedClassNames.put(next.getName(), "resource");
+			} else if (next instanceof Composite) {
+				myLocallyDefinedClassNames.put(next.getName() + "Dt", "composite");
+			} else {
+				throw new IllegalStateException(Msg.code(154) + next.getClass() + "");
+			}
+		}
+	}
+
+	private void scanForCorrections(BaseRootType theNext) {
+		if (theNext.getElementName().equals("ResourceReference")) {
+			for (BaseElement next : theNext.getChildren()) {
+				if (next.getElementName().equals("reference")) {
+					next.clearTypes();
+					next.setTypeFromString("id");
+					scanForSimpleSetters((Child) next);
+				}
+			}
+		}
+	}
+
+	private String scanForImportNamesAndReturnFqn(String theNextType) throws MojoFailureException {
+		String retVal = doScanForImportNamesAndReturnFqn(theNextType);
+		if (myVersion.equals("dstu2")) {
+			retVal = retVal.replace(".dev.", ".dstu2.");
+		}
+
+		return retVal;
 	}
 
 	private void scanForImportsNames(BaseElement theNext) throws MojoFailureException {
@@ -381,11 +429,13 @@ public abstract class BaseStructureParser {
 		Class<?> childDt;
 		if (theElem.getReferenceTypesForMultiple().size() == 1) {
 			try {
-				childDt = Class.forName("ca.uhn.fhir.model.primitive." + theElem.getReferenceTypesForMultiple().get(0));
+				childDt = Class.forName("ca.uhn.fhir.model.primitive."
+						+ theElem.getReferenceTypesForMultiple().get(0));
 			} catch (ClassNotFoundException e) {
 				if (myVersion.equals("dstu")) {
 					try {
-						childDt = Class.forName("ca.uhn.fhir.model.dstu.composite." + theElem.getReferenceTypesForMultiple().get(0));
+						childDt = Class.forName("ca.uhn.fhir.model.dstu.composite."
+								+ theElem.getReferenceTypesForMultiple().get(0));
 					} catch (ClassNotFoundException e2) {
 						return;
 					}
@@ -420,7 +470,8 @@ public abstract class BaseStructureParser {
 					}
 					p.setDatatype(paramTypes[i].getSimpleName());
 				}
-				p.setParameter(findAnnotation(childDt, paramAnn[i], SimpleSetter.Parameter.class).name());
+				p.setParameter(findAnnotation(childDt, paramAnn[i], SimpleSetter.Parameter.class)
+						.name());
 				ss.getParameters().add(p);
 			}
 		}
@@ -453,41 +504,17 @@ public abstract class BaseStructureParser {
 		scanForTypeNameConflicts(theNext, typeNames);
 	}
 
-	public void setExtensions(ArrayList<Extension> theExts) {
-		myExtensions = theExts;
-	}
-
-	public void setFilenamePrefix(String theFilenamePrefix) {
-		myFilenamePrefix = theFilenamePrefix;
-	}
-
-	public void setFilenameSuffix(String theFilenameSuffix) {
-		myFilenameSuffix = theFilenameSuffix;
-	}
-
-	public void setTemplate(String theTemplate) {
-		myTemplate = theTemplate;
-	}
-
-	public void setTemplateFile (File theTemplateFile) {
-		myTemplateFile = theTemplateFile;
-	}
-
-	public void setVelocityPath(String theVelocityPath) {
-		myVelocityPath = theVelocityPath;
+	public void setExtensions(ArrayList<Extension> theExtensions) {
+		myExtensions = theExtensions;
 	}
 
 	public void setVelocityProperties(String theVelocityProperties) {
 		myVelocityProperties = theVelocityProperties;
 	}
 
-	private void write(BaseRootType theResource, File theFile, String thePackageBase) throws IOException, MojoFailureException {
-		FileOutputStream fos = new FileOutputStream(theFile, false);
-		OutputStreamWriter w = new OutputStreamWriter(fos, "UTF-8");
-
-		ourLog.debug("Writing file: {}", theFile.getAbsolutePath());
-
-		ArrayList<String> imports = new ArrayList<String>();
+	private void write(BaseRootType theResource, File theFile, String thePackageBase)
+			throws IOException, MojoFailureException {
+		ArrayList<String> imports = new ArrayList<>();
 		for (String next : myImports) {
 			next = Resource.correctName(next);
 			if (next.contains(".")) {
@@ -529,22 +556,23 @@ public abstract class BaseStructureParser {
 		ctx.put("requirements", defaultString(theResource.getRequirement()));
 		ctx.put("children", theResource.getChildren());
 		ctx.put("resourceBlockChildren", theResource.getResourceBlockChildren());
-		ctx.put("childExtensionTypes", ObjectUtils.defaultIfNull(myExtensions, new ArrayList<Extension>()));
+		ctx.put("childExtensionTypes", getIfNull(myExtensions, new ArrayList<Extension>()));
 		ctx.put("searchParams", (theResource.getSearchParameters()));
 		ctx.put("searchParamsReference", (theResource.getSearchParametersResource()));
 		ctx.put("searchParamsWithoutComposite", (theResource.getSearchParametersWithoutComposite()));
 		ctx.put("includes", (theResource.getIncludes()));
-		ctx.put("esc", new EscapeTool());
+		ctx.put("esc", new TinderResourceGeneratorMojo.EscapeTool());
 		ctx.put("isRi", determineVersionEnum().isRi());
 
 		String capitalize = WordUtils.capitalize(myVersion);
-		if ("Dstu".equals(capitalize)) {
-			capitalize = "Dstu1";
+		if ("R4b".equals(capitalize)) {
+			capitalize = "R4B";
 		}
 		ctx.put("versionCapitalized", capitalize);
 		ctx.put("this", theResource);
 
-		VelocityEngine v = VelocityHelper.configureVelocityEngine(getTemplateFile(), getVelocityPath(), myVelocityProperties);
+		VelocityEngine v =
+				VelocityHelper.configureVelocityEngine(getTemplateFile(), getVelocityPath(), myVelocityProperties);
 		InputStream templateIs = null;
 		if (getTemplateFile() != null) {
 			templateIs = new FileInputStream(getTemplateFile());
@@ -553,31 +581,60 @@ public abstract class BaseStructureParser {
 		}
 
 		InputStreamReader templateReader = new InputStreamReader(templateIs);
-		v.evaluate(ctx, w, "", templateReader);
+		ByteArrayOutputStream byteArrayWriter = new ByteArrayOutputStream();
+		OutputStreamWriter outputStreamWriter = new OutputStreamWriter(byteArrayWriter, Charsets.UTF_8);
+		v.evaluate(ctx, outputStreamWriter, "", templateReader);
+		outputStreamWriter.flush();
 
-		w.close();
-		fos.close();
+		byte[] bytesToWrite = byteArrayWriter.toByteArray();
+
+		boolean actuallyWrite = false;
+		if (!theFile.exists()) {
+			actuallyWrite = true;
+		} else if (FileUtils.sizeOf(theFile) != bytesToWrite.length) {
+			actuallyWrite = true;
+		} else {
+			byte[] existingBytes = IOUtils.toByteArray(new FileInputStream(theFile));
+			if (!Arrays.equals(existingBytes, bytesToWrite)) {
+				actuallyWrite = true;
+			}
+		}
+
+		if (!actuallyWrite) {
+			ourLog.debug("Skipping writing already up-to-date file: {}", theFile.getAbsolutePath());
+			return;
+		}
+
+		ourLog.debug("Writing file: {}", theFile.getAbsolutePath());
+
+		try (FileOutputStream fos = new FileOutputStream(theFile, false)) {
+			fos.write(bytesToWrite);
+			fos.flush();
+		}
 	}
 
-	public void writeAll(File theOutputDirectory, File theResourceOutputDirectory, String thePackageBase) throws MojoFailureException {
+	public void writeAll(File theOutputDirectory, File theResourceOutputDirectory, String thePackageBase)
+			throws MojoFailureException {
 		writeAll(TargetType.SOURCE, theOutputDirectory, theResourceOutputDirectory, thePackageBase);
 	}
-	
-	public void writeAll(TargetType theTarget, File theOutputDirectory, File theResourceOutputDirectory, String thePackageBase) throws MojoFailureException {
+
+	public void writeAll(
+			TargetType theTarget, File theOutputDirectory, File theResourceOutputDirectory, String thePackageBase)
+			throws MojoFailureException {
 		myPackageBase = thePackageBase;
 
 		if (!theOutputDirectory.exists()) {
 			theOutputDirectory.mkdirs();
 		}
 		if (!theOutputDirectory.isDirectory()) {
-			throw new MojoFailureException(theOutputDirectory + " is not a directory");
+			throw new MojoFailureException(Msg.code(155) + theOutputDirectory + " is not a directory");
 		}
 		if (theResourceOutputDirectory != null) {
 			if (!theResourceOutputDirectory.exists()) {
 				theResourceOutputDirectory.mkdirs();
 			}
 			if (!theResourceOutputDirectory.isDirectory()) {
-				throw new MojoFailureException(theResourceOutputDirectory + " is not a directory");
+				throw new MojoFailureException(Msg.code(156) + theResourceOutputDirectory + " is not a directory");
 			}
 		}
 
@@ -609,12 +666,12 @@ public abstract class BaseStructureParser {
 			}
 			String fileName = prefix + elementName + suffix;
 			int ix = fileName.lastIndexOf('.');
-			String className = ix < 0 ? fileName : fileName.substring(0, ix); 
+			String className = ix < 0 ? fileName : fileName.substring(0, ix);
 			File f = new File(theOutputDirectory, fileName);
 			try {
 				write(next, f, thePackageBase);
 			} catch (IOException e) {
-				throw new MojoFailureException("Failed to write structure", e);
+				throw new MojoFailureException(Msg.code(157) + "Failed to write structure", e);
 			}
 
 			if (next instanceof Resource) {
@@ -622,7 +679,7 @@ public abstract class BaseStructureParser {
 			} else if (next instanceof Composite) {
 				myNameToDatatypeClass.put(next.getElementName(), thePackageBase + ".composite." + className);
 			} else {
-				throw new IllegalStateException(next.getClass().toString());
+				throw new IllegalStateException(Msg.code(158) + next.getClass().toString());
 			}
 		}
 
@@ -632,12 +689,11 @@ public abstract class BaseStructureParser {
 			myNameToResourceClass.put("Binary", thePackageBase + ".resource.Binary");
 			myNameToDatatypeClass.put("Extension", ExtensionDt.class.getName());
 
-			if (determineVersionEnum() == FhirVersionEnum.DSTU1) {
+			if (determineVersionEnum() == FhirVersionEnum.DSTU2) {
 				myNameToDatatypeClass.put("boundCode", BoundCodeDt.class.getName());
-				myNameToDatatypeClass.put("boundCodeableConcept", BoundCodeableConceptDt.class.getName());
-			} else if (determineVersionEnum() == FhirVersionEnum.DSTU2) {
-				myNameToDatatypeClass.put("boundCode", BoundCodeDt.class.getName());
-				myNameToDatatypeClass.put("boundCodeableConcept", ca.uhn.fhir.model.dstu2.composite.BoundCodeableConceptDt.class.getName());
+				myNameToDatatypeClass.put(
+						"boundCodeableConcept",
+						ca.uhn.fhir.model.dstu2.composite.BoundCodeableConceptDt.class.getName());
 			}
 
 			try {
@@ -656,47 +712,32 @@ public abstract class BaseStructureParser {
 				ctx.put("nameToDatatypeClass", myNameToDatatypeClass);
 				ctx.put("version", myVersion.replace(".", ""));
 				ctx.put("versionEnumName", determineVersionEnum().name());
-				ctx.put("esc", new EscapeTool());
+				ctx.put("esc", new TinderResourceGeneratorMojo.EscapeTool());
 				ctx.put("isRi", determineVersionEnum().isRi());
 				ctx.put("package_suffix", packageSuffix);
 				String capitalize = WordUtils.capitalize(myVersion);
-				if ("Dstu".equals(capitalize)) {
-					capitalize = "Dstu1";
+				if ("R4b".equals(capitalize)) {
+					capitalize = "R4B";
 				}
 				ctx.put("versionCapitalized", capitalize);
 
 				VelocityEngine v = new VelocityEngine();
-				v.setProperty("resource.loader", "cp");
-				v.setProperty("cp.resource.loader.class", "org.apache.velocity.runtime.resource.loader.ClasspathResourceLoader");
-				v.setProperty("runtime.references.strict", Boolean.TRUE);
+				v.setProperty(RuntimeConstants.RESOURCE_LOADERS, "cp");
+				v.setProperty(
+						"resource.loader.cp.class",
+						"org.apache.velocity.runtime.resource.loader.ClasspathResourceLoader");
+				v.setProperty("runtime.strict_mode.enable", Boolean.TRUE);
 
-				InputStream templateIs = ResourceGeneratorUsingSpreadsheet.class.getResourceAsStream("/vm/fhirversion_properties.vm");
+				InputStream templateIs =
+						ResourceGeneratorUsingSpreadsheet.class.getResourceAsStream("/vm/fhirversion_properties.vm");
 				InputStreamReader templateReader = new InputStreamReader(templateIs);
 				v.evaluate(ctx, w, "", templateReader);
 
 				w.close();
 			} catch (IOException e) {
-				throw new MojoFailureException(e.getMessage(), e);
+				throw new MojoFailureException(Msg.code(159) + e.getMessage(), e);
 			}
 		}
-	}
-
-	protected FhirVersionEnum determineVersionEnum() throws MojoFailureException {
-		return determineVersionEnum(myVersion);
-	}
-
-	public static FhirVersionEnum determineVersionEnum(String version) throws MojoFailureException {
-		FhirVersionEnum versionEnum;
-		if ("dstu".equals(version)) {
-			versionEnum = FhirVersionEnum.DSTU1;
-		} else if ("dstu2".equals(version)) {
-			versionEnum = FhirVersionEnum.DSTU2;
-		} else if ("dstu3".equals(version)) {
-			versionEnum = FhirVersionEnum.DSTU3;
-		} else {
-			throw new MojoFailureException("Unknown version: " + version);
-		}
-		return versionEnum;
 	}
 
 	static String cellValue(Node theRowXml, int theCellIndex) {
@@ -726,6 +767,24 @@ public abstract class BaseStructureParser {
 		return null;
 	}
 
+	public static FhirVersionEnum determineVersionEnum(String version) {
+		FhirVersionEnum versionEnum;
+		if ("dstu2".equals(version)) {
+			versionEnum = FhirVersionEnum.DSTU2;
+		} else if ("dstu3".equals(version)) {
+			versionEnum = FhirVersionEnum.DSTU3;
+		} else if ("r4".equals(version)) {
+			versionEnum = FhirVersionEnum.R4;
+		} else if ("r4b".equals(version)) {
+			versionEnum = FhirVersionEnum.R4B;
+		} else if ("r5".equals(version)) {
+			versionEnum = FhirVersionEnum.R5;
+		} else {
+			throw new IllegalArgumentException(Msg.code(160) + "Unknown version: " + version);
+		}
+		return versionEnum;
+	}
+
 	public static void main(String[] args) throws Exception {
 		String base = "/home/t3903uhn/workspace/uhn-fhir-service/";
 		TinderStructuresMojo m = new TinderStructuresMojo();
@@ -744,5 +803,4 @@ public abstract class BaseStructureParser {
 		m.setBuildDatatypes(true);
 		m.execute();
 	}
-
 }

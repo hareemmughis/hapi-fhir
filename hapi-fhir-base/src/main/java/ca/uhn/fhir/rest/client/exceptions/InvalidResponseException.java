@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.client.exceptions;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,6 +17,7 @@ package ca.uhn.fhir.rest.client.exceptions;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.client.exceptions;
 
 import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
 import ca.uhn.fhir.util.CoverageIgnore;
@@ -30,33 +29,31 @@ public class InvalidResponseException extends BaseServerResponseException {
 
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @param theMessage
 	 *            The message
 	 */
-	public InvalidResponseException(int theStatusCode, String theMessage) {
+	public InvalidResponseException(String theMessage, int theStatusCode) {
 		super(theStatusCode, theMessage);
 	}
 
 	/**
 	 * Constructor
-	 * 
-	 * @param theMessage
+	 *  @param theMessage
 	 *            The message
 	 * @param theCause The cause
 	 */
-	public InvalidResponseException(int theStatusCode, String theMessage, Throwable theCause) {
+	public InvalidResponseException(String theMessage, int theStatusCode, Throwable theCause) {
 		super(theStatusCode, theMessage, theCause);
 	}
 
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @param theCause
 	 *            The underlying cause exception
 	 */
-	public InvalidResponseException(int theStatusCode, Throwable theCause) {
+	public InvalidResponseException(Throwable theCause, int theStatusCode) {
 		super(theStatusCode, theCause.toString(), theCause);
 	}
-
 }

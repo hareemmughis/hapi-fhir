@@ -1,38 +1,5 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.hamcrest.Matchers.blankOrNullString;
-import static org.hamcrest.Matchers.containsInRelativeOrder;
-import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.greaterThan;
-import static org.hamcrest.Matchers.not;
-import static org.hamcrest.Matchers.startsWith;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThat;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.entity.ContentType;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.model.api.IResource;
 import ca.uhn.fhir.model.dstu2.composite.MoneyDt;
@@ -43,7 +10,6 @@ import ca.uhn.fhir.model.dstu2.resource.OperationDefinition;
 import ca.uhn.fhir.model.dstu2.resource.Parameters;
 import ca.uhn.fhir.model.dstu2.resource.Patient;
 import ca.uhn.fhir.model.dstu2.valueset.OperationParameterUseEnum;
-import ca.uhn.fhir.model.primitive.DateTimeDt;
 import ca.uhn.fhir.model.primitive.IdDt;
 import ca.uhn.fhir.model.primitive.IntegerDt;
 import ca.uhn.fhir.model.primitive.StringDt;
@@ -52,14 +18,27 @@ import ca.uhn.fhir.rest.annotation.IdParam;
 import ca.uhn.fhir.rest.annotation.Operation;
 import ca.uhn.fhir.rest.annotation.OperationParam;
 import ca.uhn.fhir.rest.annotation.Read;
-import ca.uhn.fhir.rest.client.IGenericClient;
-import ca.uhn.fhir.rest.client.interceptor.LoggingInterceptor;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
 import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
-public class OperationServerDstu2Test {
-	private static CloseableHttpClient ourClient;
-	private static FhirContext ourCtx;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+
+class OperationServerDstu2Test {
+	private static final FhirContext ourCtx = FhirContext.forDstu2Cached();
 
 	private static IdDt ourLastId;
 	private static String ourLastMethod;
@@ -69,12 +48,17 @@ public class OperationServerDstu2Test {
 	private static MoneyDt ourLastParamMoney1;
 	private static UnsignedIntDt ourLastParamUnsignedInt1;
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(OperationServerDstu2Test.class);
-	private static int ourPort;
-	private static Server ourServer;
-	private IGenericClient myFhirClient;
 
-	@Before
-	public void before() {
+	@RegisterExtension
+	public static final RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		.setDefaultResponseEncoding(EncodingEnum.XML)
+		.registerProvider(new PatientProvider())
+		.registerProvider(new PlainProvider())
+		.withPagingProvider(new FifoMemoryPagingProvider(10).setDefaultPageSize(2))
+		.setDefaultPrettyPrint(false);
+
+	@BeforeEach
+	void before() {
 		ourLastParam1 = null;
 		ourLastParam2 = null;
 		ourLastParam3 = null;
@@ -82,69 +66,63 @@ public class OperationServerDstu2Test {
 		ourLastParamMoney1 = null;
 		ourLastId = null;
 		ourLastMethod = "";
-		
-		myFhirClient = ourCtx.newRestfulGenericClient("http://localhost:" + ourPort);
 	}
 
 	@Test
-	public void testConformance() throws Exception {
-		LoggingInterceptor loggingInterceptor = new LoggingInterceptor();
-		loggingInterceptor.setLogResponseBody(true);
-		myFhirClient.registerInterceptor(loggingInterceptor);
-
-		Conformance p = myFhirClient.fetchConformance().ofType(Conformance.class).prettyPrint().execute();
+	void testConformance() throws Exception {
+		Conformance p = ourServer.getFhirClient().fetchConformance().ofType(Conformance.class).prettyPrint().execute();
 		List<RestOperation> ops = p.getRest().get(0).getOperation();
-		assertThat(ops.size(), greaterThan(1));
+		assertThat(ops.size()).isGreaterThan(1);
 		assertNull(ops.get(0).getDefinition().getReference().getBaseUrl());
-		assertThat(ops.get(0).getDefinition().getReference().getValue(), startsWith("OperationDefinition/"));
+		assertThat(ops.get(0).getDefinition().getReference().getValue()).startsWith("OperationDefinition/");
 
-		OperationDefinition def = myFhirClient.read().resource(OperationDefinition.class).withId(ops.get(0).getDefinition().getReference()).execute();
-		assertThat(def.getCode(), not(blankOrNullString()));
+		OperationDefinition def = ourServer.getFhirClient().read().resource(OperationDefinition.class).withId(ops.get(0).getDefinition().getReference()).execute();
+		assertThat(def.getCode()).isNotBlank();
 
 		List<String> opNames = toOpNames(ops);
-		assertThat(opNames, containsInRelativeOrder("OP_TYPE"));
-		
-		assertEquals("OperationDefinition/Patient--OP_TYPE", ops.get(opNames.indexOf("OP_TYPE")).getDefinition().getReference().getValue());
+		assertThat(opNames).containsSubsequence("OP_TYPE");
+
+		assertEquals("OperationDefinition/Patient-t-OP_TYPE", ops.get(opNames.indexOf("OP_TYPE")).getDefinition().getReference().getValue());
 	}
 
 	/**
 	 * See #380
 	 */
 	@Test
-	public void testOperationDefinition() {
-		OperationDefinition def = myFhirClient.read().resource(OperationDefinition.class).withId("OperationDefinition/Patient--OP_TYPE").execute();
-		
-		ourLog.info(ourCtx.newXmlParser().setPrettyPrint(true).encodeResourceToString(def));
-		
+	void testOperationDefinition() {
+		OperationDefinition def = ourServer.getFhirClient().read().resource(OperationDefinition.class).withId("OperationDefinition/Patient-t-OP_TYPE").execute();
+
+		ourLog.debug(ourCtx.newXmlParser().setPrettyPrint(true).encodeResourceToString(def));
+
 //		@OperationParam(name="PARAM1") StringType theParam1,
 //		@OperationParam(name="PARAM2") Patient theParam2,
 //		@OperationParam(name="PARAM3", min=2, max=5) List<StringType> theParam3,
 //		@OperationParam(name="PARAM4", min=1) List<StringType> theParam4,
 
-		assertEquals(4, def.getParameter().size());
+		assertThat(def.getParameter()).hasSize(4);
 		assertEquals("PARAM1", def.getParameter().get(0).getName());
 		assertEquals(OperationParameterUseEnum.IN.getCode(), def.getParameter().get(0).getUse());
 		assertEquals(0, def.getParameter().get(0).getMin().intValue());
 		assertEquals("1", def.getParameter().get(0).getMax());
-		
+
 		assertEquals("PARAM2", def.getParameter().get(1).getName());
 		assertEquals(OperationParameterUseEnum.IN.getCode(), def.getParameter().get(1).getUse());
 		assertEquals(0, def.getParameter().get(1).getMin().intValue());
 		assertEquals("1", def.getParameter().get(1).getMax());
-		
+
 		assertEquals("PARAM3", def.getParameter().get(2).getName());
 		assertEquals(OperationParameterUseEnum.IN.getCode(), def.getParameter().get(2).getUse());
 		assertEquals(2, def.getParameter().get(2).getMin().intValue());
 		assertEquals("5", def.getParameter().get(2).getMax());
-		
+
 		assertEquals("PARAM4", def.getParameter().get(3).getName());
 		assertEquals(OperationParameterUseEnum.IN.getCode(), def.getParameter().get(3).getUse());
 		assertEquals(1, def.getParameter().get(3).getMin().intValue());
 		assertEquals("*", def.getParameter().get(3).getMax());
-		
+
 	}
 
-	
+
 	private List<String> toOpNames(List<RestOperation> theOps) {
 		ArrayList<String> retVal = new ArrayList<String>();
 		for (RestOperation next : theOps) {
@@ -154,25 +132,22 @@ public class OperationServerDstu2Test {
 	}
 
 	@Test
-	public void testInstanceEverythingGet() throws Exception {
+	void testInstanceEverythingGet() {
 
 		// Try with a GET
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient/123/$everything");
-		CloseableHttpResponse status = ourClient.execute(httpGet);
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/123/$everything").get();
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		status.assertStatus(200);
 
 		assertEquals("instance $everything", ourLastMethod);
-		assertThat(response, startsWith("<Bundle"));
+		assertThat(status.getBody()).startsWith("<Bundle");
 		assertEquals("Patient/123", ourLastId.toUnqualifiedVersionless().getValue());
 
 	}
 
 	@Test
-	public void testInstanceEverythingHapiClient() throws Exception {
-		Parameters p = ourCtx.newRestfulGenericClient("http://localhost:" + ourPort).operation().onInstance(new IdDt("Patient/123")).named("$everything").withParameters(new Parameters()).execute();
+	void testInstanceEverythingHapiClient() throws Exception {
+		Parameters p = ourCtx.newRestfulGenericClient(ourServer.getBaseUrl()).operation().onInstance(new IdDt("Patient/123")).named("$everything").withParameters(new Parameters()).execute();
 		Bundle b = (Bundle) p.getParameterFirstRep().getResource();
 
 		assertEquals("instance $everything", ourLastMethod);
@@ -181,300 +156,237 @@ public class OperationServerDstu2Test {
 	}
 
 	@Test
-	public void testInstanceEverythingPost() throws Exception {
+	void testInstanceEverythingPost() {
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(new Parameters());
 
 		// Try with a POST
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/123/$everything");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/123/$everything")
+				.post(inParamsStr, Constants.CT_FHIR_XML);
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		status.assertStatus(200);
 
 		assertEquals("instance $everything", ourLastMethod);
-		assertThat(response, startsWith("<Bundle"));
+		assertThat(status.getBody()).startsWith("<Bundle");
 		assertEquals("Patient/123", ourLastId.toUnqualifiedVersionless().getValue());
 
 	}
 
 	@Test
-	public void testOperationCantUseGetIfItIsntIdempotent() throws Exception {
-		HttpGet httpPost = new HttpGet("http://localhost:" + ourPort + "/Patient/123/$OP_INSTANCE");
-		HttpResponse status = ourClient.execute(httpPost);
-
-		assertEquals(Constants.STATUS_HTTP_405_METHOD_NOT_ALLOWED, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
-
-		assertEquals("POST", status.getFirstHeader(Constants.HEADER_ALLOW).getValue());
-		assertThat(response, containsString("HTTP Method GET is not allowed"));
+	void testOperationCantUseGetIfItIsntIdempotent() {
+		ourServer.fhirRequest("/Patient/123/$OP_INSTANCE").get()
+				.assertStatus(405)
+				.assertHeader(Constants.HEADER_ALLOW, "POST")
+				.assertBodyContains("HTTP Method GET is not allowed");
 	}
 
 	@Test
-	public void testOperationWrongParameterType() throws Exception {
+	void testOperationWrongParameterType() {
 		Parameters p = new Parameters();
 		p.addParameter().setName("PARAM1").setValue(new IntegerDt(123));
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/123/$OP_INSTANCE");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		CloseableHttpResponse status = ourClient.execute(httpPost);
-		try {
-			String response = IOUtils.toString(status.getEntity().getContent());
-			assertThat(response, containsString("Request has parameter PARAM1 of type IntegerDt but method expects type StringDt"));
-			ourLog.info(response);
-		} finally {
-			IOUtils.closeQuietly(status);
-		}
+		ourServer.fhirRequest("/Patient/123/$OP_INSTANCE")
+				.post(inParamsStr, Constants.CT_FHIR_XML)
+				.assertBodyContains("Request has parameter PARAM1 of type IntegerDt but method expects type StringDt");
 	}
 
 	@Test
-	public void testOperationOnInstance() throws Exception {
+	void testOperationOnInstance() {
 		Parameters p = new Parameters();
 		p.addParameter().setName("PARAM1").setValue(new StringDt("PARAM1val"));
 		p.addParameter().setName("PARAM2").setResource(new Patient().setActive(true));
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/123/$OP_INSTANCE");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/123/$OP_INSTANCE")
+				.post(inParamsStr, Constants.CT_FHIR_XML);
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		status.assertStatus(200);
 
 		assertEquals("PARAM1val", ourLastParam1.getValue());
 		assertEquals(true, ourLastParam2.getActive().booleanValue());
 		assertEquals("123", ourLastId.getIdPart());
 		assertEquals("$OP_INSTANCE", ourLastMethod);
 
-		Parameters resp = ourCtx.newXmlParser().parseResource(Parameters.class, response);
+		Parameters resp = status.getBodyAsResource(Parameters.class);
 		assertEquals("RET1", resp.getParameter().get(0).getName());
 
 		/*
 		 * Against type should fail
 		 */
 
-		httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/$OP_INSTANCE");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		status = ourClient.execute(httpPost);
+		status = ourServer.fhirRequest("/Patient/$OP_INSTANCE").post(inParamsStr, Constants.CT_FHIR_XML);
 
-		response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
-		ourLog.info(response);
-		assertEquals(400, status.getStatusLine().getStatusCode());
+		ourLog.info(status.getBody());
+		status.assertStatus(400);
 
 	}
 
 	@Test
-	public void testOperationOnInstanceAndType_Instance() throws Exception {
+	void testOperationOnInstanceAndType_Instance() {
 		Parameters p = new Parameters();
 		p.addParameter().setName("PARAM1").setValue(new StringDt("PARAM1val"));
 		p.addParameter().setName("PARAM2").setResource(new Patient().setActive(true));
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/123/$OP_INSTANCE_OR_TYPE");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		Parameters resp = ourServer.fhirRequest("/Patient/123/$OP_INSTANCE_OR_TYPE")
+				.post(inParamsStr, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.getBodyAsResource(Parameters.class);
 
 		assertEquals("PARAM1val", ourLastParam1.getValue());
 		assertEquals(true, ourLastParam2.getActive().booleanValue());
 		assertEquals("123", ourLastId.getIdPart());
 		assertEquals("$OP_INSTANCE_OR_TYPE", ourLastMethod);
 
-		Parameters resp = ourCtx.newXmlParser().parseResource(Parameters.class, response);
 		assertEquals("RET1", resp.getParameter().get(0).getName());
 
 	}
 
 	@Test
-	public void testOperationOnInstanceAndType_Type() throws Exception {
+	void testOperationOnInstanceAndType_Type() {
 		Parameters p = new Parameters();
 		p.addParameter().setName("PARAM1").setValue(new StringDt("PARAM1val"));
 		p.addParameter().setName("PARAM2").setResource(new Patient().setActive(true));
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/$OP_INSTANCE_OR_TYPE");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		CloseableHttpResponse status = ourClient.execute(httpPost);
-
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		Parameters resp = ourServer.fhirRequest("/Patient/$OP_INSTANCE_OR_TYPE")
+				.post(inParamsStr, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.getBodyAsResource(Parameters.class);
 
 		assertEquals("PARAM1val", ourLastParam1.getValue());
 		assertEquals(true, ourLastParam2.getActive().booleanValue());
-		assertEquals(null, ourLastId);
+		assertNull(ourLastId);
 		assertEquals("$OP_INSTANCE_OR_TYPE", ourLastMethod);
 
-		Parameters resp = ourCtx.newXmlParser().parseResource(Parameters.class, response);
 		assertEquals("RET1", resp.getParameter().get(0).getName());
 	}
 
 	@Test
-	public void testOperationOnServer() throws Exception {
+	void testOperationOnServer() {
 		Parameters p = new Parameters();
 		p.addParameter().setName("PARAM1").setValue(new StringDt("PARAM1val"));
 		p.addParameter().setName("PARAM2").setResource(new Patient().setActive(true));
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/$OP_SERVER");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		Parameters resp = ourServer.fhirRequest("/$OP_SERVER")
+				.post(inParamsStr, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.getBodyAsResource(Parameters.class);
 
 		assertEquals("PARAM1val", ourLastParam1.getValue());
 		assertEquals(true, ourLastParam2.getActive().booleanValue());
 		assertEquals("$OP_SERVER", ourLastMethod);
 
-		Parameters resp = ourCtx.newXmlParser().parseResource(Parameters.class, response);
 		assertEquals("RET1", resp.getParameter().get(0).getName());
 	}
 
 	@Test
-	public void testOperationOnType() throws Exception {
+	void testOperationOnType() {
 		Parameters p = new Parameters();
 		p.addParameter().setName("PARAM1").setValue(new StringDt("PARAM1val"));
 		p.addParameter().setName("PARAM2").setResource(new Patient().setActive(true));
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/$OP_TYPE");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		Parameters resp = ourServer.fhirRequest("/Patient/$OP_TYPE")
+				.post(inParamsStr, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.getBodyAsResource(Parameters.class);
 
 		assertEquals("PARAM1val", ourLastParam1.getValue());
 		assertEquals(true, ourLastParam2.getActive().booleanValue());
 		assertEquals("$OP_TYPE", ourLastMethod);
 
-		Parameters resp = ourCtx.newXmlParser().parseResource(Parameters.class, response);
 		assertEquals("RET1", resp.getParameter().get(0).getName());
 	}
 
 	@Test
-	public void testOperationOnTypeReturnBundle() throws Exception {
+	void testOperationOnTypeReturnBundle() {
 		Parameters p = new Parameters();
 		p.addParameter().setName("PARAM1").setValue(new StringDt("PARAM1val"));
 		p.addParameter().setName("PARAM2").setResource(new Patient().setActive(true));
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/$OP_TYPE_RET_BUNDLE");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		Bundle resp = ourServer.fhirRequest("/Patient/$OP_TYPE_RET_BUNDLE")
+				.post(inParamsStr, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
 
 		assertEquals("PARAM1val", ourLastParam1.getValue());
 		assertEquals(true, ourLastParam2.getActive().booleanValue());
 		assertEquals("$OP_TYPE_RET_BUNDLE", ourLastMethod);
 
-		Bundle resp = ourCtx.newXmlParser().parseResource(Bundle.class, response);
 		assertEquals("100", resp.getEntryFirstRep().getResponse().getStatus());
 	}
 
 	@Test
-	public void testOperationWithBundleProviderResponse() throws Exception {
-		HttpGet httpPost = new HttpGet("http://localhost:" + ourPort + "/$OP_INSTANCE_BUNDLE_PROVIDER?_pretty=true");
-		HttpResponse status = ourClient.execute(httpPost);
-
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
-		ourLog.info(response);
-
-		Bundle resp = ourCtx.newXmlParser().parseResource(Bundle.class, response);
+	void testOperationWithBundleProviderResponse() {
+		Bundle resp = ourServer.fhirRequest("/$OP_INSTANCE_BUNDLE_PROVIDER?_pretty=true").get()
+				.assertStatus(200)
+				.getBodyAsResource(Bundle.class);
 	}
 
 	@Test
-	public void testOperationWithGetUsingParams() throws Exception {
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient/$OP_TYPE?PARAM1=PARAM1val");
-		HttpResponse status = ourClient.execute(httpGet);
-
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+	void testOperationWithGetUsingParams() {
+		Parameters resp = ourServer.fhirRequest("/Patient/$OP_TYPE?PARAM1=PARAM1val").get()
+				.assertStatus(200)
+				.getBodyAsResource(Parameters.class);
 
 		assertEquals("PARAM1val", ourLastParam1.getValue());
 		assertNull(ourLastParam2);
 		assertEquals("$OP_TYPE", ourLastMethod);
 
-		Parameters resp = ourCtx.newXmlParser().parseResource(Parameters.class, response);
 		assertEquals("RET1", resp.getParameter().get(0).getName());
 	}
 
 	@Test
-	public void testOperationWithGetUsingParamsFailsWithNonPrimitive() throws Exception {
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient/$OP_TYPE?PARAM1=PARAM1val&PARAM2=foo");
-		HttpResponse status = ourClient.execute(httpGet);
-
-		assertEquals(405, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
-
-		assertEquals("POST", status.getFirstHeader(Constants.HEADER_ALLOW).getValue());
-		assertThat(response, containsString("Can not invoke operation $OP_TYPE using HTTP GET because parameter PARAM2 is not a primitive datatype"));
+	void testOperationWithGetUsingParamsFailsWithNonPrimitive() {
+		ourServer.fhirRequest("/Patient/$OP_TYPE?PARAM1=PARAM1val&PARAM2=foo").get()
+				.assertStatus(405)
+				.assertHeader(Constants.HEADER_ALLOW, "POST")
+				.assertBodyContains("Can not invoke operation $OP_TYPE using HTTP GET because parameter PARAM2 is not a primitive datatype");
 	}
 
 	@Test
-	public void testOperationWithListParam() throws Exception {
+	void testOperationWithListParam() {
 		Parameters p = new Parameters();
 		p.addParameter().setName("PARAM2").setResource(new Patient().setActive(true));
 		p.addParameter().setName("PARAM3").setValue(new StringDt("PARAM3val1"));
 		p.addParameter().setName("PARAM3").setValue(new StringDt("PARAM3val2"));
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/$OP_SERVER_LIST_PARAM");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
-
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		Parameters resp = ourServer.fhirRequest("/$OP_SERVER_LIST_PARAM")
+				.post(inParamsStr, Constants.CT_FHIR_XML)
+				.assertStatus(200)
+				.getBodyAsResource(Parameters.class);
 
 		assertEquals("$OP_SERVER_LIST_PARAM", ourLastMethod);
 		assertEquals(true, ourLastParam2.getActive().booleanValue());
-		assertEquals(null, ourLastParam1);
-		assertEquals(2, ourLastParam3.size());
+		assertNull(ourLastParam1);
+		assertThat(ourLastParam3).hasSize(2);
 		assertEquals("PARAM3val1", ourLastParam3.get(0).getValue());
 		assertEquals("PARAM3val2", ourLastParam3.get(1).getValue());
 
-		Parameters resp = ourCtx.newXmlParser().parseResource(Parameters.class, response);
 		assertEquals("RET1", resp.getParameter().get(0).getName());
 	}
 
 	@Test
-	public void testOperationWithProfileDatatypeParams() throws Exception {
+	void testOperationWithProfileDatatypeParams() {
 		Parameters p = new Parameters();
 		p.addParameter().setName("PARAM1").setValue(new IntegerDt("123"));
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/$OP_PROFILE_DT");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/$OP_PROFILE_DT")
+				.post(inParamsStr, Constants.CT_FHIR_XML);
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		status.assertStatus(200);
 
 		assertEquals("$OP_PROFILE_DT", ourLastMethod);
 		assertEquals("123", ourLastParamUnsignedInt1.getValueAsString());
 	}
 
 	@Test
-	public void testOperationWithProfileDatatypeParams2() throws Exception {
+	void testOperationWithProfileDatatypeParams2() {
 		Parameters p = new Parameters();
 		MoneyDt money = new MoneyDt();
 		money.setCode("CODE");
@@ -483,12 +395,10 @@ public class OperationServerDstu2Test {
 		p.addParameter().setName("PARAM1").setValue(money);
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/$OP_PROFILE_DT2");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/$OP_PROFILE_DT2")
+				.post(inParamsStr, Constants.CT_FHIR_XML);
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		status.assertStatus(200);
 
 		assertEquals("$OP_PROFILE_DT2", ourLastMethod);
 		assertEquals("CODE", ourLastParamMoney1.getCode());
@@ -497,87 +407,44 @@ public class OperationServerDstu2Test {
 	}
 
 	@Test
-	public void testOperationWithProfileDatatypeUrl() throws Exception {
-		HttpGet httpPost = new HttpGet("http://localhost:" + ourPort + "/Patient/$OP_PROFILE_DT?PARAM1=123");
-		HttpResponse status = ourClient.execute(httpPost);
+	void testOperationWithProfileDatatypeUrl() {
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/$OP_PROFILE_DT?PARAM1=123").get();
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		status.assertStatus(200);
 
 		assertEquals("$OP_PROFILE_DT", ourLastMethod);
 		assertEquals("123", ourLastParamUnsignedInt1.getValueAsString());
 	}
 
 	@Test
-	public void testOperationWrongParamType() throws Exception {
+	void testOperationWrongParamType() {
 		Parameters p = new Parameters();
 		p.addParameter().setName("PARAM1").setValue(new IntegerDt("123"));
 		p.addParameter().setName("PARAM2").setResource(new Patient().setActive(true));
 		String inParamsStr = ourCtx.newXmlParser().encodeResourceToString(p);
 
-		HttpPost httpPost = new HttpPost("http://localhost:" + ourPort + "/Patient/$OP_TYPE");
-		httpPost.setEntity(new StringEntity(inParamsStr, ContentType.create(Constants.CT_FHIR_XML, "UTF-8")));
-		HttpResponse status = ourClient.execute(httpPost);
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/$OP_TYPE").post(inParamsStr, Constants.CT_FHIR_XML);
 
-		assertEquals(400, status.getStatusLine().getStatusCode());
-		String response = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		status.assertStatus(400);
 
-		ourLog.info(status.getStatusLine().toString());
-		ourLog.info(response);
+		ourLog.info("HTTP {} {}", status.getStatusCode(), status.getReasonPhrase());
+		ourLog.info(status.getBody());
 
-		assertThat(response, containsString("Request has parameter PARAM1 of type IntegerDt but method expects type StringDt"));
+		status.assertBodyContains("Request has parameter PARAM1 of type IntegerDt but method expects type StringDt");
 	}
 
 	@Test
-	public void testReadWithOperations() throws Exception {
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient/123");
-		HttpResponse status = ourClient.execute(httpGet);
+	void testReadWithOperations() {
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/123").get();
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		status.assertStatus(200);
 
 		assertEquals("read", ourLastMethod);
 	}
 
-	@AfterClass
-	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
-	}
-
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourCtx = FhirContext.forDstu2();
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-
-		servlet.setPagingProvider(new FifoMemoryPagingProvider(10).setDefaultPageSize(2));
-
-		servlet.setFhirContext(ourCtx);
-		servlet.setResourceProviders(new PatientProvider());
-		servlet.setPlainProviders(new PlainProvider());
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
-	}
-
-	public static void main(String[] theValue) {
-		Parameters p = new Parameters();
-		p.addParameter().setName("start").setValue(new DateTimeDt("2001-01-02"));
-		p.addParameter().setName("end").setValue(new DateTimeDt("2015-07-10"));
-		String inParamsStr = FhirContext.forDstu2().newXmlParser().encodeResourceToString(p);
-		ourLog.info(inParamsStr.replace("\"", "\\\""));
+	@AfterAll
+	static void afterClassClearContext() throws Exception {
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 	public static class PatientProvider implements IResourceProvider {
@@ -733,14 +600,14 @@ public class OperationServerDstu2Test {
 		public IBundleProvider opInstanceReturnsBundleProvider() {
 			ourLastMethod = "$OP_INSTANCE_BUNDLE_PROVIDER";
 
-			List<IBaseResource> resources = new ArrayList<IBaseResource>();
+			List<IBaseResource> resources = new ArrayList<>();
 			for (int i =0; i < 100;i++) {
 				Patient p = new Patient();
 				p.setId("Patient/" + i);
 				p.addName().addFamily("Patient " + i);
 				resources.add(p);
 			}
-			
+
 			return new SimpleBundleProvider(resources);
 		}
 

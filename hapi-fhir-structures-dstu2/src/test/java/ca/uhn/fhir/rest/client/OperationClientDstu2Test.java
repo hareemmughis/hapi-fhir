@@ -1,33 +1,5 @@
 package ca.uhn.fhir.rest.client;
 
-import static org.junit.Assert.assertEquals;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
-import java.io.InputStream;
-import java.io.StringReader;
-import java.nio.charset.Charset;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.commons.io.input.ReaderInputStream;
-import org.apache.http.HttpResponse;
-import org.apache.http.ProtocolVersion;
-import org.apache.http.client.HttpClient;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.client.methods.HttpUriRequest;
-import org.apache.http.message.BasicHeader;
-import org.apache.http.message.BasicStatusLine;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.Test;
-import org.mockito.ArgumentCaptor;
-import org.mockito.internal.stubbing.defaultanswers.ReturnsDeepStubs;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.model.dstu2.resource.Bundle;
 import ca.uhn.fhir.model.dstu2.resource.Parameters;
@@ -37,9 +9,38 @@ import ca.uhn.fhir.model.primitive.StringDt;
 import ca.uhn.fhir.rest.annotation.IdParam;
 import ca.uhn.fhir.rest.annotation.Operation;
 import ca.uhn.fhir.rest.annotation.OperationParam;
+import ca.uhn.fhir.rest.api.Constants;
 import ca.uhn.fhir.rest.client.api.IBasicClient;
-import ca.uhn.fhir.rest.server.Constants;
+import ca.uhn.fhir.rest.client.api.ServerValidationModeEnum;
 import ca.uhn.fhir.util.TestUtil;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.io.input.ReaderInputStream;
+import org.apache.http.HttpResponse;
+import org.apache.http.ProtocolVersion;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.http.message.BasicHeader;
+import org.apache.http.message.BasicStatusLine;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.internal.stubbing.defaultanswers.ReturnsDeepStubs;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
+
+import java.io.InputStream;
+import java.io.StringReader;
+import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class OperationClientDstu2Test {
 
@@ -49,13 +50,13 @@ public class OperationClientDstu2Test {
 
 	private HttpResponse ourHttpResponse;
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 
-	@Before
+	@BeforeEach
 	public void before() {
 		ourCtx = FhirContext.forDstu2();
 
@@ -93,9 +94,9 @@ public class OperationClientDstu2Test {
 		String requestBody = IOUtils.toString(((HttpPost) value).getEntity().getContent());
 		IOUtils.closeQuietly(((HttpPost) value).getEntity().getContent());
 		ourLog.info(requestBody);
-		Parameters request = ourCtx.newXmlParser().parseResource(Parameters.class, requestBody);
+		Parameters request = ourCtx.newJsonParser().parseResource(Parameters.class, requestBody);
 		assertEquals("http://foo/Patient/222/$OP_INSTANCE", value.getURI().toASCIIString());
-		assertEquals(2, request.getParameter().size());
+		assertThat(request.getParameter()).hasSize(2);
 		assertEquals("PARAM1", request.getParameter().get(0).getName());
 		assertEquals("PARAM1str", ((StringDt) request.getParameter().get(0).getValue()).getValue());
 		assertEquals("PARAM2", request.getParameter().get(1).getName());
@@ -133,9 +134,9 @@ public class OperationClientDstu2Test {
 		String requestBody = IOUtils.toString(((HttpPost) value).getEntity().getContent());
 		IOUtils.closeQuietly(((HttpPost) value).getEntity().getContent());
 		ourLog.info(requestBody);
-		Parameters request = ourCtx.newXmlParser().parseResource(Parameters.class, requestBody);
+		Parameters request = ourCtx.newJsonParser().parseResource(Parameters.class, requestBody);
 		assertEquals("http://foo/Patient/222/$OP_INSTANCE_WITH_BUNDLE_RETURN", value.getURI().toASCIIString());
-		assertEquals(2, request.getParameter().size());
+		assertThat(request.getParameter()).hasSize(2);
 		assertEquals("PARAM1", request.getParameter().get(0).getName());
 		assertEquals("PARAM1str", ((StringDt) request.getParameter().get(0).getValue()).getValue());
 		assertEquals("PARAM2", request.getParameter().get(1).getName());
@@ -170,9 +171,9 @@ public class OperationClientDstu2Test {
 		String requestBody = IOUtils.toString(((HttpPost) value).getEntity().getContent());
 		IOUtils.closeQuietly(((HttpPost) value).getEntity().getContent());
 		ourLog.info(requestBody);
-		Parameters request = ourCtx.newXmlParser().parseResource(Parameters.class, requestBody);
+		Parameters request = ourCtx.newJsonParser().parseResource(Parameters.class, requestBody);
 		assertEquals("http://foo/$OP_SERVER", value.getURI().toASCIIString());
-		assertEquals(2, request.getParameter().size());
+		assertThat(request.getParameter()).hasSize(2);
 		assertEquals("PARAM1", request.getParameter().get(0).getName());
 		assertEquals("PARAM1str", ((StringDt) request.getParameter().get(0).getValue()).getValue());
 		assertEquals("PARAM2", request.getParameter().get(1).getName());
@@ -185,8 +186,8 @@ public class OperationClientDstu2Test {
 		requestBody = IOUtils.toString(((HttpPost) value).getEntity().getContent());
 		IOUtils.closeQuietly(((HttpPost) value).getEntity().getContent());
 		ourLog.info(requestBody);
-		request = ourCtx.newXmlParser().parseResource(Parameters.class, requestBody);
-		assertEquals(1, request.getParameter().size());
+		request = ourCtx.newJsonParser().parseResource(Parameters.class, requestBody);
+		assertThat(request.getParameter()).hasSize(1);
 		assertEquals("PARAM2", request.getParameter().get(0).getName());
 		assertEquals(Boolean.TRUE, ((Patient) request.getParameter().get(0).getResource()).getActive());
 		idx++;
@@ -197,8 +198,8 @@ public class OperationClientDstu2Test {
 		requestBody = IOUtils.toString(((HttpPost) value).getEntity().getContent());
 		IOUtils.closeQuietly(((HttpPost) value).getEntity().getContent());
 		ourLog.info(requestBody);
-		request = ourCtx.newXmlParser().parseResource(Parameters.class, requestBody);
-		assertEquals(0, request.getParameter().size());
+		request = ourCtx.newJsonParser().parseResource(Parameters.class, requestBody);
+		assertThat(request.getParameter()).isEmpty();
 		idx++;
 
 	}
@@ -230,9 +231,9 @@ public class OperationClientDstu2Test {
 		String requestBody = IOUtils.toString(((HttpPost) value).getEntity().getContent());
 		IOUtils.closeQuietly(((HttpPost) value).getEntity().getContent());
 		ourLog.info(requestBody);
-		Parameters request = ourCtx.newXmlParser().parseResource(Parameters.class, requestBody);
+		Parameters request = ourCtx.newJsonParser().parseResource(Parameters.class, requestBody);
 		assertEquals("http://foo/$OP_SERVER_LIST_PARAM", value.getURI().toASCIIString());
-		assertEquals(3, request.getParameter().size());
+		assertThat(request.getParameter()).hasSize(3);
 		assertEquals("PARAM2", request.getParameter().get(0).getName());
 		assertEquals(Boolean.TRUE, ((Patient) request.getParameter().get(0).getResource()).getActive());
 		assertEquals("PARAM3", request.getParameter().get(1).getName());
@@ -247,24 +248,24 @@ public class OperationClientDstu2Test {
 		requestBody = IOUtils.toString(((HttpPost) value).getEntity().getContent());
 		IOUtils.closeQuietly(((HttpPost) value).getEntity().getContent());
 		ourLog.info(requestBody);
-		request = ourCtx.newXmlParser().parseResource(Parameters.class, requestBody);
+		request = ourCtx.newJsonParser().parseResource(Parameters.class, requestBody);
 		assertEquals("http://foo/$OP_SERVER_LIST_PARAM", value.getURI().toASCIIString());
-		assertEquals(2, request.getParameter().size());
+		assertThat(request.getParameter()).hasSize(2);
 		assertEquals("PARAM3", request.getParameter().get(0).getName());
 		assertEquals("PARAM3str1", ((StringDt) request.getParameter().get(0).getValue()).getValue());
 		assertEquals("PARAM3", request.getParameter().get(1).getName());
 		assertEquals("PARAM3str2", ((StringDt) request.getParameter().get(1).getValue()).getValue());
 		idx++;
 
-		response = client.opServerListParam(null, new ArrayList<StringDt>());
+		response = client.opServerListParam(null, new ArrayList<>());
 		assertEquals("FOO", response.getParameter().get(0).getName());
 		value = (HttpPost) capt.getAllValues().get(idx);
-		requestBody = IOUtils.toString(((HttpPost) value).getEntity().getContent());
+		requestBody = IOUtils.toString(value.getEntity().getContent());
 		IOUtils.closeQuietly(((HttpPost) value).getEntity().getContent());
 		ourLog.info(requestBody);
-		request = ourCtx.newXmlParser().parseResource(Parameters.class, requestBody);
+		request = ourCtx.newJsonParser().parseResource(Parameters.class, requestBody);
 		assertEquals("http://foo/$OP_SERVER_LIST_PARAM", value.getURI().toASCIIString());
-		assertEquals(0, request.getParameter().size());
+		assertThat(request.getParameter()).isEmpty();
 		idx++;
 
 		response = client.opServerListParam(null, null);
@@ -273,9 +274,9 @@ public class OperationClientDstu2Test {
 		requestBody = IOUtils.toString(((HttpPost) value).getEntity().getContent());
 		IOUtils.closeQuietly(((HttpPost) value).getEntity().getContent());
 		ourLog.info(requestBody);
-		request = ourCtx.newXmlParser().parseResource(Parameters.class, requestBody);
+		request = ourCtx.newJsonParser().parseResource(Parameters.class, requestBody);
 		assertEquals("http://foo/$OP_SERVER_LIST_PARAM", value.getURI().toASCIIString());
-		assertEquals(0, request.getParameter().size());
+		assertThat(request.getParameter()).isEmpty();
 		idx++;
 
 	}
@@ -307,9 +308,9 @@ public class OperationClientDstu2Test {
 		String requestBody = IOUtils.toString(((HttpPost) value).getEntity().getContent());
 		IOUtils.closeQuietly(((HttpPost) value).getEntity().getContent());
 		ourLog.info(requestBody);
-		Parameters request = ourCtx.newXmlParser().parseResource(Parameters.class, requestBody);
+		Parameters request = ourCtx.newJsonParser().parseResource(Parameters.class, requestBody);
 		assertEquals("http://foo/Patient/$OP_TYPE", value.getURI().toASCIIString());
-		assertEquals(2, request.getParameter().size());
+		assertThat(request.getParameter()).hasSize(2);
 		assertEquals("PARAM1", request.getParameter().get(0).getName());
 		assertEquals("PARAM1str", ((StringDt) request.getParameter().get(0).getValue()).getValue());
 		assertEquals("PARAM2", request.getParameter().get(1).getName());

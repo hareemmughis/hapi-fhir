@@ -1,0 +1,2252 @@
+package ca.uhn.fhir.jpa.dao.r4;
+
+import ca.uhn.fhir.context.RuntimeSearchParam;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.jpa.api.config.JpaStorageSettings;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
+import ca.uhn.fhir.jpa.test.BaseJpaR4Test;
+import ca.uhn.fhir.jpa.util.SqlQuery;
+import ca.uhn.fhir.parser.StrictErrorHandler;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.param.ReferenceOrListParam;
+import ca.uhn.fhir.rest.param.ReferenceParam;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import ca.uhn.fhir.rest.server.util.ISearchParamRegistry;
+import org.apache.commons.lang3.StringUtils;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r4.model.AuditEvent;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.Coverage;
+import org.hl7.fhir.r4.model.Device;
+import org.hl7.fhir.r4.model.DiagnosticReport;
+import org.hl7.fhir.r4.model.Encounter;
+import org.hl7.fhir.r4.model.Group;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Location;
+import org.hl7.fhir.r4.model.MessageHeader;
+import org.hl7.fhir.r4.model.Meta;
+import org.hl7.fhir.r4.model.Observation;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Provenance;
+import org.hl7.fhir.r4.model.Quantity;
+import org.hl7.fhir.r4.model.Reference;
+import org.hl7.fhir.r4.model.StringType;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.Date;
+import java.util.List;
+
+import static org.apache.commons.lang3.StringUtils.countMatches;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
+
+
+public class ChainingR4SearchTest extends BaseJpaR4Test {
+
+	private static final String ENCOUNTER_IDENTIFIER_SYSTEM = "http://foo/encounter/identifier";
+
+	@AfterEach
+	public void after() throws Exception {
+
+		myStorageSettings.setAllowMultipleDelete(new JpaStorageSettings().isAllowMultipleDelete());
+		myStorageSettings.setAllowExternalReferences(new JpaStorageSettings().isAllowExternalReferences());
+		myStorageSettings.setReuseCachedSearchResultsForMillis(new JpaStorageSettings().getReuseCachedSearchResultsForMillis());
+		myStorageSettings.setCountSearchResultsUpTo(new JpaStorageSettings().getCountSearchResultsUpTo());
+		myStorageSettings.setSearchPreFetchThresholds(new JpaStorageSettings().getSearchPreFetchThresholds());
+		myStorageSettings.setAllowContainsSearches(new JpaStorageSettings().isAllowContainsSearches());
+		myStorageSettings.setIndexMissingFields(new JpaStorageSettings().getIndexMissingFields());
+		myStorageSettings.setIndexOnContainedResources(new JpaStorageSettings().isIndexOnContainedResources());
+		myStorageSettings.setIndexOnContainedResourcesRecursively(new JpaStorageSettings().isIndexOnContainedResourcesRecursively());
+	}
+
+	@Override
+	@BeforeEach
+	public void before() throws Exception {
+		super.before();
+		myFhirContext.setParserErrorHandler(new StrictErrorHandler());
+
+		myStorageSettings.setAllowMultipleDelete(true);
+		myStorageSettings.setSearchPreFetchThresholds(new JpaStorageSettings().getSearchPreFetchThresholds());
+		myStorageSettings.setReuseCachedSearchResultsForMillis(null);
+		myStorageSettings.setIndexMissingFields(JpaStorageSettings.IndexEnabledEnum.DISABLED);
+	}
+
+	@Test
+	// Created by claude-sonnet-4-6
+	void testMultipleChains_OnSingleValuedReference_ReuseSingleJoin() {
+		// Setup
+		createPatient(withId("P0"), withFamily("Smith"), withGiven("John"), withGender("male"));    // matches
+		createPatient(withId("P1"), withFamily("Jones"), withGiven("Jane"), withGender("female"));  // does not match
+		createPatient(withId("P2"), withFamily("Smith"), withGiven("Sarah"), withGender("female")); // partially matches
+		createCoverage(withId("C0"), withReference("beneficiary", "Patient/P0"));
+		createCoverage(withId("C1"), withReference("beneficiary", "Patient/P1"));
+		createCoverage(withId("C2"), withReference("beneficiary", "Patient/P2"));
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(Coverage.SP_PATIENT, new ReferenceParam("family", "Smith"));
+		map.add(Coverage.SP_PATIENT, new ReferenceParam("given", "John"));
+		map.add(Coverage.SP_PATIENT, new ReferenceParam("gender", "male"));
+
+		// Test
+		myCaptureQueriesListener.clear();
+		IBundleProvider search = myCoverageDao.search(map, newSrd());
+
+		// Verify - only C0 returned
+		assertThat(toUnqualifiedVersionlessIdValues(search)).containsExactly("Coverage/C0");
+
+		// Verify - only 1 HFJ_RES_LINK join is used (not one per chained param)
+		List<SqlQuery> selectQueries = myCaptureQueriesListener.getSelectQueriesForCurrentThread();
+		String querySql = selectQueries.get(0).getSql(false, false);
+		ourLog.debug("\n querySql: {}", querySql);
+		assertThat(StringUtils.countMatches(querySql, "HFJ_RES_LINK")).isEqualTo(1);
+	}
+
+	@Test
+	// Created by claude-sonnet-4-6
+	void testMultipleQualifiedChains_OnMultiValuedReference_UseSeparateJoins() {
+		// Setup
+		createPractitioner(withId("Prac1"), withFamily("Smith"));
+		createOrganization(withId("Org1"), withName("Lab"));
+
+		// DR1 has both a Practitioner named Smith AND an Organization named Lab as performers
+		createResource("DiagnosticReport", withId("DR1"),
+			withReference("performer", "Practitioner/Prac1"),
+			withReference("performer", "Organization/Org1"));
+
+		// DR2 has only the Practitioner - no Organization performer -> should NOT match
+		createResource("DiagnosticReport", withId("DR2"),
+			withReference("performer", "Practitioner/Prac1"));
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(DiagnosticReport.SP_PERFORMER, new ReferenceParam("Practitioner", "name", "Smith"));
+		map.add(DiagnosticReport.SP_PERFORMER, new ReferenceParam("Organization", "name", "Lab"));
+
+		// Execute
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myDiagnosticReportDao.search(map, newSrd());
+
+		// Verify - Only DR1 is returned
+		assertThat(toUnqualifiedVersionlessIdValues(results)).containsExactlyInAnyOrder("DiagnosticReport/DR1");
+
+		// Verify - 2 HFJ_RES_LINK joins are used, one for each performer type (Practitioner vs Organization)
+		List<SqlQuery> selectQueries = myCaptureQueriesListener.getSelectQueriesForCurrentThread();
+		String querySql = selectQueries.get(0).getSql(false, false);
+		assertThat(StringUtils.countMatches(querySql, "HFJ_RES_LINK")).isEqualTo(2);
+	}
+
+	@Test
+	void testMultipleChainsWithSameResourceType_OnMultiValuedReference_UseSeparateJoins() {
+		createPractitioner(withId("Prac1"), withFamily("Smith"), withGender("male"));
+		createPractitioner(withId("Prac2"), withFamily("Jones"), withGender("female"));
+
+		createPatient(withId("PatA"),
+			withReference("generalPractitioner", "Practitioner/Prac1"),
+			withReference("generalPractitioner", "Practitioner/Prac2"));
+
+		createPatient(withId("PatB"),
+			withReference("generalPractitioner", "Practitioner/Prac1"));
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(Patient.SP_GENERAL_PRACTITIONER, new ReferenceParam("family", "Smith"));
+		map.add(Patient.SP_GENERAL_PRACTITIONER, new ReferenceParam("gender", "female"));
+
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myPatientDao.search(map, newSrd());
+
+		// Only patA is returned — each filter satisfied independently by a different practitioner
+		assertThat(toUnqualifiedVersionlessIdValues(results)).containsExactlyInAnyOrder("Patient/PatA");
+
+		// 2 HFJ_RES_LINK joins required: multi-valued reference cannot collapse to a single join
+		List<SqlQuery> selectQueries = myCaptureQueriesListener.getSelectQueriesForCurrentThread();
+		String querySql = selectQueries.get(0).getSql(false, false);
+		assertThat(StringUtils.countMatches(querySql, "HFJ_RES_LINK")).isEqualTo(2);
+	}
+
+	@Test
+	void testMixedTypeOrGroupAndClause_OnMultiValuedReference_UseSeparateJoins() {
+		// Setup: DR1 has two Organization performers: Lab and Acme
+		createOrganization(withId("OrgLab"), withName("Lab"));
+		createOrganization(withId("OrgAcme"), withName("Acme"));
+		createPractitioner(withId("Prac1"), withFamily("Smith"));
+
+		// DR1 matches: performer includes both OrgLab (satisfies clause 1) and OrgAcme (satisfies clause 2)
+		createResource("DiagnosticReport", withId("DR1"),
+			withReference("performer", "Organization/OrgLab"),
+			withReference("performer", "Organization/OrgAcme"));
+
+		// DR2 has only OrgLab — satisfies clause 1's OR-group but NOT clause 2 (Acme)
+		createResource("DiagnosticReport", withId("DR2"),
+			withReference("performer", "Organization/OrgLab"));
+
+		// AND clause 1: mixed-type OR-group
+		ReferenceOrListParam clause1 = new ReferenceOrListParam()
+			.add(new ReferenceParam("Organization", "name", "Lab"))
+			.add(new ReferenceParam("Practitioner", "name", "Smith"));
+
+		// AND clause 2: single-type OR-group
+		ReferenceOrListParam clause2 = new ReferenceOrListParam()
+			.add(new ReferenceParam("Organization", "name", "Acme"));
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(DiagnosticReport.SP_PERFORMER, clause1);
+		map.add(DiagnosticReport.SP_PERFORMER, clause2);
+
+		// Execute
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myDiagnosticReportDao.search(map, newSrd());
+
+		// Verify - only DR1 is returned
+		assertThat(toUnqualifiedVersionlessIdValues(results)).containsExactlyInAnyOrder("DiagnosticReport/DR1");
+
+		// Verify - 2 HFJ_RES_LINK joins — each AND clause must bind independently
+		List<SqlQuery> selectQueries = myCaptureQueriesListener.getSelectQueriesForCurrentThread();
+		String querySql = selectQueries.get(0).getSql(false, false);
+		assertThat(StringUtils.countMatches(querySql, "HFJ_RES_LINK")).isEqualTo(2);
+	}
+
+	@Test
+	void testAndClauses_DirectReference_ReturnsResourcesMatchingAllTargets() {
+		// Setup
+		IIdType patientA = createPatient(withId("PA"));
+		IIdType patientB = createPatient(withId("PB"));
+
+		AuditEvent matching = new AuditEvent();
+		matching.setId("AE-MATCH");
+		matching.addEntity().setWhat(new Reference(patientA));
+		matching.addEntity().setWhat(new Reference(patientB));
+		myAuditEventDao.update(matching, mySrd);
+
+		AuditEvent partialA = new AuditEvent();
+		partialA.setId("AE-A-ONLY");
+		partialA.addEntity().setWhat(new Reference(patientA));
+		myAuditEventDao.update(partialA, mySrd);
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(AuditEvent.SP_ENTITY, new ReferenceParam("Patient/PA"));
+		map.add(AuditEvent.SP_ENTITY, new ReferenceParam("Patient/PB"));
+
+		// Execute
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myAuditEventDao.search(map, newSrd());
+
+		// Verify - only the AuditEvent that references both patients is returned
+		assertThat(toUnqualifiedVersionlessIdValues(results)).containsExactly("AuditEvent/AE-MATCH");
+
+		// Verify - 2 HFJ_RES_LINK joins — each AND clause must bind to its own link row
+		List<SqlQuery> selectQueries = myCaptureQueriesListener.getSelectQueriesForCurrentThread();
+		String querySql = selectQueries.get(0).getSql(false, false);
+		assertThat(StringUtils.countMatches(querySql, "HFJ_RES_LINK")).isEqualTo(2);
+	}
+
+	@Test
+	void testAndClauses_DirectReferenceWithoutResType_ReturnsResourcesMatchingAllTargets() {
+		// Setup
+		IIdType patientA = createPatient(withId("PA"));
+		IIdType patientB = createPatient(withId("PB"));
+
+		AuditEvent matching = new AuditEvent();
+		matching.setId("AE-MATCH");
+		matching.addEntity().setWhat(new Reference(patientA));
+		matching.addEntity().setWhat(new Reference(patientB));
+		myAuditEventDao.update(matching, mySrd);
+
+		AuditEvent partial = new AuditEvent();
+		partial.setId("AE-A");
+		partial.addEntity().setWhat(new Reference(patientA));
+		myAuditEventDao.update(partial, mySrd);
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(AuditEvent.SP_ENTITY, new ReferenceParam("PA"));
+		map.add(AuditEvent.SP_ENTITY, new ReferenceParam("PB"));
+
+		IBundleProvider results = myAuditEventDao.search(map, newSrd());
+
+		assertThat(toUnqualifiedVersionlessIdValues(results)).containsExactly("AuditEvent/AE-MATCH");
+	}
+
+	@Test
+	void testUnqualifiedChainedTokenSearch_MatchesEveryTargetType_WithOneInClause() {
+		// Setup
+		IIdType matchingEncounterId = createEncounterWithIdentifier("123");
+		IIdType otherEncounterId = createEncounterWithIdentifier("456");
+		IIdType matchingProvenanceId = createProvenanceTargeting(matchingEncounterId);
+		createProvenanceTargeting(otherEncounterId);
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(Provenance.SP_TARGET, chainedTargetParam(".identifier", ENCOUNTER_IDENTIFIER_SYSTEM + "|123"));
+
+		// Test
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myProvenanceDao.search(map, newSrd());
+
+		// Verify
+		assertThat(toUnqualifiedVersionlessIdValues(results)).containsExactly(matchingProvenanceId.getValue());
+
+		String querySql = findChainedTokenQuery();
+		assertThat(querySql).contains("HASH_SYS_AND_VALUE IN (");
+		assertThat(countMatches(querySql, "HASH_SYS_AND_VALUE")).as(querySql).isEqualTo(1);
+		assertThat(countMatches(querySql, " OR ")).as(querySql).isZero();
+		// every candidate target type contributes one resource type qualified hash to the IN list
+		assertThat(countMatches(querySql, ",")).as(querySql).isGreaterThan(50);
+	}
+
+	@Test
+	void testQualifiedChainedToken_MatchesTheOneTargetType_WithAnEqualityComparison() {
+		// Setup
+		IIdType matchingEncounterId = createEncounterWithIdentifier("123");
+		IIdType otherEncounterId = createEncounterWithIdentifier("456");
+		IIdType matchingProvenanceId = createProvenanceTargeting(matchingEncounterId);
+		createProvenanceTargeting(otherEncounterId);
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(Provenance.SP_TARGET, chainedTargetParam(":Encounter.identifier", ENCOUNTER_IDENTIFIER_SYSTEM + "|123"));
+
+		// Test
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myProvenanceDao.search(map, newSrd());
+
+		// Verify
+		assertThat(toUnqualifiedVersionlessIdValues(results)).containsExactly(matchingProvenanceId.getValue());
+
+		String querySql = findChainedTokenQuery();
+		assertThat(querySql).contains("HASH_SYS_AND_VALUE = ");
+		assertThat(countMatches(querySql, "HASH_SYS_AND_VALUE")).as(querySql).isEqualTo(1);
+	}
+
+	/**
+	 * A value with a system and a value without one are indexed in different hash columns, so each
+	 * column gets its own IN clause.
+	 */
+	@Test
+	void testUnqualifiedChainedTokenSearch_TokensUsingDifferentHashColumns_UseOneInClausePerColumn() {
+		// Setup
+		IIdType encounterMatchedBySystemAndValue = createEncounterWithIdentifier("123");
+		IIdType encounterMatchedByValueOnly = createEncounterWithIdentifier("456");
+		IIdType unmatchedEncounterId = createEncounterWithIdentifier("789");
+		IIdType provenanceA = createProvenanceTargeting(encounterMatchedBySystemAndValue);
+		IIdType provenanceB = createProvenanceTargeting(encounterMatchedByValueOnly);
+		createProvenanceTargeting(unmatchedEncounterId);
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(Provenance.SP_TARGET, new ReferenceOrListParam()
+			.addOr(chainedTargetParam(".identifier", ENCOUNTER_IDENTIFIER_SYSTEM + "|123"))
+			.addOr(chainedTargetParam(".identifier", "456")));
+
+		// Test
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myProvenanceDao.search(map, newSrd());
+
+		// Verify
+		assertThat(toUnqualifiedVersionlessIdValues(results))
+			.containsExactlyInAnyOrder(provenanceA.getValue(), provenanceB.getValue());
+
+		String querySql = findChainedTokenQuery();
+		assertThat(querySql).contains("HASH_SYS_AND_VALUE IN (").contains("HASH_VALUE IN (");
+		// the only OR is the one joining the two hash columns
+		assertThat(countMatches(querySql, " OR ")).as(querySql).isEqualTo(1);
+	}
+
+	/**
+	 * A {@code :not} chain inverts the whole multi-type predicate, so it keeps resolving each target
+	 * type on its own rather than collapsing into one IN clause.
+	 */
+	@Test
+	void testUnqualifiedChainedTokenSearch_WithNotModifier_StillExcludesTheMatchingTarget() {
+		// Setup
+		IIdType excludedEncounterId = createEncounterWithIdentifier("123");
+		IIdType retainedEncounterId = createEncounterWithIdentifier("456");
+		createProvenanceTargeting(excludedEncounterId);
+		IIdType retainedProvenanceId = createProvenanceTargeting(retainedEncounterId);
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(Provenance.SP_TARGET, chainedTargetParam(".identifier:not", ENCOUNTER_IDENTIFIER_SYSTEM + "|123"));
+
+		// Test
+		IBundleProvider results = myProvenanceDao.search(map, newSrd());
+
+		// Verify
+		assertThat(toUnqualifiedVersionlessIdValues(results)).containsExactly(retainedProvenanceId.getValue());
+	}
+
+	/**
+	 * @param theQualifier the parameter qualifier, e.g. {@code .identifier} or {@code :Encounter.identifier}
+	 */
+	private ReferenceParam chainedTargetParam(String theQualifier, String theValue) {
+		ReferenceParam param = new ReferenceParam();
+		param.setValueAsQueryToken(myFhirContext, Provenance.SP_TARGET, theQualifier, theValue);
+		return param;
+	}
+
+	private IIdType createEncounterWithIdentifier(String theValue) {
+		Encounter encounter = new Encounter();
+		encounter.addIdentifier().setSystem(ENCOUNTER_IDENTIFIER_SYSTEM).setValue(theValue);
+		return myEncounterDao.create(encounter, mySrd).getId().toUnqualifiedVersionless();
+	}
+
+	private IIdType createProvenanceTargeting(IIdType theTargetId) {
+		Provenance provenance = new Provenance();
+		provenance.addTarget(new Reference(theTargetId));
+		provenance.setRecorded(new Date());
+		return myProvenanceDao.create(provenance, mySrd).getId().toUnqualifiedVersionless();
+	}
+
+	/**
+	 * Returns the captured SELECT that joins the resource link table to the token index, which is the
+	 * query a chained token search resolves to.
+	 */
+	private String findChainedTokenQuery() {
+		return myCaptureQueriesListener.getSelectQueriesForCurrentThread().stream()
+			.map(t -> t.getSql(true, false))
+			.filter(t -> t.contains("HFJ_SPIDX_TOKEN"))
+			.findFirst()
+			.orElseThrow(() -> new AssertionError("No query joining HFJ_SPIDX_TOKEN was captured"));
+	}
+
+	@Test
+	public void testChainsWithNoValueShouldBeIgnored() {
+		// Setup
+		createPatient(withId("P0"), withGender("male"));
+		createPatient(withId("P1"), withGender("female"));
+		createCoverage(withId("C0"), withReference("beneficiary", "Patient/P0"));
+		createCoverage(withId("C1"), withReference("beneficiary", "Patient/P1"));
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(Coverage.SP_PATIENT, new ReferenceParam("family", ""));
+		map.add(Coverage.SP_PATIENT, new ReferenceParam("given", ""));
+		map.add(Coverage.SP_PATIENT, new ReferenceParam("birthdate", ""));
+		map.add(Coverage.SP_PATIENT, new ReferenceParam("gender", "male"));
+
+		// Test
+		myCaptureQueriesListener.clear();
+		IBundleProvider search = myCoverageDao.search(map, newSrd());
+
+		// Verify
+		assertThat(toUnqualifiedVersionlessIdValues(search)).containsExactly("Coverage/C0");
+		myCaptureQueriesListener.logSelectQueries();
+		List<SqlQuery> selectQueries = myCaptureQueriesListener.getSelectQueries();
+		assertEquals(2, selectQueries.size());
+		String querySql = selectQueries.get(0).getSql(false, false);
+		assertEquals(1, StringUtils.countMatches(querySql, "HFJ_RES_LINK"), querySql);
+	}
+
+	@Test
+	public void testIndexSearchParamPointingToResource() {
+		// Setup
+
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		Bundle inputBundle = new Bundle();
+		inputBundle.setType(Bundle.BundleType.MESSAGE);
+
+		MessageHeader msgHeader = new MessageHeader();
+		msgHeader.setEvent(new Coding("http://foo", "bar", "blah"));
+		inputBundle.addEntry().setResource(msgHeader);
+
+		RuntimeSearchParam sp = mySearchParamRegistry.getActiveSearchParam("Bundle", "message", ISearchParamRegistry.SearchParamLookupContextEnum.SEARCH);
+		assertEquals("Bundle.entry[0].resource", sp.getPath());
+		assertThat(sp.getBase()).containsExactly("Bundle");
+		assertEquals(RuntimeSearchParam.RuntimeSearchParamStatusEnum.ACTIVE, sp.getStatus());
+
+		// Test
+		myBundleDao.create(inputBundle, mySrd);
+
+		// Verify - We'll check that the right indexes got written, but the main test is that
+		// the create step didn't crash
+		runInTransaction(()->{
+			assertEquals(0, myResourceIndexedSearchParamStringDao.count());
+			assertEquals(1, myResourceIndexedSearchParamTokenDao.count());
+			assertEquals(0, myResourceLinkDao.count());
+		});
+	}
+
+
+	@Test
+	public void testShouldResolveATwoLinkChainWithStandAloneResourcesWithoutContainedResourceIndexing() {
+
+		// setup
+		IIdType oid1;
+
+		{
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			myPatientDao.create(p, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.name=Smith";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testChainedSearchWithTagReturnsResults() {
+		Coding coding = new Coding("http://bluecrossnc.com/fhir/lob","test", "the display");
+		//Given: A patient with a tag
+		Patient patient = new Patient();
+		Meta meta = new Meta();
+		meta.addTag(coding);
+		patient.setMeta(meta);
+		IIdType idType = myPatientDao.create(patient, mySrd).getId();
+
+		//Given: An encounter that references the patient
+		Encounter encounter =  buildResource("Encounter", withReference("subject", idType));
+		myEncounterDao.create(encounter, mySrd);
+		String url = "/Encounter?subject._tag=http://bluecrossnc.com/fhir/lob|test";
+
+		// execute
+		List<IBaseResource> encounters = myTestDaoSearch.searchForResources(url);
+
+		//Verify: Chained search with _tag returns results
+		assertEquals(1, encounters.size());
+
+	}
+
+	@Test
+	public void testChainedSearchWithTagUsingAndJoinsReturnsResults() {
+		Coding codingA = new Coding("http://bluecrossnc.com/fhir/lob","test", "the display");
+		Coding codingB = new Coding("http://someSystem/path/fhir","aPath", "some text");
+
+		//Given: A patient with two tags.
+		Patient patientA = new Patient();
+		Meta metaA = new Meta();
+		metaA.addTag(codingA);
+		metaA.addTag(codingB);
+		patientA.setMeta(metaA);
+
+		//Given: A patient with one tag (codingA)
+		Patient patientB = new Patient();
+		Meta metaB = new Meta();
+		metaB.addTag(codingA);
+		patientB.setMeta(metaB);
+
+		//Given: A patient with one tag (codingB)
+		Patient patientC = new Patient();
+		Meta metaC = new Meta();
+		metaC.addTag(codingB);
+		patientC.setMeta(metaC);
+
+		IIdType idTypeA = myPatientDao.create(patientA, mySrd).getId();
+		IIdType idTypeB = myPatientDao.create(patientB, mySrd).getId();
+		IIdType idTypeC = myPatientDao.create(patientC, mySrd).getId();
+
+		//Given: An encounterA that references patientA
+		Encounter encounterA =  buildResource("Encounter", withReference("subject", idTypeA));
+
+		//Given: An encounterB that references patientB
+		Encounter encounterB =  buildResource("Encounter", withReference("subject", idTypeB));
+
+		//Given: An encounterC that references patientC
+		Encounter encounterC =  buildResource("Encounter", withReference("subject", idTypeC));
+		IIdType encounterAiDtype = myEncounterDao.create(encounterA, mySrd).getId();
+		myEncounterDao.create(encounterB, mySrd);
+		myEncounterDao.create(encounterC, mySrd);
+
+		String url = "/Encounter?subject._tag=" + codingA.getSystem() + "|" + codingA.getCode() + "&subject._tag=" + codingB.getSystem() + "|" + codingB.getCode();
+
+		//execute
+		List<IBaseResource> encounters = myTestDaoSearch.searchForResources(url);
+		Encounter actualEncounter = (Encounter) encounters.get(0);
+
+		//Verify that the chained search with AND joins returns the encounter (encounterA) that references the patient (patientA) with both tags.
+		assertEquals(1, encounters.size());
+		assertEquals(encounterAiDtype.getIdPart(), actualEncounter.getIdPart());
+	}
+
+	@Test
+	public void testChainedSearchWithTagUsingOrJoinsReturnsResults() {
+		Coding codingA = new Coding("http://bluecrossnc.com/fhir/lob","test", "the display");
+		Coding codingB = new Coding("http://someSystem/path/fhir","aPath", "some text");
+
+		//Given: A patient with two tags.
+		Patient patientA = new Patient();
+		Meta metaA = new Meta();
+		metaA.addTag(codingA);
+		metaA.addTag(codingB);
+		patientA.setMeta(metaA);
+
+		//Given: A patient with one tag (codingA)
+		Patient patientB = new Patient();
+		Meta metaB = new Meta();
+		metaB.addTag(codingA);
+		patientB.setMeta(metaB);
+
+		//Given: A patient with one tag (codingB)
+		Patient patientC = new Patient();
+		Meta metaC = new Meta();
+		metaC.addTag(codingB);
+		patientC.setMeta(metaC);
+
+		//Given: A group with one tag (codingB)
+		Group group = new Group();
+		Meta metaD = new Meta();
+		metaD.addTag(codingB);
+		group.setMeta(metaC);
+		group.setActual(true);
+
+		IIdType idTypeA = myPatientDao.create(patientA, mySrd).getId();
+		IIdType idTypeB = myPatientDao.create(patientB, mySrd).getId();
+		IIdType idTypeC = myPatientDao.create(patientC, mySrd).getId();
+		IIdType idTypeD = myGroupDao.create(group, mySrd).getId();
+
+		Encounter encounterA =  buildResource("Encounter", withReference("subject", idTypeA));
+		Encounter encounterB =  buildResource("Encounter", withReference("subject", idTypeB));
+		Encounter encounterC =  buildResource("Encounter", withReference("subject", idTypeC));
+		Encounter encounterD =  buildResource("Encounter", withReference("subject", idTypeD));
+		myEncounterDao.create(encounterA, mySrd);
+		myEncounterDao.create(encounterB, mySrd);
+		myEncounterDao.create(encounterC, mySrd);
+		myEncounterDao.create(encounterD, mySrd);
+
+		String url = "/Encounter?subject._tag=" + codingA.getSystem() + "|" + codingA.getCode() + "," + codingB.getSystem() + "|" + codingB.getCode();
+
+		//execute
+		List<IBaseResource> encounters = myTestDaoSearch.searchForResources(url);
+
+		//Verify that the chained search with OR joins returns the encounters (all 4 encounters) that references the patients with either tags.
+		assertEquals(4, encounters.size());
+	}
+
+	@Test
+	public void testShouldResolveATwoLinkChainWithStandAloneResources() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			myPatientDao.create(p, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.name=Smith";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"http://example.org/mrn", "http://example.org/NamingSystem/mrn"})
+	void testTwoLinkChainOnIdentifier_SystemWithAnyPath_ReturnsMatch(String theIdentifierSystem) {
+		// observation 1
+		createPatient(withId("PAT-0"), withIdentifier(theIdentifierSystem, "0"));
+		createEncounter(withId("ENC-0"), withSubject("Patient/PAT-0"));
+		createObservation(withId("OBS-0"), withEncounter("Encounter/ENC-0"));
+
+		// observation 2
+		createPatient(withId("PAT-1"), withIdentifier(theIdentifierSystem, "1"));
+		createEncounter(withId("ENC-1"), withSubject("Patient/PAT-1"));
+		createObservation(withId("OBS-1"), withEncounter("Encounter/ENC-1"));
+
+		List<String> ids = myTestDaoSearch.searchForIds(
+				"/Observation?encounter.subject.identifier=" + theIdentifierSystem + "|0");
+
+		assertThat(ids).containsExactly("OBS-0");
+	}
+
+	@Test
+	void testTwoLinkChainOnReference_ReturnsMatch() {
+		// observation 1
+		createOrganization(withId("ORG-0"));
+		createPatient(withId("PAT-0"), withOrganization("Organization/ORG-0"));
+		createEncounter(withId("ENC-0"), withSubject("Patient/PAT-0"));
+		createObservation(withId("OBS-0"), withEncounter("Encounter/ENC-0"));
+
+		// observation 2
+		createOrganization(withId("ORG-1"));
+		createPatient(withId("PAT-1"), withOrganization("Organization/ORG-1"));
+		createEncounter(withId("ENC-1"), withSubject("Patient/PAT-1"));
+		createObservation(withId("OBS-1"), withEncounter("Encounter/ENC-1"));
+
+		List<String> ids = myTestDaoSearch.searchForIds("/Observation?encounter.subject.organization=Organization/ORG-0");
+
+		assertThat(ids).containsExactly("OBS-0");
+	}
+
+	@Test
+	void testTwoLinkChainOnTag_SystemWithPath_ReturnsMatch() {
+		// observation 1
+		createPatient(withId("PAT-0"), withTag("http://example.org/fhir/lob", "test"));
+		createEncounter(withId("ENC-0"), withSubject("Patient/PAT-0"));
+		createObservation(withId("OBS-0"), withEncounter("Encounter/ENC-0"));
+
+		// observation 2
+		createPatient(withId("PAT-1"), withTag("http://example.org/fhir/lob", "other"));
+		createEncounter(withId("ENC-1"), withSubject("Patient/PAT-1"));
+		createObservation(withId("OBS-1"), withEncounter("Encounter/ENC-1"));
+
+		List<String> ids = myTestDaoSearch.searchForIds("/Observation?encounter.subject._tag=http://example.org/fhir/lob|test");
+
+		assertThat(ids).containsExactly("OBS-0");
+	}
+
+	@Test
+	public void testShouldResolveATwoLinkChainWithStandAloneResources_CommonReference() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			myPatientDao.create(p, mySrd);
+
+			Encounter encounter = new Encounter();
+			encounter.setId(IdType.newRandomUuid());
+			encounter.addIdentifier().setSystem("foo").setValue("bar");
+			myEncounterDao.create(encounter, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Body Weight");
+			obs.getCode().addCoding().setCode("obs2").setSystem("Some System").setDisplay("Body weight as measured by me");
+			obs.setStatus(Observation.ObservationStatus.FINAL);
+			obs.setValue(new Quantity(81));
+			obs.setSubject(new Reference(p.getId()));
+			obs.setEncounter(new Reference(encounter.getId()));
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?encounter.identifier=foo|bar";
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveATwoLinkChainWithStandAloneResources_CompoundReference() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+		IIdType oid2;
+
+		// AuditEvent should match both AuditEvent.agent.who and AuditEvent.entity.what
+		{
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			myPatientDao.create(p, mySrd);
+
+			AuditEvent auditEvent = new AuditEvent();
+			auditEvent.addAgent().setWho(new Reference(p.getId()));
+			oid1 = myAuditEventDao.create(auditEvent, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			myPatientDao.create(p, mySrd);
+
+			AuditEvent auditEvent = new AuditEvent();
+			auditEvent.addEntity().setWhat(new Reference(p.getId()));
+			oid2 = myAuditEventDao.create(auditEvent, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning all the records
+			myAuditEventDao.create(new AuditEvent(), mySrd);
+		}
+
+		String url = "/AuditEvent?patient.name=Smith";
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(2);
+		assertThat(oids).containsExactly(oid1.getIdPart(), oid2.getIdPart());
+	}
+
+	@Disabled("Bug: SearchContainedModeEnum never set to TRUE, OIDs are not found")
+	@Test
+	public void testShouldResolveATwoLinkChainWithContainedResources_CompoundReference() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+		IIdType oid2;
+
+		// AuditEvent should match both AuditEvent.agent.who and AuditEvent.entity.what
+		{
+			Patient p = new Patient();
+			p.setId("p1");
+			p.addName().setFamily("Smith").addGiven("John");
+
+			AuditEvent auditEvent = new AuditEvent();
+			auditEvent.addContained(p);
+			auditEvent.addAgent().setWho(new Reference("#p1"));
+			oid1 = myAuditEventDao.create(auditEvent, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Patient p = new Patient();
+			p.setId("p2");
+			p.addName().setFamily("Smith").addGiven("John");
+
+			AuditEvent auditEvent = new AuditEvent();
+			auditEvent.addContained(p);
+			auditEvent.addEntity().setWhat(new Reference("#p2"));
+			oid2 = myAuditEventDao.create(auditEvent, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning all the records
+			myAuditEventDao.create(new AuditEvent(), mySrd);
+		}
+
+		String url = "/AuditEvent?patient.name=Smith";
+		logAllStringIndexes();
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+ 		assertThat(oids).hasSize(2);
+		assertThat(oids).containsExactly(oid1.getIdPart(), oid2.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveATwoLinkChainWithAContainedResource() {
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+
+			obs.getCode().addCoding().setCode("29463-7").setSystem("http://loinc.org").setDisplay("Body Weight");
+			obs.setStatus(Observation.ObservationStatus.FINAL);
+			obs.setSubject(new Reference(p.getId()));
+			obs.setValue(new Quantity(null, 67.1, "http://unitsofmeasure.org", "kg", "kg"));
+			obs.getSubject().setReference("#pat");
+
+			ourLog.debug("Resource: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(obs));
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myCaptureQueriesListener.clear();
+			myObservationDao.create(new Observation(), mySrd);
+			myCaptureQueriesListener.logInsertQueries();
+		}
+
+		String url = "/Observation?subject.name=Smith";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldNotResolveATwoLinkChainWithAContainedResourceWhenContainedResourceIndexingIsTurnedOff() {
+		// setup
+
+		{
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getCode().setText("Observation 1");
+			obs.setValue(new StringType("Test"));
+			obs.getSubject().setReference("#pat");
+
+            myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+            // Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.name=Smith";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(0);
+	}
+
+	@Test
+	@Disabled("Known limitation")
+	public void testShouldResolveATwoLinkChainWithQualifiersWithAContainedResource() {
+		// TODO: This test fails because of a known limitation in qualified searches over contained resources.
+		//       Type information for intermediate resources in the chain is not being retained in the indexes.
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getCode().setText("Observation 1");
+			obs.setValue(new StringType("Test"));
+			obs.getSubject().setReference("#pat");
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			Location loc = new Location();
+			loc.setId("loc");
+			loc.setName("Smith");
+
+			Observation obs2 = new Observation();
+			obs2.getContained().add(loc);
+			obs2.getCode().setText("Observation 2");
+			obs2.setValue(new StringType("Test"));
+			obs2.getSubject().setReference("#loc");
+
+			myObservationDao.create(obs2, mySrd);
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject:Patient.name=Smith";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveATwoLinkChainToAContainedReference() {
+		// Adding support for this case in SMILE-3151
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+		IIdType orgId;
+
+		{
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			orgId = myOrganizationDao.create(org, mySrd).getId();
+
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(org.getId());
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference("#pat");
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization=" + orgId.getValueAsString();
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveATwoLinkChainToAStandAloneReference() {
+		// Adding support for this case in SMILE-3151
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+		IIdType orgId;
+
+		{
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			orgId = myOrganizationDao.create(org, mySrd).getId();
+
+			Patient p = new Patient();
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(org.getId());
+			myPatientDao.create(p, mySrd);
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization=" + orgId.getValueAsString();
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveATwoLinkChainWithAContainedResource_CommonReference() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Encounter encounter = new Encounter();
+			encounter.setId("enc");
+			encounter.addIdentifier().setSystem("foo").setValue("bar");
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Body Weight");
+			obs.getCode().addCoding().setCode("obs2").setSystem("Some System").setDisplay("Body weight as measured by me");
+			obs.setStatus(Observation.ObservationStatus.FINAL);
+			obs.setValue(new Quantity(81));
+
+			obs.addContained(encounter);
+			obs.setEncounter(new Reference("#enc"));
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?encounter.identifier=foo|bar";
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAThreeLinkChainWhereAllResourcesStandAloneWithoutContainedResourceIndexing() {
+
+		// setup
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			myOrganizationDao.create(org, mySrd);
+
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(org.getId());
+			myPatientDao.create(p, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			Organization dummyOrg = new Organization();
+			dummyOrg.setId(IdType.newRandomUuid());
+			dummyOrg.setName("Dummy");
+			myOrganizationDao.create(dummyOrg, mySrd);
+
+			Patient dummyPatient = new Patient();
+			dummyPatient.setId(IdType.newRandomUuid());
+			dummyPatient.addName().setFamily("Jones").addGiven("Jane");
+			dummyPatient.getManagingOrganization().setReference(dummyOrg.getId());
+			myPatientDao.create(dummyPatient, mySrd);
+
+			Observation dummyObs = new Observation();
+			dummyObs.getCode().setText("Observation 2");
+			dummyObs.getSubject().setReference(dummyPatient.getId());
+			myObservationDao.create(dummyObs, mySrd);
+		}
+
+		String url = "/Observation?subject.organization.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAThreeLinkChainWhereAllResourcesStandAlone() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			myOrganizationDao.create(org, mySrd);
+
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(org.getId());
+			myPatientDao.create(p, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			Organization dummyOrg = new Organization();
+			dummyOrg.setId(IdType.newRandomUuid());
+			dummyOrg.setName("Dummy");
+			myOrganizationDao.create(dummyOrg, mySrd);
+
+			Patient dummyPatient = new Patient();
+			dummyPatient.setId(IdType.newRandomUuid());
+			dummyPatient.addName().setFamily("Jones").addGiven("Jane");
+			dummyPatient.getManagingOrganization().setReference(dummyOrg.getId());
+			myPatientDao.create(dummyPatient, mySrd);
+
+			Observation dummyObs = new Observation();
+			dummyObs.getCode().setText("Observation 2");
+			dummyObs.getSubject().setReference(dummyPatient.getId());
+			myObservationDao.create(dummyObs, mySrd);
+		}
+
+		String url = "/Observation?subject.organization.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAThreeLinkChainWithAContainedResourceAtTheEndOfTheChain() {
+		// This is the case that is most relevant to SMILE-2899
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId("org");
+			org.setName("HealthCo");
+
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.getContained().add(org);
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference("#org");
+			myPatientDao.create(p, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Disabled("Bug: SearchContainedModeEnum never set to TRUE, OIDs are not found")
+	@Test
+	public void testShouldResolveAThreeLinkChainWithAContainedResourceAtTheEndOfTheChain_CommonReference() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+
+			Encounter encounter = new Encounter();
+			encounter.addContained(p);
+			encounter.setId(IdType.newRandomUuid());
+			encounter.addIdentifier().setSystem("foo").setValue("bar");
+			encounter.setSubject(new Reference("#pat"));
+			myEncounterDao.create(encounter, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Body Weight");
+			obs.getCode().addCoding().setCode("obs2").setSystem("Some System").setDisplay("Body weight as measured by me");
+			obs.setStatus(Observation.ObservationStatus.FINAL);
+			obs.setValue(new Quantity(81));
+			obs.setSubject(new Reference(p.getId()));
+			obs.setEncounter(new Reference(encounter.getId()));
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?encounter.patient.name=Smith";
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAThreeLinkChainWithAContainedResourceAtTheBeginningOfTheChain() {
+		// Adding support for this case in SMILE-3151
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			myOrganizationDao.create(org, mySrd);
+
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(org.getId());
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference("#pat");
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAThreeLinkChainWithAContainedResourceAtTheBeginningOfTheChain_CommonReference() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			myPatientDao.create(p, mySrd);
+
+			Encounter encounter = new Encounter();
+			encounter.setId("enc");
+			encounter.addIdentifier().setSystem("foo").setValue("bar");
+			encounter.setSubject(new Reference(p.getId()));
+
+			Observation obs = new Observation();
+			obs.addContained(encounter);
+			obs.getCode().setText("Body Weight");
+			obs.getCode().addCoding().setCode("obs2").setSystem("Some System").setDisplay("Body weight as measured by me");
+			obs.setStatus(Observation.ObservationStatus.FINAL);
+			obs.setValue(new Quantity(81));
+			obs.setEncounter(new Reference("#enc"));
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?encounter.identifier=foo|bar";
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldNotResolveAThreeLinkChainWithAllContainedResourcesWhenRecursiveContainedIndexesAreDisabled() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		{
+			Organization org = new Organization();
+			org.setId("org");
+			org.setName("HealthCo");
+
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference("#org");
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getContained().add(org);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference("#pat");
+
+            myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+            // Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(0);
+	}
+
+	@Test
+	public void testShouldResolveAThreeLinkChainWithAllContainedResources() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+		myStorageSettings.setIndexOnContainedResourcesRecursively(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId("org");
+			org.setName("HealthCo");
+
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference("#org");
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getContained().add(org);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference("#pat");
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.name=HealthCo";
+		logAllStringIndexes();
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAThreeLinkChainWithQualifiersWhereAllResourcesStandAlone() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			myOrganizationDao.create(org, mySrd);
+
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(org.getId());
+			myPatientDao.create(p, mySrd);
+
+			Device d = new Device();
+			d.setId(IdType.newRandomUuid());
+			d.getOwner().setReference(org.getId());
+			myDeviceDao.create(d, mySrd);
+
+			Observation obs1 = new Observation();
+			obs1.getCode().setText("Observation 1");
+			obs1.getSubject().setReference(p.getId());
+
+			Observation obs2 = new Observation();
+			obs2.getCode().setText("Observation 2");
+			obs2.getSubject().setReference(d.getId());
+
+			oid1 = myObservationDao.create(obs1, mySrd).getId().toUnqualifiedVersionless();
+			myObservationDao.create(obs2, mySrd);
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject:Patient.organization:Organization.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAThreeLinkChainWithQualifiersWithAContainedResourceAtTheEndOfTheChain() {
+		// This is the case that is most relevant to SMILE-2899
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId("org");
+			org.setName("HealthCo");
+
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.getContained().add(org);
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference("#org");
+			myPatientDao.create(p, mySrd);
+
+			Organization org2 = new Organization();
+			org2.setId("org");
+			org2.setName("HealthCo");
+
+			Device d = new Device();
+			d.setId(IdType.newRandomUuid());
+			d.getContained().add(org2);
+			d.getOwner().setReference("#org");
+			myDeviceDao.create(d, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			Observation obs2 = new Observation();
+			obs2.getCode().setText("Observation 2");
+			obs2.getSubject().setReference(d.getId());
+			myObservationDao.create(obs2, mySrd);
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject:Patient.organization:Organization.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAThreeLinkChainWithQualifiersWithAContainedResourceAtTheBeginning() {
+		// Adding support for this case in SMILE-3151
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			myOrganizationDao.create(org, mySrd);
+
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(org.getId());
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference("#pat");
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			Device d = new Device();
+			d.setId("dev");
+			d.getOwner().setReference(org.getId());
+
+			Observation obs2 = new Observation();
+			obs2.getContained().add(d);
+			obs2.getCode().setText("Observation 2");
+			obs2.getSubject().setReference("#dev");
+
+			myObservationDao.create(obs2, mySrd);
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject:Patient.organization:Organization.name=HealthCo";
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	@Disabled("Known limitation")
+	public void testShouldResolveAThreeLinkChainWithQualifiersWithAContainedResourceAtTheBeginning_NotDistinctSourcePaths() {
+		// TODO: This test fails because of a known limitation in qualified searches over contained resources.
+		//       Type information for intermediate resources in the chain is not being retained in the indexes.
+
+		// Adding support for this case in SMILE-3151
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			myOrganizationDao.create(org, mySrd);
+
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(org.getId());
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference("#pat");
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			Location loc = new Location();
+			loc.setId("loc");
+			loc.getManagingOrganization().setReference(org.getId());
+
+			Observation obs2 = new Observation();
+			obs2.getContained().add(loc);
+			obs2.getCode().setText("Observation 2");
+			obs2.getSubject().setReference("#loc");
+
+			myObservationDao.create(obs2, mySrd);
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject:Patient.organization:Organization.name=HealthCo";
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	@Disabled("Known limitation")
+	public void testShouldResolveAThreeLinkChainWithQualifiersWithAllContainedResources() {
+		// TODO: This test fails because of a known limitation in qualified searches over contained resources.
+		//       Type information for intermediate resources in the chain is not being retained in the indexes.
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+		myStorageSettings.setIndexOnContainedResourcesRecursively(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId("org");
+			org.setName("HealthCo");
+
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference("#org");
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getContained().add(org);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference("#pat");
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			Organization org2 = new Organization();
+			org2.setId("org");
+			org2.setName("HealthCo");
+
+			Device d = new Device();
+			d.setId("dev");
+			d.getOwner().setReference("#org");
+
+			Observation obs2 = new Observation();
+			obs2.getContained().add(d);
+			obs2.getContained().add(org2);
+			obs2.getCode().setText("Observation 2");
+			obs2.getSubject().setReference("#dev");
+
+			myObservationDao.create(obs2, mySrd);
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject:Patient.organization:Organization.name=HealthCo";
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAFourLinkChainWhereAllResourcesStandAlone() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			myOrganizationDao.create(org, mySrd);
+
+			Organization partOfOrg = new Organization();
+			partOfOrg.setId(IdType.newRandomUuid());
+			partOfOrg.getPartOf().setReference(org.getId());
+			myOrganizationDao.create(partOfOrg, mySrd);
+
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(partOfOrg.getId());
+			myPatientDao.create(p, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.partof.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAFourLinkChainWhereTheLastReferenceIsContained() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId("parent");
+			org.setName("HealthCo");
+
+			Organization partOfOrg = new Organization();
+			partOfOrg.setId(IdType.newRandomUuid());
+			partOfOrg.getContained().add(org);
+			partOfOrg.getPartOf().setReference("#parent");
+			myOrganizationDao.create(partOfOrg, mySrd);
+
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(partOfOrg.getId());
+			myPatientDao.create(p, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.partof.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAFourLinkChainWhereTheLastTwoReferencesAreContained() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+		myStorageSettings.setIndexOnContainedResourcesRecursively(true);
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId("parent");
+			org.setName("HealthCo");
+
+			Organization partOfOrg = new Organization();
+			partOfOrg.setId("child");
+			partOfOrg.getPartOf().setReference("#parent");
+
+			Patient p = new Patient();
+			p.getContained().add(org);
+			p.getContained().add(partOfOrg);
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference("#child");
+			myPatientDao.create(p, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.partof.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAFourLinkChainWithAContainedResourceInTheMiddle() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		IIdType oid1;
+
+		{
+			myCaptureQueriesListener.clear();
+
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			myOrganizationDao.create(org, mySrd);
+
+			Organization partOfOrg = new Organization();
+			partOfOrg.setId("org");
+			partOfOrg.getPartOf().setReference(org.getId());
+
+			Patient p = new Patient();
+			p.setId(IdType.newRandomUuid());
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getContained().add(partOfOrg);
+			p.getManagingOrganization().setReference("#org");
+			myPatientDao.create(p, mySrd);
+
+			Observation obs = new Observation();
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference(p.getId());
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			myCaptureQueriesListener.logInsertQueries();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.partof.name=HealthCo";
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueries();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAFourLinkChainWhereTheFirstTwoReferencesAreContained() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+		myStorageSettings.setIndexOnContainedResourcesRecursively(true);
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId(IdType.newRandomUuid());
+			org.setName("HealthCo");
+			myOrganizationDao.create(org, mySrd);
+
+			Organization partOfOrg = new Organization();
+			partOfOrg.setId("child");
+			partOfOrg.getPartOf().setReference(org.getId());
+
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference("#child");
+
+			Observation obs = new Observation();
+			obs.getContained().add(org);
+			obs.getContained().add(partOfOrg);
+			obs.getContained().add(p);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference("#pat");
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.partof.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAFourLinkChainWhereTheFirstReferenceAndTheLastReferenceAreContained() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+		myStorageSettings.setIndexOnContainedResourcesRecursively(true);
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId("parent");
+			org.setName("HealthCo");
+
+			Organization partOfOrg = new Organization();
+			partOfOrg.getContained().add(org);
+			partOfOrg.setId(IdType.newRandomUuid());
+			partOfOrg.getPartOf().setReference("#parent");
+			myOrganizationDao.create(partOfOrg, mySrd);
+
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference(partOfOrg.getId());
+
+			Observation obs = new Observation();
+			obs.getContained().add(p);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference("#pat");
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.partof.name=HealthCo";
+
+		// execute
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldResolveAFourLinkChainWhereAllReferencesAreContained() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+		myStorageSettings.setIndexOnContainedResourcesRecursively(true);
+		IIdType oid1;
+
+		{
+			Organization org = new Organization();
+			org.setId("parent");
+			org.setName("HealthCo");
+
+			Organization partOfOrg = new Organization();
+			partOfOrg.setId("child");
+			partOfOrg.getPartOf().setReference("#parent");
+
+			Patient p = new Patient();
+			p.setId("pat");
+			p.addName().setFamily("Smith").addGiven("John");
+			p.getManagingOrganization().setReference("#child");
+
+			Observation obs = new Observation();
+			obs.getContained().add(org);
+			obs.getContained().add(partOfOrg);
+			obs.getContained().add(p);
+			obs.getCode().setText("Observation 1");
+			obs.getSubject().setReference("#pat");
+
+			oid1 = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+
+			// Create a dummy record so that an unconstrained query doesn't pass the test due to returning the only record
+			myObservationDao.create(new Observation(), mySrd);
+		}
+
+		String url = "/Observation?subject.organization.partof.name=HealthCo";
+
+		logAllStringIndexes();
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> oids = myTestDaoSearch.searchForIds(url);
+		myCaptureQueriesListener.logSelectQueriesForCurrentThread();
+
+		// validate
+		assertThat(oids).hasSize(1);
+		assertThat(oids).containsExactly(oid1.getIdPart());
+	}
+
+	@Test
+	public void testShouldThrowAnExceptionForAFiveLinkChain() {
+
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+		myStorageSettings.setIndexOnContainedResourcesRecursively(true);
+
+		String url = "/Observation?subject.organization.partof.partof.name=HealthCo";
+
+		try {
+			// execute
+			myTestDaoSearch.searchForIds(url);
+			fail("Expected an exception to be thrown");
+		} catch (InvalidRequestException e) {
+			assertEquals(Msg.code(2007) + "The search chain subject.organization.partof.partof.name is too long. Only chains up to three references are supported.", e.getMessage());
+		}
+	}
+
+	@Test
+	public void testQueryStructure() {
+
+		// With indexing of contained resources turned off, we should not see UNION clauses in the query
+		countUnionStatementsInGeneratedQuery("/Observation?patient.name=Smith", 0);
+		countUnionStatementsInGeneratedQuery("/Observation?patient.organization.name=Smith", 0);
+		countUnionStatementsInGeneratedQuery("/Observation?patient.organization.partof.name=Smith", 0);
+
+		// With indexing of contained resources turned on, we take the UNION of several subselects that handle the different patterns of containment
+		//  Keeping in mind that the number of clauses is one greater than the number of UNION keywords,
+		//  this increases as the chain grows longer according to the Fibonacci sequence: (2, 3, 5, 8, 13)
+		myStorageSettings.setIndexOnContainedResources(true);
+		countUnionStatementsInGeneratedQuery("/Observation?patient.name=Smith", 1);
+		countUnionStatementsInGeneratedQuery("/Observation?patient.organization.name=Smith", 2);
+		countUnionStatementsInGeneratedQuery("/Observation?patient.organization.partof.name=Smith", 4);
+
+		// With recursive indexing of contained resources turned on, even more containment patterns are considered
+		//  This increases as the chain grows longer as powers of 2: (2, 4, 8, 16, 32)
+		myStorageSettings.setIndexOnContainedResourcesRecursively(true);
+		countUnionStatementsInGeneratedQuery("/Observation?patient.name=Smith", 1);
+		countUnionStatementsInGeneratedQuery("/Observation?patient.organization.name=Smith", 3);
+		countUnionStatementsInGeneratedQuery("/Observation?patient.organization.partof.name=Smith", 7);
+
+		// If a reference in the chain has multiple potential target resource types, the number of subselects increases
+		// Note: This previously had 3 unions but 2 of the selects within were duplicates of each other
+		countUnionStatementsInGeneratedQuery("/Observation?subject.name=Smith", 2);
+
+		// If such a reference if qualified to restrict the type, the number goes back down
+		countUnionStatementsInGeneratedQuery("/Observation?subject:Location.name=Smith", 1);
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {
+		"/Encounter?service-provider.name:exact=TestOrg",
+		"/Encounter?service-provider:Organization.name:exact=TestOrg",
+		"/Encounter?subject.organization.name:exact=TestOrg",
+		"/Encounter?subject:Patient.organization.name:exact=TestOrg",
+		"/Encounter?subject:Patient.organization:Organization.name:exact=TestOrg"
+	})
+	public void testReferenceChainedSearch_withExactModifier_willMatchExactly(String theSearchUrl) {
+		// setup
+		myStorageSettings.setIndexOnContainedResources(true);
+
+		Organization org1 = buildResource("Organization", withName("TestOrg"));
+		Organization org2 = buildResource("Organization", withName("TestOrganization"));
+		IIdType org1Id = doCreateResource(org1);
+		IIdType org2Id = doCreateResource(org2);
+
+		Patient p1 = buildResource("Patient", withReference("managingOrganization", org1Id));
+		Patient p2 = buildResource("Patient", withReference("managingOrganization", org2Id));
+		IIdType p1Id = doCreateResource(p1);
+		IIdType p2Id = doCreateResource(p2);
+
+		Encounter enc1 = buildResource("Encounter", withReference("subject", p1Id), withReference("serviceProvider", org1Id));
+		Encounter enc2 = buildResource("Encounter", withReference("subject", p2Id), withReference("serviceProvider", org2Id));
+		IIdType enc1Id = doCreateResource(enc1);
+		doCreateResource(enc2);
+
+		logAllStringIndexes();
+
+		// execute
+		myCaptureQueriesListener.clear();
+		List<String> encounterIds = myTestDaoSearch.searchForIds(theSearchUrl);
+		myCaptureQueriesListener.logAllQueriesForCurrentThread();
+
+		// validate
+		assertThat(encounterIds).hasSize(1);
+		assertThat(encounterIds.get(0)).isEqualTo(enc1Id.getIdPart());
+		assertThat(myCaptureQueriesListener.getSelectQueriesForCurrentThread().get(0).getSql(true, true))
+			.doesNotContain("HASH_NORM_PREFIX")
+			.doesNotContain("SP_VALUE_NORMALIZED")
+			.contains("HASH_EXACT");
+	}
+
+	@Test
+	// Created by claude-opus-4-7 for https://github.com/hapifhir/hapi-fhir/issues/8025
+	void test_unqualifiedChainedIdOnMultiTargetReference_returnsMatchingResource() {
+		// SearchParameter http://hl7.org/fhir/SearchParameter/DiagnosticReport-based-on declares
+		//   target = [ CarePlan, ImmunizationRecommendation, MedicationRequest, NutritionOrder, ServiceRequest ]
+		// The customer's DiagnosticReport references a ServiceRequest with FHIR id "sr-1".
+		createResource("ServiceRequest", withId("sr-1"));
+		createResource("DiagnosticReport", withId("dr-1"),
+			withReference("basedOn", "ServiceRequest/sr-1"));
+
+		// Sanity: the qualified form works. resourceTypes contains only ServiceRequest,
+		// so the iteration in ResourceLinkPredicateBuilder runs once, resolveResourceIdentities
+		// returns a non-empty PID set, and setMatchNothing() is never called.
+		SearchParameterMap qualified = SearchParameterMap.newSynchronous();
+		qualified.add(DiagnosticReport.SP_BASED_ON, new ReferenceParam("ServiceRequest", "_id", "sr-1"));
+		IBundleProvider qualifiedResult = myDiagnosticReportDao.search(qualified, newSrd());
+		assertThat(toUnqualifiedVersionlessIdValues(qualifiedResult))
+			.as("qualified chain (sanity)")
+			.containsExactly("DiagnosticReport/dr-1");
+
+		// The unqualified form must return the same resource. Today, it does not.
+		// resourceTypes contains all 5 SP targets. The first iteration (CarePlan) builds
+		// IIdHelperService.resolveResourceIdentities([CarePlan/sr-1]), which returns empty,
+		// triggers setMatchNothing() on the shared SearchQueryBuilder, and the entire query
+		// is short-circuited to "no rows" — even though the ServiceRequest iteration would
+		// have built a perfectly correct subquery on its turn.
+		SearchParameterMap unqualified = SearchParameterMap.newSynchronous();
+		unqualified.add(DiagnosticReport.SP_BASED_ON, new ReferenceParam(null, "_id", "sr-1"));
+		IBundleProvider unqualifiedResult = myDiagnosticReportDao.search(unqualified, newSrd());
+		assertThat(toUnqualifiedVersionlessIdValues(unqualifiedResult))
+			.as("unqualified chain — fails today, must return the same DR as the qualified form")
+			.containsExactly("DiagnosticReport/dr-1");
+	}
+
+	@Test
+	// Created by claude-opus-4-7 for https://github.com/hapifhir/hapi-fhir/issues/8025
+	void test_unqualifiedChainedIdOnMultiTargetReference_returnsAllWhenIdAmbiguousAcrossTypes() {
+		// FHIR ids are unique within a resource type but may collide ACROSS types.
+		// An unqualified chained _id search on a multi-target reference must therefore
+		// return matches from every target type whose resource has that id.
+		//
+		// Today this case is doubly broken: setMatchNothing() fires on the first iteration
+		// whose target type doesn't have the id, even though TWO of the iterations would
+		// have produced correct subqueries. After the fix, both DRs must come back.
+		createResource("ServiceRequest", withId("shared-id"));
+		createResource("CarePlan",       withId("shared-id"));
+
+		createResource("DiagnosticReport", withId("dr-sr"),
+			withReference("basedOn", "ServiceRequest/shared-id"));
+		createResource("DiagnosticReport", withId("dr-cp"),
+			withReference("basedOn", "CarePlan/shared-id"));
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(DiagnosticReport.SP_BASED_ON, new ReferenceParam(null, "_id", "shared-id"));
+		IBundleProvider result = myDiagnosticReportDao.search(map, newSrd());
+
+		assertThat(toUnqualifiedVersionlessIdValues(result))
+			.containsExactlyInAnyOrder("DiagnosticReport/dr-sr", "DiagnosticReport/dr-cp");
+	}
+
+	@Test
+	// Created by claude-opus-4-7 for https://github.com/hapifhir/hapi-fhir/issues/8025
+	void test_unqualifiedChainedIdOnMultiTargetReference_returnsEmptyWhenIdMatchesNoTargetType() {
+		// Regression guard. After fixing the OR-context handling in ResourceIdPredicateBuilder,
+		// we must still return an empty bundle when the id genuinely does not exist for any
+		// target type. The fix should change HOW we arrive at empty (per-iteration FALSE
+		// condition in the OR, rather than a global setMatchNothing), not WHETHER we do.
+		createResource("ServiceRequest", withId("sr-1"));
+		createResource("DiagnosticReport", withId("dr-1"),
+			withReference("basedOn", "ServiceRequest/sr-1"));
+
+		SearchParameterMap map = SearchParameterMap.newSynchronous();
+		map.add(DiagnosticReport.SP_BASED_ON, new ReferenceParam(null, "_id", "does-not-exist"));
+		IBundleProvider result = myDiagnosticReportDao.search(map, newSrd());
+
+		assertThat(toUnqualifiedVersionlessIdValues(result)).isEmpty();
+	}
+
+	private void countUnionStatementsInGeneratedQuery(String theUrl, int theExpectedNumberOfUnions) {
+		myCaptureQueriesListener.clear();
+		myTestDaoSearch.searchForIds(theUrl);
+		List<SqlQuery> selectQueries = myCaptureQueriesListener.getSelectQueriesForCurrentThread();
+		assertThat(selectQueries).hasSize(1);
+
+		String sqlQuery = selectQueries.get(0).getSql(true, true).toLowerCase();
+		assertThat(countMatches(sqlQuery, "union")).as(sqlQuery).isEqualTo(theExpectedNumberOfUnions);
+	}
+
+}

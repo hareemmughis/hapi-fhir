@@ -1,0 +1,354 @@
+package ca.uhn.fhir.rest.server;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.annotation.Read;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.api.SummaryEnum;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.MedicationRequest;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Reference;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.function.Consumer;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+public class SummaryParamR4Test {
+
+	private static final FhirContext ourCtx = FhirContext.forR4Cached();
+	private static SummaryEnum ourLastSummary;
+	private static List<SummaryEnum> ourLastSummaryList;
+
+	@RegisterExtension
+	public RestfulServerExtension ourServer = new RestfulServerExtension(ourCtx)
+		 .registerProvider(new DummyPatientResourceProvider())
+		 .registerProvider(new DummyMedicationRequestProvider())
+		 .withPagingProvider(new FifoMemoryPagingProvider(100))
+		 .setDefaultResponseEncoding(EncodingEnum.XML);
+
+	@BeforeEach
+	public void before() {
+		ourLastSummary = null;
+		ourLastSummaryList = null;
+	}
+
+	@Test
+	public void testReadSummaryData() {
+		verifyXmlAndJson(
+			"/Patient/1?_summary=" + SummaryEnum.DATA.getCode(),
+			Patient.class,
+			patient -> {
+				String responseContent = ourCtx.newXmlParser().encodeResourceToString(patient);
+				assertThat(responseContent).doesNotContain("<Bundle");
+				assertThat(responseContent).contains("<Patien");
+				assertThat(responseContent).doesNotContain("<div>THE DIV</div>");
+				assertThat(responseContent).contains("family");
+				assertThat(responseContent).contains("maritalStatus");
+				assertEquals(SummaryEnum.DATA, ourLastSummary);
+			}
+		);
+	}
+
+
+	@Test
+	public void testReadSummaryText() {
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/1?_summary=" + SummaryEnum.TEXT.getCode())
+			.get()
+			.assertStatus(200);
+		String responseContent = status.getBody();
+
+		assertThat(status.getHeader(Constants.HEADER_CONTENT_TYPE).replace(" ", "").replace("UTF", "utf")).isEqualTo(Constants.CT_HTML_WITH_UTF8.replace(" ", "").toLowerCase());
+		assertThat(responseContent).doesNotContain("<Bundle");
+		assertThat(responseContent).doesNotContain("<Medic");
+		assertThat(responseContent).isEqualTo("<div xmlns=\"http://www.w3.org/1999/xhtml\">THE DIV</div>");
+		assertThat(responseContent).doesNotContain("efer");
+		assertThat(ourLastSummary).isEqualTo(SummaryEnum.TEXT);
+	}
+
+	@Test
+	public void testReadSummaryTextWithMandatory() {
+		HttpTestResponse status = ourServer.fhirRequest("/MedicationRequest/1?_summary=" + SummaryEnum.TEXT.getCode())
+			.get()
+			.assertStatus(200);
+		String responseContent = status.getBody();
+
+		assertThat(status.getHeader(Constants.HEADER_CONTENT_TYPE).replace(" ", "").replace("UTF", "utf")).isEqualTo(Constants.CT_HTML_WITH_UTF8.replace(" ", "").toLowerCase());
+		assertThat(responseContent).doesNotContain("<Bundle");
+		assertThat(responseContent).doesNotContain("<Patien");
+		assertThat(responseContent).isEqualTo("<div xmlns=\"http://www.w3.org/1999/xhtml\">TEXT</div>");
+		assertThat(responseContent).doesNotContain("family");
+		assertThat(responseContent).doesNotContain("maritalStatus");
+	}
+
+	@Test
+	public void testReadSummaryTrue() {
+		String url = "/Patient/1?_summary=" + SummaryEnum.TRUE.getCode();
+		verifyXmlAndJson(
+			url,
+			Patient.class,
+			patient -> {
+				String responseContent = ourCtx.newXmlParser().encodeResourceToString(patient);
+				assertThat(responseContent).doesNotContain("<Bundle");
+				assertThat(responseContent).contains("<Patien");
+				assertThat(responseContent).doesNotContain("<div>THE DIV</div>");
+				assertThat(responseContent).contains("family");
+				assertThat(responseContent).doesNotContain("maritalStatus");
+				assertEquals(SummaryEnum.TRUE, ourLastSummary);
+			}
+		);
+
+	}
+
+	@Test
+	public void testSearchSummaryCount() {
+		String url = "/Patient?_pretty=true&_summary=" + SummaryEnum.COUNT.getCode();
+		verifyXmlAndJson(
+			url,
+			bundle -> {
+				String responseContent = ourCtx.newXmlParser().encodeResourceToString(bundle);
+				assertThat(responseContent).contains("<total value=\"1\"/>");
+				assertThat(responseContent).doesNotContain("entry");
+				assertThat(responseContent).doesNotContain("THE DIV");
+				assertThat(responseContent).doesNotContain("family");
+				assertThat(responseContent).doesNotContain("maritalStatus");
+				assertEquals(SummaryEnum.COUNT, ourLastSummary);
+			}
+		);
+	}
+
+	@Test
+	public void testSearchSummaryCountAndData() {
+		String url = "/Patient?_pretty=true&_summary=" + SummaryEnum.COUNT.getCode() + "," + SummaryEnum.DATA.getCode();
+		verifyXmlAndJson(
+			url,
+			bundle -> {
+				String responseContent = ourCtx.newXmlParser().encodeResourceToString(bundle);
+				assertThat(responseContent).contains("<total value=\"1\"/>");
+				assertThat(responseContent).contains("entry");
+				assertThat(responseContent).doesNotContain("THE DIV");
+				assertThat(responseContent).contains("family");
+				assertThat(responseContent).contains("maritalStatus");
+			}
+		);
+	}
+
+	@Test
+	public void testSearchSummaryData() {
+		String url = "/Patient?_summary=" + SummaryEnum.DATA.getCode();
+		verifyXmlAndJson(
+			url,
+			bundle -> {
+				String responseContent = ourCtx.newXmlParser().encodeResourceToString(bundle);
+				assertThat(responseContent).contains("<Patient");
+				assertThat(responseContent).doesNotContain("THE DIV");
+				assertThat(responseContent).contains("family");
+				assertThat(responseContent).contains("maritalStatus");
+				assertEquals(SummaryEnum.DATA, ourLastSummary);
+			}
+		);
+
+	}
+
+	@Test
+	public void testSearchSummaryFalse() {
+		String url = "/Patient?_summary=false";
+		verifyXmlAndJson(
+			url,
+			bundle -> {
+				String responseContent = ourCtx.newXmlParser().encodeResourceToString(bundle);
+				assertThat(responseContent).contains("<Patient");
+				assertThat(responseContent).contains("THE DIV");
+				assertThat(responseContent).contains("family");
+				assertThat(responseContent).contains("maritalStatus");
+				assertEquals(SummaryEnum.FALSE, ourLastSummary);
+			}
+		);
+	}
+
+	@Test
+	public void testSearchSummaryText() {
+		String url = "/Patient?_summary=" + SummaryEnum.TEXT.getCode();
+		verifyXmlAndJson(
+			url,
+			bundle -> {
+				String responseContent = ourCtx.newXmlParser().encodeResourceToString(bundle);
+				assertThat(responseContent).contains("<total value=\"1\"/>");
+				assertThat(responseContent).contains("entry");
+				assertThat(responseContent).contains("THE DIV");
+				assertThat(responseContent).doesNotContain("family");
+				assertThat(responseContent).doesNotContain("maritalStatus");
+				assertEquals(SummaryEnum.TEXT, ourLastSummary);
+			}
+		);
+	}
+
+	@Test
+	public void testSearchSummaryTextWithMandatory() {
+		String url = "/MedicationRequest?_summary=" + SummaryEnum.TEXT.getCode() + "&_pretty=true";
+		verifyXmlAndJson(
+			url,
+			bundle -> {
+				assertEquals(0, bundle.getMeta().getTag().size());
+				String responseContent = ourCtx.newXmlParser().encodeResourceToString(bundle);
+				assertThat(responseContent).contains("<total value=\"1\"/>");
+				assertThat(responseContent).contains("entry");
+				assertThat(responseContent).contains(">TEXT<");
+				assertThat(responseContent).contains("Medication/123");
+				assertThat(responseContent).doesNotContainIgnoringCase("note");
+			}
+		);
+
+	}
+
+	@Test
+	public void testSearchSummaryTextMulti() {
+		String url = "/Patient?_query=multi&_summary=" + SummaryEnum.TEXT.getCode();
+		verifyXmlAndJson(
+			url,
+			bundle -> {
+				String responseContent = ourCtx.newXmlParser().encodeResourceToString(bundle);
+				assertThat(responseContent).contains("<total value=\"1\"/>");
+				assertThat(responseContent).contains("entry");
+				assertThat(responseContent).contains("THE DIV");
+				assertThat(responseContent).doesNotContain("family");
+				assertThat(responseContent).doesNotContain("maritalStatus");
+				assertThat(ourLastSummaryList).containsExactly(SummaryEnum.TEXT);
+			}
+		);
+	}
+
+	@Test
+	public void testSearchSummaryTrue() {
+		String url = "/Patient?_summary=" + SummaryEnum.TRUE.getCode();
+		verifyXmlAndJson(
+			url,
+			bundle -> {
+				String responseContent = ourCtx.newXmlParser().encodeResourceToString(bundle);
+				assertThat(responseContent).contains("<Patient");
+				assertThat(responseContent).doesNotContain("THE DIV");
+				assertThat(responseContent).contains("family");
+				assertThat(responseContent).doesNotContain("maritalStatus");
+				assertEquals(SummaryEnum.TRUE, ourLastSummary);
+			}
+		);
+
+	}
+
+	@Test
+	public void testSearchSummaryWithTextAndOthers() {
+		String url = "/Patient?_summary=text&_summary=data";
+		ourServer.fhirRequest(url)
+				.get()
+				.assertStatus(400)
+				.assertBodyContains("Can not combine _summary=text with other values for _summary");
+	}
+
+	private void verifyXmlAndJson(String thePath, Consumer<Bundle> theVerifier) {
+		verifyXmlAndJson(thePath, Bundle.class, theVerifier);
+	}
+
+	private <T extends IBaseResource> void verifyXmlAndJson(String thePath, Class<T> theType, Consumer<T> theVerifier) {
+		EncodingEnum encodingEnum;
+
+		encodingEnum = EncodingEnum.JSON;
+		T response = ourServer.fhirRequest(thePath + "&_pretty=true&_format=" + encodingEnum.getFormatContentType())
+				.get()
+				.assertMimeType(encodingEnum.getResourceContentTypeNonLegacy())
+				.getBodyAsResource(theType);
+		theVerifier.accept(response);
+
+		encodingEnum = EncodingEnum.XML;
+		response = ourServer.fhirRequest(thePath + "&_pretty=true&_format=" + encodingEnum.getFormatContentType())
+				.get()
+				.assertMimeType(encodingEnum.getResourceContentTypeNonLegacy())
+				.getBodyAsResource(theType);
+		theVerifier.accept(response);
+	}
+
+	public static class DummyMedicationRequestProvider implements IResourceProvider {
+
+		@Override
+		public Class<? extends IBaseResource> getResourceType() {
+			return MedicationRequest.class;
+		}
+
+		@Read
+		public MedicationRequest read(@IdParam IdType theId) {
+			MedicationRequest retVal = new MedicationRequest();
+			retVal.getText().setDivAsString("<div>TEXT</div>");
+			retVal.addNote().setText("NOTE");
+			retVal.setMedication(new Reference("Medication/123"));
+			retVal.setId(theId);
+			return retVal;
+		}
+
+		@Search
+		public List<MedicationRequest> read() {
+			return Collections.singletonList(read(new IdType("999")));
+		}
+
+	}
+
+	public static class DummyPatientResourceProvider implements IResourceProvider {
+
+		@Override
+		public Class<Patient> getResourceType() {
+			return Patient.class;
+		}
+
+		@Read
+		public Patient read(@IdParam IdType theId, SummaryEnum theSummary) {
+			ourLastSummary = theSummary;
+			Patient patient = new Patient();
+			patient.setId("Patient/1/_history/1");
+			patient.getText().setDivAsString("<div>THE DIV</div>");
+			patient.addName().setFamily("FAMILY");
+			patient.getMaritalStatus().addCoding().setCode("D");
+			return patient;
+		}
+
+		@Search(queryName = "multi")
+		public Patient search(List<SummaryEnum> theSummary) {
+			ourLastSummaryList = theSummary;
+			Patient patient = new Patient();
+			patient.setId("Patient/1/_history/1");
+			patient.getText().setDivAsString("<div>THE DIV</div>");
+			patient.addName().setFamily("FAMILY");
+			patient.getMaritalStatus().addCoding().setCode("D");
+			return patient;
+		}
+
+		@Search()
+		public Patient search(SummaryEnum theSummary) {
+			ourLastSummary = theSummary;
+			Patient patient = new Patient();
+			patient.setId("Patient/1/_history/1");
+			patient.getText().setDivAsString("<div>THE DIV</div>");
+			patient.addName().setFamily("FAMILY");
+			patient.getMaritalStatus().addCoding().setCode("D");
+			return patient;
+		}
+
+	}
+
+	@AfterAll
+	public static void afterClassClearContext() throws Exception {
+		TestUtil.randomizeLocaleAndTimezone();
+	}
+
+}

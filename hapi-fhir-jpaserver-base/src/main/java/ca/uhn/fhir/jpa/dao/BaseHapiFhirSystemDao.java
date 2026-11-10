@@ -1,19 +1,15 @@
-package ca.uhn.fhir.jpa.dao;
-
-import static org.apache.commons.lang3.StringUtils.isBlank;
-
 /*
  * #%L
  * HAPI FHIR JPA Server
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,278 +17,386 @@ import static org.apache.commons.lang3.StringUtils.isBlank;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.jpa.dao;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.interceptor.api.IInterceptorBroadcaster;
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.api.config.JpaStorageSettings;
+import ca.uhn.fhir.jpa.api.dao.DaoRegistrationService;
+import ca.uhn.fhir.jpa.api.dao.DaoRegistry;
+import ca.uhn.fhir.jpa.api.dao.IFhirSystemDao;
+import ca.uhn.fhir.jpa.api.model.ExpungeOptions;
+import ca.uhn.fhir.jpa.api.model.ExpungeOutcome;
+import ca.uhn.fhir.jpa.dao.data.IResourceTableDao;
+import ca.uhn.fhir.jpa.dao.expunge.ExpungeService;
+import ca.uhn.fhir.jpa.dao.tx.HapiTransactionService;
+import ca.uhn.fhir.jpa.dao.tx.IHapiTransactionService;
+import ca.uhn.fhir.jpa.model.dao.JpaPid;
+import ca.uhn.fhir.jpa.model.entity.BaseHasResource;
+import ca.uhn.fhir.jpa.model.entity.ResourceHistoryTable;
+import ca.uhn.fhir.jpa.model.entity.ResourceTable;
+import ca.uhn.fhir.jpa.partition.IRequestPartitionHelperSvc;
+import ca.uhn.fhir.jpa.search.PersistedJpaHistoryBundleProviderFactory;
+import ca.uhn.fhir.jpa.search.SearchConstants;
+import ca.uhn.fhir.jpa.util.QueryChunker;
+import ca.uhn.fhir.jpa.util.ResourceCountCache;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.api.server.storage.IResourcePersistentId;
+import ca.uhn.fhir.rest.server.exceptions.MethodNotAllowedException;
+import ca.uhn.fhir.util.StopWatch;
+import com.google.common.annotations.VisibleForTesting;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import jakarta.annotation.PostConstruct;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
+import jakarta.persistence.PersistenceContextType;
+import jakarta.persistence.Query;
+import jakarta.persistence.TypedQuery;
+import org.hl7.fhir.instance.model.api.IBaseBundle;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
 
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-import javax.persistence.Query;
-import javax.persistence.Tuple;
-import javax.persistence.TypedQuery;
-import javax.persistence.criteria.CriteriaBuilder;
-import javax.persistence.criteria.CriteriaQuery;
-import javax.persistence.criteria.Root;
-
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.TransactionStatus;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionCallback;
-import org.springframework.transaction.support.TransactionTemplate;
-
-import ca.uhn.fhir.jpa.dao.data.IForcedIdDao;
-import ca.uhn.fhir.jpa.dao.data.ITermConceptDao;
-import ca.uhn.fhir.jpa.entity.ForcedId;
-import ca.uhn.fhir.jpa.entity.ResourceTable;
-import ca.uhn.fhir.jpa.util.ReindexFailureException;
-import ca.uhn.fhir.jpa.util.StopWatch;
-import ca.uhn.fhir.model.api.TagList;
-import ca.uhn.fhir.model.primitive.IdDt;
-import ca.uhn.fhir.model.primitive.InstantDt;
-import ca.uhn.fhir.rest.api.RestOperationTypeEnum;
-import ca.uhn.fhir.rest.method.RequestDetails;
-import ca.uhn.fhir.rest.server.IBundleProvider;
-import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException;
-import ca.uhn.fhir.rest.server.interceptor.IServerInterceptor.ActionRequestDetails;
-import ca.uhn.fhir.rest.server.servlet.ServletRequestDetails;
-
-public abstract class BaseHapiFhirSystemDao<T, MT> extends BaseHapiFhirDao<IBaseResource> implements IFhirSystemDao<T, MT> {
-
+public abstract class BaseHapiFhirSystemDao<T extends IBaseBundle, MT> extends BaseStorageDao
+		implements IFhirSystemDao<T, MT> {
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BaseHapiFhirSystemDao.class);
 
-	@Autowired
-	private PlatformTransactionManager myTxManager;
+	public ResourceCountCache myResourceCountsCache;
+
+	@PersistenceContext(type = PersistenceContextType.TRANSACTION)
+	protected EntityManager myEntityManager;
 
 	@Autowired
-	private IForcedIdDao myForcedIdDao;
+	private TransactionProcessor myTransactionProcessor;
 
 	@Autowired
-	private ITermConceptDao myTermConceptDao;
+	private ApplicationContext myApplicationContext;
 
-	@Transactional(propagation = Propagation.REQUIRED)
-	@Override
-	public void deleteAllTagsOnServer(RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails);
-		notifyInterceptors(RestOperationTypeEnum.DELETE_TAGS, requestDetails);
+	@Autowired
+	private ExpungeService myExpungeService;
 
-		myEntityManager.createQuery("DELETE from ResourceTag t").executeUpdate();
+	@Autowired
+	private IResourceTableDao myResourceTableDao;
+
+	@Autowired
+	private PersistedJpaHistoryBundleProviderFactory myPersistedJpaHistoryBundleProviderFactory;
+
+	@Autowired
+	private IInterceptorBroadcaster myInterceptorBroadcaster;
+
+	@Autowired
+	private IRequestPartitionHelperSvc myRequestPartitionHelperService;
+
+	@Autowired
+	private IHapiTransactionService myTransactionService;
+
+	@Autowired
+	private DaoRegistry myDaoRegistry;
+
+	@Autowired
+	private DaoRegistrationService myDaoRegistrationService;
+
+	@PostConstruct
+	void start() {
+		myDaoRegistrationService.registerSystemDao(this);
 	}
 
-	private int doPerformReindexingPass(final Integer theCount) {
-		TransactionTemplate txTemplate = new TransactionTemplate(myTxManager);
-		txTemplate.setPropagationBehavior(TransactionTemplate.PROPAGATION_REQUIRED);
-		int retVal = doPerformReindexingPassForResources(theCount, txTemplate);
-		return retVal;
-	}
-
-	private int doPerformReindexingPassForResources(final Integer theCount, TransactionTemplate txTemplate) {
-		return txTemplate.execute(new TransactionCallback<Integer>() {
-			@SuppressWarnings("unchecked")
-			@Override
-			public Integer doInTransaction(TransactionStatus theStatus) {
-				TypedQuery<ResourceTable> q = myEntityManager.createQuery("SELECT t FROM " + ResourceTable.class.getSimpleName() + " t WHERE t.myIndexStatus IS null", ResourceTable.class);
-
-				int maxResult = 500;
-				if (theCount != null) {
-					maxResult = Math.min(theCount, 2000);
-				}
-
-				q.setMaxResults(maxResult);
-				List<ResourceTable> resources = q.getResultList();
-				if (resources.isEmpty()) {
-					return 0;
-				}
-
-				ourLog.info("Indexing {} resources", resources.size());
-
-				int count = 0;
-				long start = System.currentTimeMillis();
-
-				for (ResourceTable resourceTable : resources) {
-					try {
-						/*
-						 * This part is because from HAPI 1.5 - 1.6 we changed the format of forced ID to be "type/id" instead of just "id"
-						 */
-						ForcedId forcedId = resourceTable.getForcedId();
-						if (forcedId != null) {
-							if (isBlank(forcedId.getResourceType())) {
-								ourLog.info("Updating resource {} forcedId type to {}", forcedId.getForcedId(), resourceTable.getResourceType());
-								forcedId.setResourceType(resourceTable.getResourceType());
-								myForcedIdDao.save(forcedId);
-							}
-						}
-
-						final IBaseResource resource = toResource(resourceTable, false);
-
-						@SuppressWarnings("rawtypes")
-						final IFhirResourceDao dao = getDao(resource.getClass());
-
-						dao.reindex(resource, resourceTable);
-					} catch (Exception e) {
-						ourLog.error("Failed to index resource {}: {}", new Object[] { resourceTable.getIdDt(), e.toString(), e });
-						throw new ReindexFailureException(resourceTable.getId());
-					}
-					count++;
-				}
-
-				long delay = System.currentTimeMillis() - start;
-				long avg = (delay / resources.size());
-				ourLog.info("Indexed {} / {} resources in {}ms - Avg {}ms / resource", new Object[] { count, resources.size(), delay, avg });
-
-				return resources.size();
-			}
-		});
+	@VisibleForTesting
+	public void setTransactionProcessorForUnitTest(TransactionProcessor theTransactionProcessor) {
+		myTransactionProcessor = theTransactionProcessor;
 	}
 
 	@Override
-	public TagList getAllTags(RequestDetails theRequestDetails) {
-		// Notify interceptors
-		ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails);
-		notifyInterceptors(RestOperationTypeEnum.GET_TAGS, requestDetails);
+	public ExpungeOutcome expunge(ExpungeOptions theExpungeOptions, RequestDetails theRequestDetails) {
+		HapiTransactionService.noTransactionAllowed();
+		validateExpungeEnabled(theExpungeOptions);
+		return myExpungeService.expunge(null, null, theExpungeOptions, theRequestDetails);
+	}
 
-		StopWatch w = new StopWatch();
-		TagList retVal = super.getTags(null, null);
-		ourLog.info("Processed getAllTags in {}ms", w.getMillisAndRestart());
-		return retVal;
+	private void validateExpungeEnabled(ExpungeOptions theExpungeOptions) {
+		if (!getStorageSettings().isExpungeEnabled()) {
+			throw new MethodNotAllowedException(Msg.code(2080) + "$expunge is not enabled on this server");
+		}
+
+		if (theExpungeOptions.isExpungeEverything() && !getStorageSettings().isAllowMultipleDelete()) {
+			throw new MethodNotAllowedException(Msg.code(2081) + "Multiple delete is not enabled on this server");
+		}
 	}
 
 	@Override
 	public Map<String, Long> getResourceCounts() {
-		CriteriaBuilder builder = myEntityManager.getCriteriaBuilder();
-		CriteriaQuery<Tuple> cq = builder.createTupleQuery();
-		Root<?> from = cq.from(ResourceTable.class);
-		cq.multiselect(from.get("myResourceType").as(String.class), builder.count(from.get("myResourceType")).as(Long.class));
-		cq.groupBy(from.get("myResourceType"));
+		return myTransactionService.withSystemRequestOnDefaultPartition().execute(() -> {
+			Map<String, Long> retVal = new HashMap<>();
 
-		TypedQuery<Tuple> q = myEntityManager.createQuery(cq);
+			List<Map<?, ?>> counts = myResourceTableDao.getResourceCounts();
+			for (Map<?, ?> next : counts) {
+				retVal.put(
+						next.get("type").toString(),
+						Long.parseLong(next.get("count").toString()));
+			}
 
-		Map<String, Long> retVal = new HashMap<String, Long>();
-		for (Tuple next : q.getResultList()) {
-			String resourceName = next.get(0, String.class);
-			Long count = next.get(1, Long.class);
-			retVal.put(resourceName, count);
-		}
-		return retVal;
+			return retVal;
+		});
 	}
 
-	protected boolean hasValue(InstantDt theInstantDt) {
-		return theInstantDt != null && theInstantDt.isEmpty() == false;
+	@Nullable
+	@Override
+	public Map<String, Long> getResourceCountsFromCache() {
+		if (myResourceCountsCache == null) {
+			// Lazy load this to avoid a circular dependency
+			myResourceCountsCache = myApplicationContext.getBean("myResourceCountsCache", ResourceCountCache.class);
+		}
+		return myResourceCountsCache.get();
 	}
 
 	@Override
-	public IBundleProvider history(Date theSince, Date theUntil, RequestDetails theRequestDetails) {
-		if (theRequestDetails != null) {
-			// Notify interceptors
-			ActionRequestDetails requestDetails = new ActionRequestDetails(theRequestDetails);
-			notifyInterceptors(RestOperationTypeEnum.HISTORY_SYSTEM, requestDetails);
-		}
-		
+	public IBundleProvider history(Date theSince, Date theUntil, Integer theOffset, RequestDetails theRequestDetails) {
 		StopWatch w = new StopWatch();
-		IBundleProvider retVal = super.history(null, null, theSince, theUntil);
+		RequestPartitionId requestPartitionId =
+				myRequestPartitionHelperService.determineReadPartitionForRequestForHistory(
+						theRequestDetails, null, null);
+		IBundleProvider retVal = myTransactionService
+				.withRequest(theRequestDetails)
+				.withRequestPartitionId(requestPartitionId)
+				.execute(() -> myPersistedJpaHistoryBundleProviderFactory.history(
+						theRequestDetails, null, null, theSince, theUntil, theOffset, requestPartitionId));
 		ourLog.info("Processed global history in {}ms", w.getMillisAndRestart());
 		return retVal;
 	}
 
-	protected ResourceTable loadFirstEntityFromCandidateMatches(Set<Long> candidateMatches) {
-		return myEntityManager.find(ResourceTable.class, candidateMatches.iterator().next());
-	}
-
-	@Transactional()
 	@Override
-	public int markAllResourcesForReindexing() {
-		int retVal = myEntityManager.createQuery("UPDATE " + ResourceTable.class.getSimpleName() + " t SET t.myIndexStatus = null").executeUpdate();
-		retVal += myTermConceptDao.markAllForReindexing();
-		return retVal;
+	public T transaction(RequestDetails theRequestDetails, T theRequest) {
+		HapiTransactionService.noTransactionAllowed();
+		return myTransactionProcessor.transaction(theRequestDetails, theRequest, false);
 	}
 
-	private void markResourceAsIndexingFailed(final long theId) {
-		TransactionTemplate txTemplate = new TransactionTemplate(myTxManager);
-		txTemplate.setPropagationBehavior(TransactionTemplate.PROPAGATION_REQUIRES_NEW);
-		txTemplate.execute(new TransactionCallback<Void>() {
-			@Override
-			public Void doInTransaction(TransactionStatus theStatus) {
-				ourLog.info("Marking resource with PID {} as indexing_failed", new Object[] { theId });
-				Query q = myEntityManager.createQuery("UPDATE ResourceTable t SET t.myIndexStatus = :status WHERE t.myId = :id");
-				q.setParameter("status", INDEX_STATUS_INDEXING_FAILED);
-				q.setParameter("id", theId);
-				q.executeUpdate();
-				
-				q = myEntityManager.createQuery("DELETE FROM ResourceTag t WHERE t.myResourceId = :id");
-				q.setParameter("id", theId);
-				q.executeUpdate();
+	@Override
+	public T transactionNested(RequestDetails theRequestDetails, T theRequest) {
+		HapiTransactionService.requireTransaction();
+		return myTransactionProcessor.transaction(theRequestDetails, theRequest, true);
+	}
 
-				q = myEntityManager.createQuery("DELETE FROM ResourceIndexedSearchParamCoords t WHERE t.myResourcePid = :id");
-				q.setParameter("id", theId);
-				q.executeUpdate();
+	/**
+	 * Prefetch entities into the Hibernate session.
+	 *
+	 * When processing several resources (e.g. transaction bundle, $reindex chunk, etc.)
+	 * it would be slow to fetch each piece of a resource (e.g. all token index rows)
+	 * one resource at a time.
+	 * Instead, we fetch all the linked resources for the entire batch and populate the Hibernate Session.
+	 *
+	 * @param theResolvedIds the pids
+	 * @param thePreFetchIndexes Should resource indexes be loaded
+	 */
+	@SuppressWarnings("rawtypes")
+	@Override
+	public <P extends IResourcePersistentId> void preFetchResources(
+			List<P> theResolvedIds, boolean thePreFetchIndexes) {
+		HapiTransactionService.requireTransaction();
+		List<JpaPid> pids = theResolvedIds.stream().map(t -> ((JpaPid) t)).collect(Collectors.toList());
 
-				q = myEntityManager.createQuery("DELETE FROM ResourceIndexedSearchParamDate t WHERE t.myResourcePid = :id");
-				q.setParameter("id", theId);
-				q.executeUpdate();
+		QueryChunker.chunk(pids, idChunk -> {
 
-				q = myEntityManager.createQuery("DELETE FROM ResourceIndexedSearchParamNumber t WHERE t.myResourcePid = :id");
-				q.setParameter("id", theId);
-				q.executeUpdate();
+			/*
+			 * Pre-fetch the resources we're touching in this transaction in mass - this reduced the
+			 * number of database round trips.
+			 *
+			 * The thresholds below are kind of arbitrary. It's not
+			 * actually guaranteed that this pre-fetching will help (e.g. if a Bundle contains
+			 * a bundle of NOP conditional creates for example, the pre-fetching is actually loading
+			 * more data than would otherwise be loaded).
+			 *
+			 * However, for realistic average workloads, this should reduce the number of round trips.
+			 */
+			if (!idChunk.isEmpty()) {
+				List<ResourceTable> entityChunk = null;
 
-				q = myEntityManager.createQuery("DELETE FROM ResourceIndexedSearchParamQuantity t WHERE t.myResourcePid = :id");
-				q.setParameter("id", theId);
-				q.executeUpdate();
+				/*
+				 * Unless we're in Mass Ingestion mode, we will pre-fetch the current
+				 * saved resource text in HFJ_RES_VER (ResourceHistoryTable). If we're
+				 * in Mass Ingestion Mode, we don't need to do that because every update
+				 * will generate a new version anyway so the system never needs to know
+				 * the current contents.
+				 */
+				if (!myStorageSettings.isMassIngestionMode()) {
+					entityChunk = prefetchResourceTableAndHistory(idChunk);
+				}
 
-				q = myEntityManager.createQuery("DELETE FROM ResourceIndexedSearchParamString t WHERE t.myResourcePid = :id");
-				q.setParameter("id", theId);
-				q.executeUpdate();
+				if (thePreFetchIndexes) {
 
-				q = myEntityManager.createQuery("DELETE FROM ResourceIndexedSearchParamToken t WHERE t.myResourcePid = :id");
-				q.setParameter("id", theId);
-				q.executeUpdate();
+					/*
+					 * If we're in mass ingestion mode, then we still need to load the resource
+					 * entries in HFJ_RESOURCE (ResourceTable). We combine that with the search
+					 * for tokens (since token is the most likely kind of index to be populated
+					 * for any arbitrary resource type).
+					 *
+					 * For all other index types, we only load indexes if at least one
+					 * HFJ_RESOURCE row indicates that a resource we care about actually has
+					 * index rows of the given type.
+					 */
+					if (entityChunk == null) {
+						String jqlQuery =
+								"SELECT r FROM ResourceTable r LEFT JOIN FETCH r.myParamsToken WHERE r.myPid IN ( :IDS )";
+						TypedQuery<ResourceTable> query = myEntityManager.createQuery(jqlQuery, ResourceTable.class);
+						query.setParameter("IDS", idChunk);
+						entityChunk = query.getResultList();
+					} else {
+						prefetchByField("token", "myParamsToken", ResourceTable::isParamsTokenPopulated, entityChunk);
+					}
 
-				q = myEntityManager.createQuery("DELETE FROM ResourceIndexedSearchParamUri t WHERE t.myResourcePid = :id");
-				q.setParameter("id", theId);
-				q.executeUpdate();
+					prefetchByField("string", "myParamsString", ResourceTable::isParamsStringPopulated, entityChunk);
+					prefetchByField("date", "myParamsDate", ResourceTable::isParamsDatePopulated, entityChunk);
+					prefetchByField(
+							"quantity", "myParamsQuantity", ResourceTable::isParamsQuantityPopulated, entityChunk);
 
-				q = myEntityManager.createQuery("DELETE FROM ResourceLink t WHERE t.mySourceResourcePid = :id");
-				q.setParameter("id", theId);
-				q.executeUpdate();
+					prefetchByJoinClause(
+							"resourceLinks",
+							"LEFT JOIN FETCH r.myResourceLinks l",
+							ResourceTable::isHasLinks,
+							entityChunk);
 
-				q = myEntityManager.createQuery("DELETE FROM ResourceLink t WHERE t.myTargetResourcePid = :id");
-				q.setParameter("id", theId);
-				q.executeUpdate();
+					prefetchByJoinClause(
+							"tags",
+							// fetch the TagResources and the actual TagDefinitions
+							"LEFT JOIN FETCH r.myTags t LEFT JOIN FETCH t.myTag",
+							BaseHasResource::isHasTags,
+							entityChunk);
 
-				return null;
+					prefetchByField(
+							"comboStringUnique",
+							"myParamsComboStringUnique",
+							ResourceTable::isParamsComboStringUniquePresent,
+							entityChunk);
+					prefetchByField(
+							"comboTokenNonUnique",
+							"myParamsComboTokensNonUnique",
+							ResourceTable::isParamsComboTokensNonUniquePresent,
+							entityChunk);
+
+					if (myStorageSettings.getIndexMissingFields() == JpaStorageSettings.IndexEnabledEnum.ENABLED) {
+						prefetchByField("searchParamPresence", "mySearchParamPresents", r -> true, entityChunk);
+					}
+				}
 			}
 		});
 	}
 
+	@Nonnull
+	private List<ResourceTable> prefetchResourceTableAndHistory(List<JpaPid> idChunk) {
+		assert idChunk.size() < SearchConstants.MAX_PAGE_SIZE : "assume pre-chunked";
+
+		Query query = myEntityManager.createQuery("select r, h "
+				+ " FROM ResourceTable r "
+				+ " LEFT JOIN fetch ResourceHistoryTable h "
+				+ "      on r.myVersion = h.myResourceVersion and r = h.myResourceTable "
+				+ " WHERE r.myPid IN ( :IDS ) ");
+		query.setParameter("IDS", idChunk);
+
+		@SuppressWarnings("unchecked")
+		Stream<Object[]> queryResultStream = query.getResultStream();
+		return queryResultStream
+				.map(nextPair -> {
+					// Store the matching ResourceHistoryTable in the transient slot on ResourceTable
+					ResourceTable result = (ResourceTable) nextPair[0];
+					ResourceHistoryTable currentVersion = (ResourceHistoryTable) nextPair[1];
+					result.setCurrentVersionEntity(currentVersion);
+					return result;
+				})
+				.collect(Collectors.toList());
+	}
+
+	/**
+	 * Prefetch a join field for the active subset of some ResourceTable entities.
+	 * Convenience wrapper around prefetchByJoinClause() for simple fields.
+	 *
+	 * @param theDescription             for logging
+	 * @param theJpaFieldName            the join field from ResourceTable
+	 * @param theEntityPredicate         select which ResourceTable entities need this join
+	 * @param theEntities                the ResourceTable entities to consider
+	 */
+	private void prefetchByField(
+			String theDescription,
+			String theJpaFieldName,
+			Predicate<ResourceTable> theEntityPredicate,
+			List<ResourceTable> theEntities) {
+
+		String joinClause = "LEFT JOIN FETCH r." + theJpaFieldName;
+
+		prefetchByJoinClause(theDescription, joinClause, theEntityPredicate, theEntities);
+	}
+
+	/**
+	 * Prefetch a join field for the active subset of some ResourceTable entities.
+	 *
+	 * @param theDescription             for logging
+	 * @param theJoinClause              the JPA join expression to add to `ResourceTable r`
+	 * @param theEntityPredicate         selects which entities need this prefetch
+	 * @param theEntities                the ResourceTable entities to consider
+	 */
+	private void prefetchByJoinClause(
+			String theDescription,
+			String theJoinClause,
+			Predicate<ResourceTable> theEntityPredicate,
+			List<ResourceTable> theEntities) {
+
+		// Which entities need this prefetch?
+		List<JpaPid> idSubset = theEntities.stream()
+				.filter(theEntityPredicate)
+				.map(ResourceTable::getId)
+				.collect(Collectors.toList());
+
+		if (idSubset.isEmpty()) {
+			// nothing to do
+			return;
+		}
+
+		String jqlQuery = "FROM ResourceTable r " + theJoinClause + " WHERE r.myPid IN ( :IDS )";
+
+		TypedQuery<ResourceTable> query = myEntityManager.createQuery(jqlQuery, ResourceTable.class);
+		query.setParameter("IDS", idSubset);
+		List<ResourceTable> indexFetchOutcome = query.getResultList();
+
+		ourLog.debug("Pre-fetched {} {} indexes", indexFetchOutcome.size(), theDescription);
+	}
+
+	@Nullable
 	@Override
-	@Transactional(propagation = Propagation.NOT_SUPPORTED)
-	public int performReindexingPass(final Integer theCount) {
-		try {
-			return doPerformReindexingPass(theCount);
-		} catch (ReindexFailureException e) {
-			ourLog.warn("Reindexing failed for resource {}", e.getResourceId());
-			markResourceAsIndexingFailed(e.getResourceId());
-			return -1;
-		}
+	protected String getResourceName() {
+		return null;
 	}
 
-	public void setTxManager(PlatformTransactionManager theTxManager) {
-		myTxManager = theTxManager;
+	@Override
+	protected IInterceptorBroadcaster getInterceptorBroadcaster() {
+		return myInterceptorBroadcaster;
 	}
 
-	protected ResourceTable tryToLoadEntity(IdDt nextId) {
-		ResourceTable entity;
-		try {
-			Long pid = translateForcedIdToPid(nextId.getResourceType(), nextId.getIdPart());
-			entity = myEntityManager.find(ResourceTable.class, pid);
-		} catch (ResourceNotFoundException e) {
-			entity = null;
-		}
-		return entity;
+	@VisibleForTesting
+	public void setInterceptorBroadcasterForUnitTest(IInterceptorBroadcaster theInterceptorBroadcaster) {
+		myInterceptorBroadcaster = theInterceptorBroadcaster;
 	}
 
+	@Override
+	protected JpaStorageSettings getStorageSettings() {
+		return myStorageSettings;
+	}
 
+	@Override
+	public FhirContext getContext() {
+		return myFhirContext;
+	}
+
+	@VisibleForTesting
+	public void setStorageSettingsForUnitTest(JpaStorageSettings theStorageSettings) {
+		myStorageSettings = theStorageSettings;
+	}
 }

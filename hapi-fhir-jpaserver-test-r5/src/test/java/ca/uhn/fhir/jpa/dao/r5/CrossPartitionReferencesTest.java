@@ -1,0 +1,427 @@
+package ca.uhn.fhir.jpa.dao.r5;
+
+import ca.uhn.fhir.interceptor.api.Hook;
+import ca.uhn.fhir.interceptor.api.Interceptor;
+import ca.uhn.fhir.interceptor.api.Pointcut;
+import ca.uhn.fhir.interceptor.model.ReadPartitionIdRequestDetails;
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.jpa.dao.tx.IHapiTransactionService;
+import ca.uhn.fhir.jpa.model.config.PartitionSettings;
+import ca.uhn.fhir.jpa.model.cross.IResourceLookup;
+import ca.uhn.fhir.jpa.model.dao.JpaPid;
+import ca.uhn.fhir.jpa.model.entity.ResourceTable;
+import ca.uhn.fhir.jpa.partition.IRequestPartitionHelperSvc;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
+import ca.uhn.fhir.jpa.searchparam.extractor.CrossPartitionReferenceDetails;
+import ca.uhn.fhir.jpa.searchparam.extractor.IResourceLinkResolver;
+import ca.uhn.fhir.jpa.util.JpaHapiTransactionService;
+import ca.uhn.fhir.jpa.util.MemoryCacheService;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.param.HasParam;
+import ca.uhn.fhir.rest.param.ReferenceParam;
+import ca.uhn.fhir.rest.param.TokenParam;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import jakarta.annotation.Nonnull;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r5.model.Enumerations;
+import org.hl7.fhir.r5.model.Observation;
+import org.hl7.fhir.r5.model.Patient;
+import org.hl7.fhir.r5.model.Reference;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
+import org.mockito.Mock;
+
+import static org.mockito.Mockito.never;
+
+import static org.mockito.Mockito.reset;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.annotation.Propagation;
+
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+public class CrossPartitionReferencesTest extends BaseJpaR5Test {
+
+	public static final RequestPartitionId PARTITION_PATIENT = RequestPartitionId.fromPartitionId(1);
+	public static final RequestPartitionId PARTITION_OBSERVATION = RequestPartitionId.fromPartitionId(2);
+
+	@Autowired
+	private JpaHapiTransactionService myTransactionSvc;
+	@Autowired
+	private IRequestPartitionHelperSvc myPartitionHelperSvc;
+	@Autowired
+	private IHapiTransactionService myTransactionService;
+	@Autowired
+	private IResourceLinkResolver myResourceLinkResolver;
+	@MockitoSpyBean
+	protected MemoryCacheService myMemoryCacheService;
+	@Mock
+	private ICrossPartitionReferenceDetectedHandler myCrossPartitionReferencesDetectedInterceptor;
+	@Captor
+	private ArgumentCaptor<CrossPartitionReferenceDetails> myCrossPartitionReferenceDetailsCaptor;
+	@Captor
+	private ArgumentCaptor<JpaPid> myMatchUrlCacheValueCaptor;
+
+	@Override
+	@BeforeEach
+	public void before() throws Exception {
+		super.before();
+
+		myPartitionSettings.setPartitioningEnabled(true);
+		myPartitionSettings.setAllowReferencesAcrossPartitions(PartitionSettings.CrossPartitionReferenceMode.ALLOWED_UNQUALIFIED);
+		myPartitionSettings.setUnnamedPartitionMode(true);
+		myPartitionSettings.setAlwaysOpenNewTransactionForDifferentPartition(true);
+
+		myInterceptorRegistry.registerInterceptor(new MyPartitionSelectorInterceptor());
+		myInterceptorRegistry.registerInterceptor(myCrossPartitionReferencesDetectedInterceptor);
+
+		myTransactionSvc.setTransactionPropagationWhenChangingPartitions(Propagation.REQUIRES_NEW);
+		initResourceTypeCacheFromConfig();
+	}
+
+	@AfterEach
+	public void after() {
+		myPartitionSettings.setPartitioningEnabled(new PartitionSettings().isPartitioningEnabled());
+		myPartitionSettings.setAllowReferencesAcrossPartitions(new PartitionSettings().getAllowReferencesAcrossPartitions());
+		myPartitionSettings.setUnnamedPartitionMode(new PartitionSettings().isUnnamedPartitionMode());
+		myPartitionSettings.setAlwaysOpenNewTransactionForDifferentPartition(new PartitionSettings().isAlwaysOpenNewTransactionForDifferentPartition());
+
+		myInterceptorRegistry.unregisterInterceptorsIf(t -> t instanceof MyPartitionSelectorInterceptor);
+		myInterceptorRegistry.unregisterInterceptorsIf(t -> t instanceof ICrossPartitionReferenceDetectedHandler);
+
+		myTransactionSvc.setTransactionPropagationWhenChangingPartitions(Propagation.REQUIRED);
+	}
+
+	@Test
+	public void testSamePartitionReference_Create() {
+		// Setup
+		Patient p1 = new Patient();
+		p1.setActive(true);
+		IIdType patient1Id = myPatientDao.create(p1, mySrd).getId().toUnqualifiedVersionless();
+		initializeCrossReferencesInterceptor();
+		logAllResources();
+
+		// Test
+		myCaptureQueriesListener.clear();
+		Patient p2 = new Patient();
+		p2.setActive(true);
+		p2.addLink().setOther(new Reference(patient1Id));
+		IIdType patient2Id = myPatientDao.create(p2, mySrd).getId().toUnqualifiedVersionless();
+
+		// Verify
+		assertEquals(1, myCaptureQueriesListener.countCommits());
+		assertEquals(0, myCaptureQueriesListener.countRollbacks());
+
+		myCaptureQueriesListener.clear();
+		SearchParameterMap params = SearchParameterMap
+			.newSynchronous(Constants.PARAM_ID, new TokenParam(patient2Id.getValue()))
+			.addInclude(Patient.INCLUDE_LINK);
+		IBundleProvider search = myPatientDao.search(params, mySrd);
+		List<String> values = toUnqualifiedVersionlessIdValues(search);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(values).containsExactly(patient2Id.getValue(), patient1Id.getValue());
+		assertThat(search.getAllResources()).hasSize(2);
+		search.getAllResources().forEach(p -> assertTrue(((Patient) p).getActive()));
+	}
+
+	@Test
+	public void testSamePartitionReference_SearchWithInclude() {
+		// Setup
+		Patient p1 = new Patient();
+		p1.setActive(true);
+		IIdType patient1Id = myPatientDao.create(p1, mySrd).getId().toUnqualifiedVersionless();
+
+		initializeCrossReferencesInterceptor();
+
+		myCaptureQueriesListener.clear();
+		Patient p2 = new Patient();
+		p2.setActive(true);
+		p2.addLink().setOther(new Reference(patient1Id));
+		IIdType patient2Id = myPatientDao.create(p2, mySrd).getId().toUnqualifiedVersionless();
+
+		// Test
+		SearchParameterMap params = SearchParameterMap
+			.newSynchronous(Constants.PARAM_ID, new TokenParam(patient2Id.getValue()))
+			.addInclude(Patient.INCLUDE_LINK);
+		IBundleProvider search = myPatientDao.search(params, mySrd);
+
+		// Verify
+		assertThat(toUnqualifiedVersionlessIdValues(search)).containsExactly(patient2Id.getValue(), patient1Id.getValue());
+		assertThat(search.getAllResources()).hasSize(2);
+		search.getAllResources().forEach(p -> assertTrue(((Patient) p).getActive()));
+	}
+
+	@Test
+	public void testCrossPartitionReference_Create() {
+
+		// Setup
+		Patient p = new Patient();
+		p.setActive(true);
+		IIdType patientId = myPatientDao.create(p, mySrd).getId().toUnqualifiedVersionless();
+		ourLog.info("CrossPartitionReference Patient ID: {}", patientId);
+		runInTransaction(() -> {
+			ResourceTable resourceTable = myResourceTableDao.findById(JpaPid.fromId(patientId.getIdPartAsLong())).orElseThrow();
+			assertEquals(1, resourceTable.getPartitionId().getPartitionId());
+		});
+
+		initializeCrossReferencesInterceptor();
+
+		// Test
+
+		Observation o = new Observation();
+		o.setStatus(Enumerations.ObservationStatus.FINAL);
+		o.setSubject(new Reference(patientId));
+		myCaptureQueriesListener.clear();
+		IIdType observationId = myObservationDao.create(o, mySrd).getId().toUnqualifiedVersionless();
+
+		// Verify
+		// 3 commits because we look up the xref twice for Patient/1 (once for the subject, once for patient). This
+		// could probably be better optimized, but it's currrently needed for megascale to work
+		assertEquals(3, myCaptureQueriesListener.countCommits());
+		assertEquals(0, myCaptureQueriesListener.countRollbacks());
+
+		runInTransaction(() -> {
+			ResourceTable resourceTable = myResourceTableDao.findById(JpaPid.fromId(observationId.getIdPartAsLong())).orElseThrow();
+			assertEquals(2, resourceTable.getPartitionId().getPartitionId());
+		});
+
+		verify(myCrossPartitionReferencesDetectedInterceptor, times(2)).handle(eq(Pointcut.JPA_RESOLVE_CROSS_PARTITION_REFERENCE), myCrossPartitionReferenceDetailsCaptor.capture());
+		CrossPartitionReferenceDetails referenceDetails = myCrossPartitionReferenceDetailsCaptor.getValue();
+		assertEquals(PARTITION_OBSERVATION, referenceDetails.getSourceResourcePartitionId());
+		assertEquals(patientId.getValue(), referenceDetails.getPathAndRef().getRef().getReferenceElement().getValue());
+	}
+
+
+
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false})
+	public void testCrossPartitionReference_CreateWithConditionalUrl(boolean theMatchUrlCacheEnabled) {
+		myStorageSettings.setMatchUrlCacheEnabled(theMatchUrlCacheEnabled);
+
+		// Setup
+		Patient p = new Patient();
+		p.setActive(true);
+		IIdType patientId = myPatientDao.create(p, mySrd).getId().toUnqualifiedVersionless();
+		ourLog.info("Patient ID: {}", patientId);
+		runInTransaction(() -> {
+			ResourceTable resourceTable = myResourceTableDao.findById(JpaPid.fromId(patientId.getIdPartAsLong())).orElseThrow();
+			assertEquals(1, resourceTable.getPartitionId().getPartitionId());
+		});
+
+		initializeCrossReferencesInterceptor();
+
+		// Test
+		Observation o = new Observation();
+		o.setStatus(Enumerations.ObservationStatus.FINAL);
+		String thePatientMatchUrl = "Patient/?_id=" + patientId.getIdPart();
+		o.setSubject(new Reference(thePatientMatchUrl));
+		myCaptureQueriesListener.clear();
+		IIdType observationId = myObservationDao.create(o, mySrd).getId().toUnqualifiedVersionless();
+
+		// Verify
+		// 3 queries: Search to resolve PID from Match URL, search to resolve reference, create the resource
+		assertEquals(4, myCaptureQueriesListener.countCommits());
+		assertEquals(0, myCaptureQueriesListener.countRollbacks());
+
+		runInTransaction(() -> {
+			ResourceTable resourceTable = myResourceTableDao.findById(JpaPid.fromId(observationId.getIdPartAsLong())).orElseThrow();
+			assertEquals(2, resourceTable.getPartitionId().getPartitionId());
+		});
+
+		verify(myCrossPartitionReferencesDetectedInterceptor, times(2)).handle(eq(Pointcut.JPA_RESOLVE_CROSS_PARTITION_REFERENCE), myCrossPartitionReferenceDetailsCaptor.capture());
+		CrossPartitionReferenceDetails referenceDetails = myCrossPartitionReferenceDetailsCaptor.getValue();
+		assertEquals(PARTITION_OBSERVATION, referenceDetails.getSourceResourcePartitionId());
+		assertEquals(patientId.getValue(), referenceDetails.getPathAndRef().getRef().getReferenceElement().getValue());
+
+		if (theMatchUrlCacheEnabled) {
+			// Verify that the entry is put into cache
+			verify(myMemoryCacheService).putAfterCommit(eq(MemoryCacheService.CacheEnum.MATCH_URL), eq(thePatientMatchUrl), myMatchUrlCacheValueCaptor.capture());
+			JpaPid actualCachedPid = myMatchUrlCacheValueCaptor.getValue();
+			assertThat(actualCachedPid.getId()).isEqualTo(patientId.getIdPartAsLong());
+			assertThat(actualCachedPid.getPartitionId()).isEqualTo(PARTITION_PATIENT.getFirstPartitionIdOrNull());
+		}
+
+		// Test again (the match URL should be in cache now)
+		myCaptureQueriesListener.clear();
+		reset(myMemoryCacheService);
+		IIdType observationId2 = myObservationDao.create(o, mySrd).getId().toUnqualifiedVersionless();
+
+		// Verify
+		assertEquals(3, myCaptureQueriesListener.countCommits());
+		assertEquals(0, myCaptureQueriesListener.countRollbacks());
+
+		runInTransaction(() -> {
+			ResourceTable resourceTable = myResourceTableDao.findById(JpaPid.fromId(observationId2.getIdPartAsLong())).orElseThrow();
+			assertEquals(2, resourceTable.getPartitionId().getPartitionId());
+		});
+
+		if (theMatchUrlCacheEnabled) {
+			verify(myMemoryCacheService, never()).putAfterCommit(eq(MemoryCacheService.CacheEnum.MATCH_URL), eq(thePatientMatchUrl), any());
+		}
+
+	}
+
+	/**
+	 * When cross-partition references are enabled and a search uses an unqualified reference
+	 * (bare ID without resource type prefix, e.g. subject=123 instead of subject=Patient/123),
+	 * the search should succeed by falling back to the search parameter's declared target types
+	 * to determine potential partitions.
+	 * <p>
+	 * Reproduces GL-8588: calculatePotentialCrossPartitionsForPredicateTarget throws HAPI-2870
+	 * when the reference parameter value lacks a resource type prefix.
+	 */
+	@Test
+	void testCrossPartitionReference_SearchWithUnqualifiedReference_ShouldSucceed() {
+		// Setup - Create a Patient in partition 1
+		Patient p = new Patient();
+		p.setActive(true);
+		IIdType patientId = myPatientDao.create(p, mySrd).getId().toUnqualifiedVersionless();
+
+		initializeCrossReferencesInterceptor();
+
+		// Create an Observation in partition 2 referencing the patient (qualified)
+		Observation o = new Observation();
+		o.setStatus(Enumerations.ObservationStatus.FINAL);
+		o.setSubject(new Reference(patientId));
+		IIdType observationId = myObservationDao.create(o, mySrd).getId().toUnqualifiedVersionless();
+
+		// Test - Search using an unqualified reference (bare ID, no "Patient/" prefix)
+		// This is the bug scenario: subject=<bare-id> instead of subject=Patient/<id>
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("subject", new ReferenceParam(patientId.getIdPart()));
+		IBundleProvider results = myObservationDao.search(params, mySrd);
+
+		// Verify - The search should succeed and find the observation
+		List<String> resultIds = toUnqualifiedVersionlessIdValues(results);
+		assertThat(resultIds).containsExactly(observationId.getValue());
+	}
+
+	/**
+	 * When cross-partition references are enabled and a search uses a qualified reference
+	 * (e.g. subject=Patient/123), the search should succeed normally.
+	 * Adjacent test for GL-8588: verifies the qualified reference path works.
+	 */
+	@Test
+	void testCrossPartitionReference_SearchWithQualifiedReference_ShouldSucceed() {
+		// Setup - Create a Patient in partition 1
+		Patient p = new Patient();
+		p.setActive(true);
+		IIdType patientId = myPatientDao.create(p, mySrd).getId().toUnqualifiedVersionless();
+
+		initializeCrossReferencesInterceptor();
+
+		// Create an Observation in partition 2 referencing the patient (qualified)
+		Observation o = new Observation();
+		o.setStatus(Enumerations.ObservationStatus.FINAL);
+		o.setSubject(new Reference(patientId));
+		IIdType observationId = myObservationDao.create(o, mySrd).getId().toUnqualifiedVersionless();
+
+		// Test - Search using a qualified reference (Patient/<id>)
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("subject", new ReferenceParam("Patient", null, patientId.getIdPart()));
+		IBundleProvider results = myObservationDao.search(params, mySrd);
+
+		// Verify - The search should succeed and find the observation
+		List<String> resultIds = toUnqualifiedVersionlessIdValues(results);
+		assertThat(resultIds).containsExactly(observationId.getValue());
+	}
+
+	/**
+	 * When cross-partition references are NOT enabled, a search with an unqualified reference
+	 * should succeed because calculatePotentialCrossPartitionsForPredicateTarget is never called.
+	 * Adjacent test for GL-8588: verifies the non-cross-partition path is unaffected.
+	 */
+	@Test
+	void testNonCrossPartition_SearchWithUnqualifiedReference_ShouldSucceed() {
+		// Setup - Disable cross-partition references and partitioning for this test
+		// so that both Patient and Observation live in the default partition
+		myPartitionSettings.setPartitioningEnabled(false);
+		myPartitionSettings.setAllowReferencesAcrossPartitions(PartitionSettings.CrossPartitionReferenceMode.NOT_ALLOWED);
+
+		// Create a Patient
+		Patient p = new Patient();
+		p.setActive(true);
+		IIdType patientId = myPatientDao.create(p, mySrd).getId().toUnqualifiedVersionless();
+
+		// Create an Observation referencing the patient
+		Observation o = new Observation();
+		o.setStatus(Enumerations.ObservationStatus.FINAL);
+		o.setSubject(new Reference(patientId));
+		IIdType observationId = myObservationDao.create(o, mySrd).getId().toUnqualifiedVersionless();
+
+		// Test - Search using an unqualified reference (bare ID, no "Patient/" prefix)
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("subject", new ReferenceParam(patientId.getIdPart()));
+		IBundleProvider results = myObservationDao.search(params, mySrd);
+
+		// Verify - The search should succeed and find the observation
+		List<String> resultIds = toUnqualifiedVersionlessIdValues(results);
+		assertThat(resultIds).containsExactly(observationId.getValue());
+	}
+
+	private void initializeCrossReferencesInterceptor() {
+		when(myCrossPartitionReferencesDetectedInterceptor.handle(any(), any())).thenAnswer(t -> {
+			CrossPartitionReferenceDetails theDetails = t.getArgument(1, CrossPartitionReferenceDetails.class);
+			IIdType targetId = theDetails.getPathAndRef().getRef().getReferenceElement();
+			RequestPartitionId referenceTargetPartition = myPartitionHelperSvc.determineReadPartitionForRequestForRead(theDetails.getRequestDetails(), targetId.getResourceType(), targetId);
+
+			return myTransactionService
+				.withRequest(theDetails.getRequestDetails())
+				.withTransactionDetails(theDetails.getTransactionDetails())
+				.withRequestPartitionId(referenceTargetPartition)
+				.execute(() -> myResourceLinkResolver.findTargetResource(theDetails.getSourceResource(), referenceTargetPartition, theDetails.getSourceResourceName(), theDetails.getPathAndRef(), theDetails.getRequestDetails(), theDetails.getTransactionDetails()));
+		});
+	}
+
+	@Interceptor
+	public interface ICrossPartitionReferenceDetectedHandler {
+
+		@Hook(Pointcut.JPA_RESOLVE_CROSS_PARTITION_REFERENCE)
+		IResourceLookup<JpaPid> handle(Pointcut thePointcut, CrossPartitionReferenceDetails theDetails);
+
+	}
+
+
+	public class MyPartitionSelectorInterceptor {
+
+		@Hook(Pointcut.STORAGE_PARTITION_IDENTIFY_CREATE)
+		public RequestPartitionId selectPartitionCreate(IBaseResource theResource) {
+			String resourceType = myFhirContext.getResourceType(theResource);
+			return selectPartition(resourceType);
+		}
+
+		@Hook(Pointcut.STORAGE_PARTITION_IDENTIFY_READ)
+		public RequestPartitionId selectPartitionRead(ReadPartitionIdRequestDetails theReadPartitionIdRequestDetails) {
+			String resourceType = theReadPartitionIdRequestDetails.getResourceType();
+			return selectPartition(resourceType);
+		}
+
+		@Nonnull
+		private static RequestPartitionId selectPartition(String resourceType) {
+			return switch (resourceType) {
+				case "Patient", "RelatedPerson" -> PARTITION_PATIENT;
+				case "Observation" -> PARTITION_OBSERVATION;
+				default -> throw new InternalErrorException("Don't know how to handle resource type: " + resourceType);
+			};
+		}
+
+	}
+
+}

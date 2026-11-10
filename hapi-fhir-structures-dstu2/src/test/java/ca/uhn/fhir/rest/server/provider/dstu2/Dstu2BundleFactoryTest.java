@@ -1,20 +1,7 @@
 package ca.uhn.fhir.rest.server.provider.dstu2;
 
-import static org.junit.Assert.assertEquals;
-
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.api.BundleInclusionRule;
 import ca.uhn.fhir.model.api.IResource;
 import ca.uhn.fhir.model.api.Include;
 import ca.uhn.fhir.model.dstu2.composite.ResourceReferenceDt;
@@ -24,8 +11,21 @@ import ca.uhn.fhir.model.dstu2.resource.Observation;
 import ca.uhn.fhir.model.dstu2.resource.Patient;
 import ca.uhn.fhir.model.dstu2.resource.Practitioner;
 import ca.uhn.fhir.model.dstu2.resource.Specimen;
-import ca.uhn.fhir.rest.server.BundleInclusionRule;
 import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class Dstu2BundleFactoryTest {
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(Dstu2BundleFactoryTest.class);
@@ -34,17 +34,17 @@ public class Dstu2BundleFactoryTest {
 	private List<IBaseResource> myResourceList;
 	private Dstu2BundleFactory myBundleFactory;
 
-	@BeforeClass
+	@BeforeAll
 	public static void beforeClass() throws Exception {
 		ourCtx = FhirContext.forDstu2();
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
-	@Before
+	@BeforeEach
 	public void setUp() throws Exception {
 		// DiagnosticReport
 		// Performer(practitioner)
@@ -96,14 +96,14 @@ public class Dstu2BundleFactoryTest {
 	public void whenIncludeIsAsterisk_bundle_shouldContainAllReferencedResources() throws Exception {
 		Bundle bundle = makeBundle(BundleInclusionRule.BASED_ON_INCLUDES, includes(new String("*")));
 
-		assertEquals(6, bundle.getEntry().size());
+		assertThat(bundle.getEntry()).hasSize(6);
 		assertEquals(2, numberOfEntriesOfType(bundle, Specimen.class));
 	}
 
 	@Test
 	public void whenIncludeIsNull_bundle_shouldOnlyContainPrimaryResource() throws Exception {
 		Bundle bundle = makeBundle(BundleInclusionRule.BASED_ON_INCLUDES, null);
-		assertEquals(1, bundle.getEntry().size());
+		assertThat(bundle.getEntry()).hasSize(1);
 		assertEquals(1, numberOfEntriesOfType(bundle, DiagnosticReport.class));
 	}
 
@@ -112,7 +112,7 @@ public class Dstu2BundleFactoryTest {
 		Set<Include> includes = includes(DiagnosticReport.INCLUDE_SUBJECT.getValue());
 		Bundle bundle = makeBundle(BundleInclusionRule.BASED_ON_INCLUDES, includes);
 
-		assertEquals(2, bundle.getEntry().size());
+		assertThat(bundle.getEntry()).hasSize(2);
 		assertEquals(1, numberOfEntriesOfType(bundle, DiagnosticReport.class));
 		assertEquals(1, numberOfEntriesOfType(bundle, Patient.class));
 	}
@@ -121,14 +121,14 @@ public class Dstu2BundleFactoryTest {
 	public void whenAChainedResourceIsIncludedAndItsParentIsAlsoIncluded_bundle_shouldContainTheChainedResource() throws Exception {
 		Bundle bundle = makeBundle(BundleInclusionRule.BASED_ON_INCLUDES, includes(DiagnosticReport.INCLUDE_RESULT.getValue(), Observation.INCLUDE_SPECIMEN.getValue()));
 
-		ourLog.info(ourCtx.newXmlParser().setPrettyPrint(true).encodeResourceToString(bundle));
-		
-		assertEquals(3, bundle.getEntry().size());
+		ourLog.debug(ourCtx.newXmlParser().setPrettyPrint(true).encodeResourceToString(bundle));
+
+		assertThat(bundle.getEntry()).hasSize(3);
 		assertEquals(1, numberOfEntriesOfType(bundle, DiagnosticReport.class));
 		assertEquals(1, numberOfEntriesOfType(bundle, Observation.class));
 		assertEquals(1, numberOfEntriesOfType(bundle, Specimen.class));
 		List<Specimen> specimens = getResourcesOfType(bundle, Specimen.class);
-		assertEquals(1, specimens.size());
+		assertThat(specimens).hasSize(1);
 		assertEquals("1", specimens.get(0).getId().getIdPart());
 	}
 
@@ -136,7 +136,7 @@ public class Dstu2BundleFactoryTest {
 	public void whenAChainedResourceIsIncludedButItsParentIsNot_bundle_shouldNotContainTheChainedResource() throws Exception {
 		Bundle bundle = makeBundle(BundleInclusionRule.BASED_ON_INCLUDES, includes(Observation.INCLUDE_SPECIMEN.getValue()));
 
-		assertEquals(1, bundle.getEntry().size());
+		assertThat(bundle.getEntry()).hasSize(1);
 		assertEquals(1, numberOfEntriesOfType(bundle, DiagnosticReport.class));
 	}
 
@@ -144,7 +144,7 @@ public class Dstu2BundleFactoryTest {
 	public void whenBundleInclusionRuleSetToResourcePresence_bundle_shouldContainAllResources() throws Exception {
 		Bundle bundle = makeBundle(BundleInclusionRule.BASED_ON_RESOURCE_PRESENCE, null);
 
-		assertEquals(6, bundle.getEntry().size());
+		assertThat(bundle.getEntry()).hasSize(6);
 		assertEquals(2, numberOfEntriesOfType(bundle, Specimen.class));
 	}
 

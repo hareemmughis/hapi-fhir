@@ -1,102 +1,65 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.junit.Assert.*;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.dstu2.model.Bundle.BundleType;
+import org.hl7.fhir.dstu2.model.Patient;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.hl7.fhir.instance.model.Bundle.BundleType;
-import org.hl7.fhir.instance.model.Patient;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.narrative.DefaultThymeleafNarrativeGenerator;
-import ca.uhn.fhir.rest.annotation.Search;
-import ca.uhn.fhir.util.PortUtil;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class BundleTypeInResponseHl7OrgTest {
 
-	private static CloseableHttpClient ourClient;
-	private static FhirContext ourCtx = FhirContext.forDstu2Hl7Org();
-	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BundleTypeInResponseHl7OrgTest.class);
-	private static int ourPort;
-	private static Server ourServer;
+  private static final FhirContext ourCtx = FhirContext.forDstu2Hl7OrgCached();
 
-	@Test
-	public void testSearch() throws Exception {
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient");
-		HttpResponse status = ourClient.execute(httpGet);
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		
-		ourLog.info(responseContent);
-		
-		org.hl7.fhir.instance.model.Bundle bundle = ourCtx.newXmlParser().parseResource(org.hl7.fhir.instance.model.Bundle.class, responseContent);
-		assertEquals(1, bundle.getEntry().size());
+  @RegisterExtension
+  public static RestfulServerExtension ourServer = new RestfulServerExtension(ourCtx)
+      .registerProvider(new DummyPatientResourceProvider())
+      .withPagingProvider(new FifoMemoryPagingProvider(100))
+      .setDefaultResponseEncoding(EncodingEnum.XML)
+      .setDefaultPrettyPrint(false);
+
+  @Test
+  public void testSearch() {
+    org.hl7.fhir.dstu2.model.Bundle bundle = ourServer.fhirRequest("/Patient").get()
+    		.assertStatus(200)
+    		.getBodyAsResource(org.hl7.fhir.dstu2.model.Bundle.class);
+		assertThat(bundle.getEntry()).hasSize(1);
 		assertEquals(BundleType.SEARCHSET, bundle.getType());
-	}
+  }
 
+  public static class DummyPatientResourceProvider implements IResourceProvider {
 
-	@AfterClass
-	public static void afterClass() throws Exception {
-		ourServer.stop();
-	}
+    @Search
+    public List<Patient> findPatient() {
+      ArrayList<Patient> retVal = new ArrayList<>();
 
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
+      Patient patient = new Patient();
+      patient.setId("1");
+      patient.addIdentifier().setSystem("system").setValue("identifier123");
+      retVal.add(patient);
+      return retVal;
+    }
 
-		DummyPatientResourceProvider patientProvider = new DummyPatientResourceProvider();
+    @Override
+    public Class<Patient> getResourceType() {
+      return Patient.class;
+    }
 
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-		servlet.getFhirContext().setNarrativeGenerator(new DefaultThymeleafNarrativeGenerator());
+  }
 
-		servlet.setResourceProviders(patientProvider);
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
-	}
-
-	public static class DummyPatientResourceProvider implements IResourceProvider {
-
-		@Search
-		public List<Patient> findPatient() {
-			ArrayList<Patient> retVal = new ArrayList<Patient>();
-
-			Patient patient = new Patient();
-			patient.setId("1");
-			patient.addIdentifier().setSystem("system").setValue("identifier123");
-			retVal.add(patient);
-			return retVal;
-		}
-
-		@Override
-		public Class<Patient> getResourceType() {
-			return Patient.class;
-		}
-
-	}
+  @AfterAll
+  public static void afterClass() throws Exception {
+    TestUtil.randomizeLocaleAndTimezone();
+  }
 
 }

@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.param;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,16 +17,18 @@ package ca.uhn.fhir.rest.param;
  * limitations under the License.
  * #L%
  */
-import static org.apache.commons.lang3.StringUtils.defaultString;
-
-import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.builder.ToStringBuilder;
-import org.apache.commons.lang3.builder.ToStringStyle;
+package ca.uhn.fhir.rest.param;
 
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.model.api.IQueryParameterType;
 import ca.uhn.fhir.model.primitive.StringDt;
 import ca.uhn.fhir.model.primitive.UriDt;
+import org.apache.commons.lang3.builder.ToStringBuilder;
+import org.apache.commons.lang3.builder.ToStringStyle;
+
+import java.util.Objects;
+
+import static org.apache.commons.lang3.StringUtils.defaultString;
 
 public class UriParam extends BaseParam implements IQueryParameterType {
 
@@ -52,7 +52,7 @@ public class UriParam extends BaseParam implements IQueryParameterType {
 	}
 
 	@Override
-	String doGetValueAsQueryToken(FhirContext theContext) {
+	String doGetValueAsQueryToken() {
 		return ParameterUtil.escape(myValue);
 	}
 
@@ -69,8 +69,28 @@ public class UriParam extends BaseParam implements IQueryParameterType {
 		return myQualifier;
 	}
 
+	/**
+	 * Sets the qualifier for this param (may be <code>null</code> and generally will be)
+	 *
+	 * @return Returns a reference to <code>this</code> for easy method chanining
+	 */
+	public UriParam setQualifier(UriParamQualifierEnum theQualifier) {
+		myQualifier = theQualifier;
+		return this;
+	}
+
 	public String getValue() {
 		return myValue;
+	}
+
+	/**
+	 * Sets the value for this param
+	 *
+	 * @return Returns a reference to <code>this</code> for easy method chanining
+	 */
+	public UriParam setValue(String theValue) {
+		myValue = theValue;
+		return this;
 	}
 
 	public StringDt getValueAsStringDt() {
@@ -85,30 +105,6 @@ public class UriParam extends BaseParam implements IQueryParameterType {
 		return defaultString(myValue);
 	}
 
-	public boolean isEmpty() {
-		return StringUtils.isEmpty(myValue);
-	}
-
-	/**
-	 * Sets the qualifier for this param (may be <code>null</code> and generally will be)
-	 * 
-	 * @return Returns a reference to <code>this</code> for easy method chanining
-	 */
-	public UriParam setQualifier(UriParamQualifierEnum theQualifier) {
-		myQualifier = theQualifier;
-		return this;
-	}
-
-	/**
-	 * Sets the value for this param
-	 * 
-	 * @return Returns a reference to <code>this</code> for easy method chanining
-	 */
-	public UriParam setValue(String theValue) {
-		myValue = theValue;
-		return this;
-	}
-
 	@Override
 	public String toString() {
 		ToStringBuilder builder = new ToStringBuilder(this, ToStringStyle.SHORT_PREFIX_STYLE);
@@ -116,4 +112,19 @@ public class UriParam extends BaseParam implements IQueryParameterType {
 		return builder.toString();
 	}
 
+	@Override
+	public boolean equals(Object theO) {
+		if (!(theO instanceof UriParam uriParam)) {
+			return false;
+		}
+		if (!super.equals(theO)) {
+			return false;
+		}
+		return myQualifier == uriParam.myQualifier && Objects.equals(myValue, uriParam.myValue);
+	}
+
+	@Override
+	public int hashCode() {
+		return Objects.hash(super.hashCode(), myQualifier, myValue);
+	}
 }

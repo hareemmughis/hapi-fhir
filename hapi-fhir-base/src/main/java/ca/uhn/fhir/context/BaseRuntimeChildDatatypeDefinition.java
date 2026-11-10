@@ -1,17 +1,15 @@
-package ca.uhn.fhir.context;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,6 +17,13 @@ package ca.uhn.fhir.context;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.context;
+
+import ca.uhn.fhir.model.api.annotation.Child;
+import ca.uhn.fhir.model.api.annotation.Description;
+import org.hl7.fhir.instance.model.api.IBase;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -26,22 +31,25 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 
-import org.hl7.fhir.instance.model.api.IBase;
-
-import ca.uhn.fhir.model.api.annotation.Child;
-import ca.uhn.fhir.model.api.annotation.Description;
-
 public abstract class BaseRuntimeChildDatatypeDefinition extends BaseRuntimeDeclaredChildDefinition {
+	Logger ourLog = LoggerFactory.getLogger(BaseRuntimeChildDatatypeDefinition.class);
 
 	private Class<? extends IBase> myDatatype;
 
 	private BaseRuntimeElementDefinition<?> myElementDefinition;
 
-	public BaseRuntimeChildDatatypeDefinition(Field theField, String theElementName, Child theChildAnnotation, Description theDescriptionAnnotation, Class<? extends IBase> theDatatype) {
+	public BaseRuntimeChildDatatypeDefinition(
+			Field theField,
+			String theElementName,
+			Child theChildAnnotation,
+			Description theDescriptionAnnotation,
+			Class<? extends IBase> theDatatype) {
 		super(theField, theChildAnnotation, theDescriptionAnnotation, theElementName);
 		// should use RuntimeChildAny
-		assert Modifier.isInterface(theDatatype.getModifiers()) == false : "Type of " + theDatatype + " shouldn't be here";
-		assert Modifier.isAbstract(theDatatype.getModifiers()) == false : "Type of " + theDatatype + " shouldn't be here";
+		assert Modifier.isInterface(theDatatype.getModifiers()) == false
+				: "Type of " + theDatatype + " shouldn't be here";
+		assert Modifier.isAbstract(theDatatype.getModifiers()) == false
+				: "Type of " + theDatatype + " shouldn't be here";
 		myDatatype = theDatatype;
 	}
 
@@ -95,7 +103,9 @@ public abstract class BaseRuntimeChildDatatypeDefinition extends BaseRuntimeDecl
 	}
 
 	@Override
-	void sealAndInitialize(FhirContext theContext, Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
+	void sealAndInitialize(
+			FhirContext theContext,
+			Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
 		myElementDefinition = theClassToElementDefinitions.get(getDatatype());
 		if (myElementDefinition == null) {
 			myElementDefinition = theContext.getElementDefinition(getDatatype());
@@ -107,5 +117,4 @@ public abstract class BaseRuntimeChildDatatypeDefinition extends BaseRuntimeDecl
 	public String toString() {
 		return getClass().getSimpleName() + "[" + getElementName() + "]";
 	}
-
 }

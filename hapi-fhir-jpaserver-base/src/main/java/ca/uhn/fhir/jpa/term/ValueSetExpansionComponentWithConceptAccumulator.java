@@ -1,0 +1,274 @@
+/*
+ * #%L
+ * HAPI FHIR JPA Server
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.term;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.jpa.entity.TermConceptDesignation;
+import ca.uhn.fhir.jpa.term.ex.ExpansionTooCostlyException;
+import ca.uhn.fhir.model.api.annotation.Block;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.util.UrlUtil;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.hl7.fhir.r4.model.ValueSet;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+@Block()
+public class ValueSetExpansionComponentWithConceptAccumulator extends ValueSet.ValueSetExpansionComponent
+		implements IValueSetConceptAccumulator {
+	private final int myMaxCapacity;
+	private final FhirContext myContext;
+	private final Set<SystemAndCode> myAddedCodes = new HashSet<>();
+	private int mySkipCountRemaining;
+	private int myHardExpansionMaximumSize;
+	private List<String> myMessages;
+	private int myAddedConcepts;
+	private Integer myTotalConcepts;
+	private Map<Long, ValueSet.ValueSetExpansionContainsComponent> mySourcePidToConcept = new HashMap<>();
+	private Map<ValueSet.ValueSetExpansionContainsComponent, String> myConceptToSourceDirectParentPids =
+			new HashMap<>();
+	private boolean myTrackingHierarchy;
+
+	/**
+	 * Constructor
+	 *
+	 * @param theMaxCapacity The maximum number of results this accumulator will accept before throwing
+	 *                       an {@link InternalErrorException}
+	 * @param theTrackingHierarchy
+	 */
+	ValueSetExpansionComponentWithConceptAccumulator(
+			FhirContext theContext, int theMaxCapacity, boolean theTrackingHierarchy) {
+		myMaxCapacity = theMaxCapacity;
+		myContext = theContext;
+		myTrackingHierarchy = theTrackingHierarchy;
+	}
+
+	@Nonnull
+	@Override
+	public Integer getCapacityRemaining() {
+		return Math.max(0, (myMaxCapacity - myAddedConcepts) + mySkipCountRemaining);
+	}
+
+	public List<String> getMessages() {
+		if (myMessages == null) {
+			return Collections.emptyList();
+		}
+		return Collections.unmodifiableList(myMessages);
+	}
+
+	@Override
+	public boolean isTrackingHierarchy() {
+		return myTrackingHierarchy;
+	}
+
+	@Override
+	public void addMessage(String theMessage) {
+		if (myMessages == null) {
+			myMessages = new ArrayList<>();
+		}
+		myMessages.add(theMessage);
+	}
+
+	@Override
+	public void includeConceptWithDesignations(
+			String theSystem,
+			String theCode,
+			String theDisplay,
+			Collection<TermConceptDesignation> theDesignations,
+			Long theSourceConceptPid,
+			String theSourceConceptDirectParentPids,
+			String theCodeSystemVersion) {
+
+		if (!myAddedCodes.add(new SystemAndCode(theSystem, theCodeSystemVersion, theCode))) {
+			return;
+		}
+
+		if (mySkipCountRemaining > 0) {
+			mySkipCountRemaining--;
+			return;
+		}
+		if (getCapacityRemaining() == 0) {
+			return;
+		}
+
+		incrementConceptsCount();
+
+		ValueSet.ValueSetExpansionContainsComponent contains = this.addContains();
+
+		if (theSourceConceptPid != null) {
+			mySourcePidToConcept.put(theSourceConceptPid, contains);
+		}
+		if (theSourceConceptDirectParentPids != null) {
+			myConceptToSourceDirectParentPids.put(contains, theSourceConceptDirectParentPids);
+		}
+
+		contains.setSystem(theSystem);
+		contains.setCode(theCode);
+		contains.setDisplay(theDisplay);
+
+		if (isNotBlank(theCodeSystemVersion)) {
+			contains.setVersion(theCodeSystemVersion);
+		}
+
+		if (theDesignations != null) {
+			for (TermConceptDesignation termConceptDesignation : theDesignations) {
+				contains.addDesignation()
+						.setValue(termConceptDesignation.getValue())
+						.setLanguage(termConceptDesignation.getLanguage())
+						.getUse()
+						.setSystem(termConceptDesignation.getUseSystem())
+						.setCode(termConceptDesignation.getUseCode())
+						.setDisplay(termConceptDesignation.getUseDisplay());
+			}
+		}
+	}
+
+	@Override
+	public void consumeSkipCount(int theSkipCountToConsume) {
+		mySkipCountRemaining -= theSkipCountToConsume;
+	}
+
+	@Nullable
+	@Override
+	public Integer getSkipCountRemaining() {
+		return mySkipCountRemaining;
+	}
+
+	/**
+	 * @deprecated Use {@link #excludeConcept(String, String, String)}
+	 */
+	@Deprecated(since = "9.0.0", forRemoval = true)
+	@SuppressWarnings("removal")
+	@Override
+	public void excludeConcept(String theSystem, String theCode) {
+		UrlUtil.CanonicalUrlParts system = UrlUtil.parseCanonicalUrl(theSystem);
+		excludeConcept(system.url(), system.versionId().orElse(null), theCode);
+	}
+
+	@Override
+	public void excludeConcept(@Nonnull String theSystem, @Nullable String theSystemVersion, @Nonnull String theCode) {
+		myAddedCodes.removeIf(t -> isExcluded(
+				theSystem,
+				theSystemVersion,
+				theCode,
+				t.system().url(),
+				t.system().versionId().orElse(null),
+				t.code()));
+		this.getContains()
+				.removeIf(t ->
+						isExcluded(theSystem, theSystemVersion, theCode, t.getSystem(), t.getVersion(), t.getCode()));
+	}
+
+	private static boolean isExcluded(
+			String theExcludeSystem,
+			@Nullable String theExcludeVersion,
+			String theExcludeCode,
+			String theSystem,
+			@Nullable String theVersion,
+			String theCode) {
+		return theExcludeSystem.equals(theSystem)
+				&& theExcludeCode.equals(theCode)
+				&& TermReadSvcUtil.excludeAppliesToVersion(theExcludeVersion, theVersion);
+	}
+
+	private void incrementConceptsCount() {
+		if (myHardExpansionMaximumSize > 0 && myAddedConcepts > myHardExpansionMaximumSize) {
+			String msg = myContext
+					.getLocalizer()
+					.getMessage(TermReadSvcImpl.class, "expansionTooLarge", myHardExpansionMaximumSize);
+			msg = appendAccumulatorMessages(msg);
+			throw new ExpansionTooCostlyException(Msg.code(832) + msg);
+		}
+
+		myAddedConcepts++;
+	}
+
+	@Nonnull
+	private String appendAccumulatorMessages(String msg) {
+		msg += getMessages().stream().map(t -> " - " + t).collect(Collectors.joining());
+		return msg;
+	}
+
+	public Integer getTotalConcepts() {
+		return myTotalConcepts;
+	}
+
+	@Override
+	public void incrementOrDecrementTotalConcepts(boolean theAdd, int theDelta) {
+		int delta = theDelta;
+		if (!theAdd) {
+			delta = -delta;
+		}
+		if (myTotalConcepts == null) {
+			myTotalConcepts = delta;
+		} else {
+			myTotalConcepts = myTotalConcepts + delta;
+		}
+	}
+
+	public void setSkipCountRemaining(int theSkipCountRemaining) {
+		mySkipCountRemaining = theSkipCountRemaining;
+	}
+
+	public void setHardExpansionMaximumSize(int theHardExpansionMaximumSize) {
+		myHardExpansionMaximumSize = theHardExpansionMaximumSize;
+	}
+
+	public void applyHierarchy() {
+		for (int i = 0; i < this.getContains().size(); i++) {
+			ValueSet.ValueSetExpansionContainsComponent nextContains =
+					this.getContains().get(i);
+
+			String directParentPidsString = myConceptToSourceDirectParentPids.get(nextContains);
+			if (isNotBlank(directParentPidsString) && !directParentPidsString.equals("NONE")) {
+				List<Long> directParentPids = Arrays.stream(directParentPidsString.split(" "))
+						.map(t -> Long.parseLong(t))
+						.collect(Collectors.toList());
+
+				boolean firstMatch = false;
+				for (Long next : directParentPids) {
+					ValueSet.ValueSetExpansionContainsComponent parentConcept = mySourcePidToConcept.get(next);
+					if (parentConcept != null) {
+						if (!firstMatch) {
+							firstMatch = true;
+							this.getContains().remove(i);
+							i--;
+						}
+
+						parentConcept.addContains(nextContains);
+					}
+				}
+			}
+		}
+	}
+}

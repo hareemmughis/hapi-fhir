@@ -1,148 +1,86 @@
 package ca.uhn.fhir.rest.server.interceptor;
 
-import static org.hamcrest.Matchers.containsString;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
-
-import java.net.URI;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.*;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.hl7.fhir.dstu3.model.IdType;
-import org.hl7.fhir.dstu3.model.Patient;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.rest.annotation.IdParam;
 import ca.uhn.fhir.rest.annotation.Read;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.rest.server.FifoMemoryPagingProvider;
 import ca.uhn.fhir.rest.server.IResourceProvider;
-import ca.uhn.fhir.rest.server.RestfulServer;
 import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.test.utilities.HttpTestResponse;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
 import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.dstu3.model.IdType;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class BanUnsupprtedHttpMethodsInterceptorDstu3Test {
 
-	private static CloseableHttpClient ourClient;
-	private static FhirContext ourCtx = FhirContext.forDstu3();
+	private static final FhirContext ourCtx = FhirContext.forDstu3Cached();
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(BanUnsupprtedHttpMethodsInterceptorDstu3Test.class);
-	private static int ourPort;
-	private static Server ourServer;
-
-	private static RestfulServer servlet;
-
-	@Test
-	public void testHttpTraceNotEnabled() throws Exception {
-		HttpTrace req = new HttpTrace("http://localhost:" + ourPort + "/Patient");
-		CloseableHttpResponse status = ourClient.execute(req);
-		try {
-			ourLog.info(status.toString());
-			assertEquals(405, status.getStatusLine().getStatusCode());
-		} finally {
-			IOUtils.closeQuietly(status.getEntity().getContent());
-		}
-	}
+	@RegisterExtension
+	private RestfulServerExtension ourServer  = new RestfulServerExtension(ourCtx)
+		 .setDefaultResponseEncoding(EncodingEnum.XML)
+		 .registerProvider(new DummyPatientResourceProvider())
+		 .registerInterceptor(new BanUnsupportedHttpMethodsInterceptor())
+		 .withPagingProvider(new FifoMemoryPagingProvider(100))
+		 .setDefaultPrettyPrint(false);
 
 	@Test
-	public void testHeadJson() throws Exception {
-		HttpHead httpGet = new HttpHead("http://localhost:" + ourPort + "/Patient/123");
-		HttpResponse status = ourClient.execute(httpGet);
-		assertEquals(null, status.getEntity());
-
-		ourLog.info(status.toString());
-		
-		assertEquals(400, status.getStatusLine().getStatusCode());
-		assertThat(status.getFirstHeader("x-powered-by").getValue(), containsString("HAPI"));
-	}
-
-	
-	@Test
-	public void testHttpTrackNotEnabled() throws Exception {
-		HttpRequestBase req = new HttpRequestBase() {
-			@Override
-			public String getMethod() {
-				return "TRACK";
-			}
-		};
-		req.setURI(new URI("http://localhost:" + ourPort + "/Patient"));
-
-		CloseableHttpResponse status = ourClient.execute(req);
-		try {
-			ourLog.info(status.toString());
-			assertEquals(405, status.getStatusLine().getStatusCode());
-		} finally {
-			IOUtils.closeQuietly(status.getEntity().getContent());
-		}
-	}
-
-	@Test
-	public void testHttpFooNotEnabled() throws Exception {
-		HttpRequestBase req = new HttpRequestBase() {
-			@Override
-			public String getMethod() {
-				return "FOO";
-			}
-		};
-		req.setURI(new URI("http://localhost:" + ourPort + "/Patient"));
-
-		CloseableHttpResponse status = ourClient.execute(req);
-		try {
-			ourLog.info(status.toString());
-			assertEquals(501, status.getStatusLine().getStatusCode());
-		} finally {
-			IOUtils.closeQuietly(status.getEntity().getContent());
-		}
-	}
-
-	@Test
-	public void testRead() throws Exception {
-
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient/1");
-		HttpResponse status = ourClient.execute(httpGet);
-		IOUtils.closeQuietly(status.getEntity().getContent());
-		
-		assertEquals(200, status.getStatusLine().getStatusCode());
+	public void testHttpTraceNotEnabled() {
+		HttpTestResponse status = ourServer.fhirRequest("/Patient").method("TRACE");
+		status.assertStatus(405);
 	}
 	
-	@AfterClass
+	@Test	
+	public void testHeadJsonWithInvalidPatient() {	
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/123").head();
+		assertThat(status.getBodyBytes()).isEmpty();	
+ 		ourLog.info(status.toString());
+
+		status.assertStatus(404);
+		assertThat(status.getHeader(Constants.HEADER_POWERED_BY)).contains("HAPI");
+	}
+	
+	@Test	
+	public void testHeadJsonWithValidPatient() {	
+		HttpTestResponse status = ourServer.fhirRequest("/Patient/1").head();
+		assertThat(status.getBodyBytes()).isEmpty();	
+ 		ourLog.info(status.toString());
+
+		status.assertStatus(200);
+		assertThat(status.getHeader(Constants.HEADER_POWERED_BY)).contains("HAPI");
+	}
+	
+	@Test
+	public void testHttpTrackNotEnabled() {
+		HttpTestResponse status = ourServer.fhirRequest("/Patient").method("TRACK");
+		status.assertStatus(405);
+	}
+
+	@Test
+	public void testHttpFooNotEnabled() {
+		HttpTestResponse status = ourServer.fhirRequest("/Patient").method("FOO");
+		status.assertStatus(501);
+	}
+
+	@Test
+	public void testRead() {
+
+		ourServer.fhirRequest("/Patient/1").get().assertStatus(200);
+	}
+	
+	@AfterAll
 	public static void afterClassClearContext() throws Exception {
-		ourServer.stop();
-		TestUtil.clearAllStaticFieldsForUnitTest();
-	}
-
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		ServletHandler proxyHandler = new ServletHandler();
-		servlet = new RestfulServer(ourCtx);
-
-		servlet.setResourceProviders(new DummyPatientResourceProvider());
-		servlet.registerInterceptor(new BanUnsupportedHttpMethodsInterceptor());
-
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 	public static class DummyPatientResourceProvider implements IResourceProvider {

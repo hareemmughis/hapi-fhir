@@ -1,0 +1,1786 @@
+package ca.uhn.fhir.jpa.dao.r4;
+
+import ca.uhn.fhir.interceptor.api.IInterceptorService;
+import ca.uhn.fhir.jpa.model.entity.ResourceIndexedComboTokenNonUnique;
+import ca.uhn.fhir.jpa.model.entity.ResourceIndexedSearchParamDate;
+import ca.uhn.fhir.jpa.model.entity.StorageSettings;
+import ca.uhn.fhir.jpa.searchparam.MatchUrlService;
+import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
+import ca.uhn.fhir.jpa.searchparam.submit.interceptor.SearchParamValidatingInterceptor;
+import ca.uhn.fhir.jpa.util.SqlQuery;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
+import ca.uhn.fhir.rest.api.server.storage.TransactionDetails;
+import ca.uhn.fhir.rest.param.DateOrListParam;
+import ca.uhn.fhir.rest.param.DateParam;
+import ca.uhn.fhir.rest.param.ParamPrefixEnum;
+import ca.uhn.fhir.rest.param.ReferenceParam;
+import ca.uhn.fhir.rest.param.StringAndListParam;
+import ca.uhn.fhir.rest.param.StringOrListParam;
+import ca.uhn.fhir.rest.param.StringParam;
+import ca.uhn.fhir.rest.param.TokenAndListParam;
+import ca.uhn.fhir.rest.param.TokenOrListParam;
+import ca.uhn.fhir.rest.param.TokenParam;
+import ca.uhn.fhir.util.HapiExtensions;
+import jakarta.annotation.Nullable;
+import jakarta.persistence.Id;
+import org.apache.commons.lang3.StringUtils;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r4.model.BooleanType;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Composition;
+import org.hl7.fhir.r4.model.DateTimeType;
+import org.hl7.fhir.r4.model.DateType;
+import org.hl7.fhir.r4.model.Enumerations;
+import org.hl7.fhir.r4.model.Enumerations.PublicationStatus;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Identifier;
+import org.hl7.fhir.r4.model.Meta;
+import org.hl7.fhir.r4.model.Observation;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Period;
+import org.hl7.fhir.r4.model.SearchParameter;
+import org.hl7.fhir.r4.model.Timing;
+import org.hl7.fhir.r4.model.UriType;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import java.util.UUID;
+import java.util.function.Consumer;
+
+import static ca.uhn.fhir.storage.test.CircularQueueCaptureQueriesListenerAssertions.onCurrentThread;
+import static org.apache.commons.lang3.StringUtils.defaultIfBlank;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+
+@SuppressWarnings("unchecked")
+class FhirResourceDaoR4ComboNonUniqueParamTest extends BaseComboParamsR4Test {
+	private static final Logger ourLog = LoggerFactory.getLogger(FhirResourceDaoR4ComboNonUniqueParamTest.class);
+	public static final String ORG_ID_UNQUALIFIED = "my-org";
+	public static final String ORG_ID_QUALIFIED = "Organization/" + ORG_ID_UNQUALIFIED;
+
+	@Autowired
+	SearchParamValidatingInterceptor mySearchParamValidatingInterceptor;
+	@Autowired
+	IInterceptorService myInterceptorService;
+	@Autowired
+	MatchUrlService myMatchUrlService;
+
+	private boolean myInterceptorFound = false;
+
+	@BeforeEach
+	void removeInterceptor() {
+		myInterceptorFound = myInterceptorService.unregisterInterceptor(mySearchParamValidatingInterceptor);
+	}
+
+	@AfterEach
+	void restoreInterceptor() {
+		myStorageSettings.setIndexMissingFields(new StorageSettings().getIndexMissingFields());
+
+		if (myInterceptorFound) {
+			myInterceptorService.unregisterInterceptor(mySearchParamValidatingInterceptor);
+		}
+	}
+
+	@Test
+	void testTokenFromCodeableConcept_Create() {
+		SearchParameter sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-family");
+		sp.setType(Enumerations.SearchParamType.STRING);
+		sp.setCode("given");
+		sp.setExpression("Patient.name.family");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-maritalstatus");
+		sp.setType(Enumerations.SearchParamType.TOKEN);
+		sp.setCode("gender");
+		sp.setExpression("Patient.maritalStatus");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-names-and-maritalstatus");
+		sp.setType(Enumerations.SearchParamType.COMPOSITE);
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		sp.addComponent()
+			.setExpression("Patient")
+			.setDefinition("SearchParameter/patient-family");
+		sp.addComponent()
+			.setExpression("Patient")
+			.setDefinition("SearchParameter/patient-maritalstatus");
+		sp.addExtension()
+			.setUrl(HapiExtensions.EXT_SP_UNIQUE)
+			.setValue(new BooleanType(false));
+		mySearchParameterDao.update(sp, mySrd);
+		mySearchParamRegistry.forceRefresh();
+		myMessages.clear();
+
+
+		Patient pt = new Patient();
+		pt.addName().setFamily("FAMILY1");
+		pt.addName().setFamily("FAMILY2");
+		pt.getMaritalStatus().addCoding().setSystem("http://foo1").setCode("bar1");
+		pt.getMaritalStatus().addCoding().setSystem("http://foo2").setCode("bar2");
+		myPatientDao.create(pt, mySrd);
+		createPatient1(null);
+
+		logAllNonUniqueIndexes();
+		runInTransaction(() -> {
+			List<ResourceIndexedComboTokenNonUnique> indexedTokens = myResourceIndexedComboTokensNonUniqueDao.findAll();
+			indexedTokens.sort(Comparator.comparing(ResourceIndexedComboTokenNonUnique::getIndexString));
+			assertEquals(4, indexedTokens.size());
+			String expected;
+			expected = "Patient?gender=http%3A%2F%2Ffoo1%7Cbar1&given=FAMILY1";
+			assertEquals(expected, indexedTokens.get(0).getIndexString());
+			expected = "Patient?gender=http%3A%2F%2Ffoo1%7Cbar1&given=FAMILY2";
+			assertEquals(expected, indexedTokens.get(1).getIndexString());
+			expected = "Patient?gender=http%3A%2F%2Ffoo2%7Cbar2&given=FAMILY1";
+			assertEquals(expected, indexedTokens.get(2).getIndexString());
+			expected = "Patient?gender=http%3A%2F%2Ffoo2%7Cbar2&given=FAMILY2";
+			assertEquals(expected, indexedTokens.get(3).getIndexString());
+		});
+	}
+
+
+	@Test
+	void testStringAndToken_Create() {
+		createStringAndTokenCombo_NameAndGender();
+
+		IIdType id1 = createPatient1(null);
+		assertNotNull(id1);
+
+		IIdType id2 = createPatient2(null);
+		assertNotNull(id2);
+
+		logAllNonUniqueIndexes();
+		runInTransaction(() -> {
+			List<ResourceIndexedComboTokenNonUnique> indexedTokens = myResourceIndexedComboTokensNonUniqueDao.findAll();
+			indexedTokens.sort(Comparator.comparing(ResourceIndexedComboTokenNonUnique::getId));
+			assertEquals(2, indexedTokens.size());
+			String expected = "Patient?family=FAMILY1&gender=http%3A%2F%2Fhl7.org%2Ffhir%2Fadministrative-gender%7Cmale&given=GIVEN1";
+			assertEquals(expected, indexedTokens.get(0).getIndexString());
+			assertEquals(-2634469377090377342L, indexedTokens.get(0).getHashComplete().longValue());
+		});
+
+		myMessages.clear();
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("family", new StringParam("fAmIlY1")); // weird casing to test normalization
+		params.add("given", new StringParam("gIVEn1"));
+		params.add("gender", new TokenParam("http://hl7.org/fhir/administrative-gender", "male"));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myPatientDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(actual).containsExactlyInAnyOrder(id1.toUnqualifiedVersionless().getValue());
+
+		assertThat(myCaptureQueriesListener.getSelectQueries().stream().map(t -> t.getSql(true, false)).toList()).contains(
+			"SELECT t0.RES_ID FROM HFJ_IDX_CMB_TOK_NU t0 WHERE (t0.HASH_COMPLETE = '-2634469377090377342') fetch first '10000' rows only"
+		);
+
+		logCapturedMessages();
+		assertThat(myMessages.toString()).contains("[INFO Using NON_UNIQUE index(es) for query for search: Patient?family=FAMILY1&gender=http%3A%2F%2Fhl7.org%2Ffhir%2Fadministrative-gender%7Cmale&given=GIVEN1]");
+		myMessages.clear();
+
+		// Remove 1, add another
+
+		myPatientDao.delete(id1, mySrd);
+
+		IIdType id3 = createPatient1(null);
+		assertNotNull(id3);
+
+		params = SearchParameterMap.newSynchronous();
+		params.add("family", new StringParam("fAmIlY1")); // weird casing to test normalization
+		params.add("given", new StringParam("gIVEn1"));
+		params.add("gender", new TokenParam("http://hl7.org/fhir/administrative-gender", "male"));
+		results = myPatientDao.search(params, mySrd);
+		actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(actual).containsExactlyInAnyOrder(id3.toUnqualifiedVersionless().getValue());
+
+	}
+
+	@Test
+	void testEmptyParamLists() {
+		createStringAndTokenCombo_NameAndGender();
+
+		IIdType id1 = createPatient1(null);
+		IIdType id2 = createPatient2(null);
+
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("family", new StringAndListParam());
+		params.add("given", new StringAndListParam());
+		params.add("gender", new TokenAndListParam());
+		IBundleProvider results = myPatientDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		assertThat(actual).containsExactlyInAnyOrder(id1.toUnqualifiedVersionless().getValue(), id2.toUnqualifiedVersionless().getValue());
+
+	}
+
+	@Test
+	void testStringAndToken_CreateAndUpdate() {
+		createStringAndTokenCombo_NameAndGender();
+
+		initResourceTypeCacheFromConfig();
+
+		// Create a resource patching the unique SP
+		myCaptureQueriesListener.clear();
+		IIdType id1 = createPatient1(null);
+		assertNotNull(id1);
+
+		assertThat(myCaptureQueriesListener.countSelectQueries()).as(String.join(",", "\n" + myCaptureQueriesListener.getSelectQueries().stream().map(SqlQuery::getThreadName).toList())).isZero();
+		assertEquals(12, myCaptureQueriesListener.countInsertQueries());
+		assertEquals(0, myCaptureQueriesListener.countUpdateQueries());
+		assertEquals(0, myCaptureQueriesListener.countDeleteQueries());
+		assertEquals(1, myCaptureQueriesListener.countCommits());
+		assertEquals(0, myCaptureQueriesListener.countRollbacks());
+
+		runInTransaction(() -> {
+			List<String> indexes = myResourceIndexedComboTokensNonUniqueDao
+				.findAll()
+				.stream()
+				.map(ResourceIndexedComboTokenNonUnique::getIndexString)
+				.toList();
+			assertThat(indexes).as(indexes.toString()).containsExactly("Patient?family=FAMILY1&gender=http%3A%2F%2Fhl7.org%2Ffhir%2Fadministrative-gender%7Cmale&given=GIVEN1");
+		});
+
+		/*
+		 * Now update the resource
+		 */
+
+		Patient patient = myPatientDao.read(id1, mySrd);
+		patient.getNameFirstRep().setFamily("Family2");
+
+		myCaptureQueriesListener.clear();
+		myPatientDao.update(patient, mySrd);
+
+		assertEquals(6, myCaptureQueriesListener.countSelectQueries());
+		assertEquals(1, myCaptureQueriesListener.countInsertQueries());
+		assertEquals(5, myCaptureQueriesListener.countUpdateQueries());
+		assertEquals(0, myCaptureQueriesListener.countDeleteQueries());
+		assertEquals(1, myCaptureQueriesListener.countCommits());
+		assertEquals(0, myCaptureQueriesListener.countRollbacks());
+
+		runInTransaction(() -> {
+			List<String> indexes = myResourceIndexedComboTokensNonUniqueDao
+				.findAll()
+				.stream()
+				.map(ResourceIndexedComboTokenNonUnique::getIndexString)
+				.toList();
+			assertThat(indexes).as(indexes.toString()).containsExactly("Patient?family=FAMILY2&gender=http%3A%2F%2Fhl7.org%2Ffhir%2Fadministrative-gender%7Cmale&given=GIVEN1");
+		});
+
+	}
+
+	@Test
+	void testStringAndToken_SearchWithExtraParameters() {
+		createStringAndTokenCombo_NameAndGender();
+
+		IIdType id1 = createPatient1(null);
+		assertNotNull(id1);
+
+		IIdType id2 = createPatient2(null);
+		assertNotNull(id2);
+
+		logAllNonUniqueIndexes();
+		runInTransaction(() -> {
+			List<ResourceIndexedComboTokenNonUnique> indexedTokens = myResourceIndexedComboTokensNonUniqueDao.findAll();
+			indexedTokens.sort(Comparator.comparing(ResourceIndexedComboTokenNonUnique::getId));
+			assertEquals(2, indexedTokens.size());
+			assertEquals(-2634469377090377342L, indexedTokens.get(0).getHashComplete().longValue());
+		});
+
+		myMessages.clear();
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("family", new StringParam("fAmIlY1")); // weird casing to test normalization
+		params.add("given", new StringParam("gIVEn1"));
+		params.add("gender", new TokenParam("http://hl7.org/fhir/administrative-gender", "male"));
+		params.add("birthdate", new DateParam("2021-02-02"));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myPatientDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(actual).containsExactlyInAnyOrder(id1.toUnqualifiedVersionless().getValue());
+
+		String sql = myCaptureQueriesListener.getSelectQueries().get(0).getSql(true, false);
+		String expected = "SELECT t1.RES_ID FROM HFJ_RESOURCE t1 INNER JOIN HFJ_IDX_CMB_TOK_NU t0 ON (t1.RES_ID = t0.RES_ID) INNER JOIN HFJ_SPIDX_DATE t2 ON (t1.RES_ID = t2.RES_ID) WHERE ((t0.HASH_COMPLETE = '-2634469377090377342') AND ((t2.HASH_IDENTITY = '5247847184787287691') AND (((t2.SP_VALUE_LOW_DATE_ORDINAL >= '20210202') AND (t2.SP_VALUE_LOW_DATE_ORDINAL <= '20210202')) AND ((t2.SP_VALUE_HIGH_DATE_ORDINAL <= '20210202') AND (t2.SP_VALUE_HIGH_DATE_ORDINAL >= '20210202'))))) fetch first '10000' rows only";
+		assertEquals(expected, sql);
+
+		logCapturedMessages();
+		assertThat(myMessages.toString()).contains("[INFO Using NON_UNIQUE index(es) for query for search: Patient?family=FAMILY1&gender=http%3A%2F%2Fhl7.org%2Ffhir%2Fadministrative-gender%7Cmale&given=GIVEN1]");
+		myMessages.clear();
+
+	}
+
+
+	@Test
+	void testStringAndToken_MultipleAnd() {
+		createStringAndTokenCombo_NameAndGender();
+
+		Patient patient = new Patient();
+		patient.addName().setFamily("Simpson").addGiven("Homer").addGiven("Jay");
+		patient.setGender(Enumerations.AdministrativeGender.MALE);
+		IIdType id1 = myPatientDao.create(patient, newSrd()).getId().toUnqualifiedVersionless();
+		assertNotNull(id1);
+
+		logAllNonUniqueIndexes();
+		logAllStringIndexes();
+
+		myMessages.clear();
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("family", new StringParam("Simpson"));
+		params.add("given", new StringAndListParam().addAnd(new StringParam("Homer")).addAnd(new StringParam("Jay")));
+		params.add("gender", new TokenParam("male"));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myPatientDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(actual).containsExactlyInAnyOrder(id1.toUnqualifiedVersionless().getValue());
+
+		String sql = myCaptureQueriesListener.getSelectQueries().get(0).getSql(true, false);
+		String expected = "SELECT t0.RES_ID FROM HFJ_IDX_CMB_TOK_NU t0 INNER JOIN HFJ_SPIDX_STRING t1 ON (t0.RES_ID = t1.RES_ID) WHERE ((t0.HASH_COMPLETE = '2215689319713414397') AND ((t1.HASH_NORM_PREFIX = '6206712800146298788') AND (t1.SP_VALUE_NORMALIZED LIKE 'JAY%'))) fetch first '10000' rows only";
+		assertEquals(expected, sql);
+
+		logCapturedMessages();
+		assertThat(myMessages.toString()).contains("Using NON_UNIQUE index(es) for query for search: Patient?family=SIMPSON&gender=http%3A%2F%2Fhl7.org%2Ffhir%2Fadministrative-gender%7Cmale&given=HOMER");
+		myMessages.clear();
+
+	}
+
+	@Test
+	void testRangedDate_Create() {
+		// Setup
+		IBaseResource comboSp = myComboSearchParameterTestHelper.createObservationSubjectCodeAndRangedEffective();
+		ourLog.info("Combo: {}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(comboSp));
+
+		createPatient(withId("P0"), withActiveTrue());
+
+		// Test
+		createObservation(
+			withId("O0"),
+			withSubject("Patient/P0"),
+			withObservationCode("http://foo", "bar"),
+			withEffectiveInstant("2022-01-02T03:44:55Z"));
+
+		// Verify
+		runInTransaction(() -> {
+			List<ResourceIndexedComboTokenNonUnique> indexes = myResourceIndexedComboTokensNonUniqueDao.findAll();
+			assertEquals(1, indexes.size());
+
+			assertEquals("Observation?code=http%3A%2F%2Ffoo%7Cbar&subject=Patient%2FP0", indexes.get(0).getIndexString());
+			assertEquals(20220102, indexes.get(0).getDateOrdinal());
+		});
+	}
+
+	@ParameterizedTest
+	@CsvSource(delimiter = '~', textBlock = """
+		# Expect ~ Use   ~ Use   ~ Observation          ~ Date
+		# Match  ~ Combo ~ Date  ~ Date
+		#        ~ Table ~ Table ~
+		
+		# YEAR Precision
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=2022
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=2023
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=ne2022
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=eq2022
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=gt2021
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=gt2022
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=ge2022
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=le2022
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=le2023
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=le2021
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=lt2022
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=lt2023
+		
+		# MONTH Precision
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=2022-01
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=2022-02
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=ne2022-01
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=eq2022-01
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=gt2022-01
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=gt2022-02
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=gt2021-12
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=ge2022-01
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=le2022-01
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=lt2022-01
+		
+		# DAY Precision
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=2022-01-02
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=2022-01-03
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=ne2022-01-02
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=eq2022-01-02
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=gt2022-01-02
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=ge2022-01-02
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=le2022-01-02
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=lt2022-01-02
+		
+		# Range
+		true     ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=gt2021&date=lt2023
+		false    ~ true  ~ false ~ 2022-01-02T03:44:55Z ~ date=gt2020&date=lt2021
+		
+		# Better than DAY Precision with zero time (doesn't need to use standard date index table)
+		true     ~ true  ~ false ~ 2022-01-01T03:44:55Z ~ date=gt2022-01-01T00:00Z
+		true     ~ true  ~ false ~ 2022-01-01T03:44:55Z ~ date=gt2022-01-01T00:00:00Z
+		true     ~ true  ~ false ~ 2022-01-01T03:44:55Z ~ date=gt2022-01-01T00:00:00.000Z
+		true     ~ true  ~ false ~ 2022-01-01T03:44:55Z ~ date=gt2022-01-01T00:00:00-04:00
+		true     ~ true  ~ false ~ 2022-01-01T03:44:55Z ~ date=ge2022-01-01T00:00:00Z
+		
+		# Better than DAY Precision (should also use standard date index table)
+		true     ~ true  ~ true  ~ 2022-01-02T03:44:55Z ~ date=2022-01-02T03:44:55Z
+		true     ~ true  ~ true  ~ 2022-01-02T03:44:55Z ~ date=gt2022-01-02T03:00:00Z
+		false    ~ true  ~ true  ~ 2022-01-02T03:44:55Z ~ date=gt2022-01-02T04:00:00Z
+		true     ~ true  ~ true  ~ 2022-01-02T03:44:55Z ~ date=lt2022-01-02T04:00:00Z
+		false    ~ true  ~ true  ~ 2022-01-02T03:44:55Z ~ date=lt2022-01-02T03:00:00Z
+		true     ~ true  ~ true  ~ 2022-01-02T03:44:55Z ~ date=ne2022-01-02T03:00:00Z
+		false    ~ true  ~ true  ~ 2022-01-02T03:44:55Z ~ date=ne2022-01-02T03:44:55Z
+		
+		# Other Qualifiers that aren't supported for combo param
+		true     ~ false ~ true  ~ 2022-01-02T03:44:55Z ~ date:missing=false
+		true     ~ false ~ true  ~ 2022-01-02T03:44:55Z ~ date=sa2021-01-02
+		true     ~ false ~ true  ~ 2022-01-02T03:44:55Z ~ date=eb2023-01-02
+		""")
+	void testRangedDate_Search(boolean theExpectMatch, boolean theExpectUseComboTable, boolean theExpectUseDateTable, String theObsEffectiveDate, String theDate) {
+		// Setup
+		myStorageSettings.setIndexMissingFields(StorageSettings.IndexEnabledEnum.ENABLED);
+		myComboSearchParameterTestHelper.createObservationSubjectCodeAndRangedEffective();
+
+		createPatient(withId("P0"), withActiveTrue());
+
+		createObservation(
+			withId("O0"),
+			withSubject("Patient/P0"),
+			withObservationCode("http://foo", "bar"),
+			withEffectiveInstant(theObsEffectiveDate));
+
+		// Test
+		String queryUrl = "Observation?" + theDate + "&subject=Patient/P0&code=http://foo|bar";
+		SearchParameterMap spMap = myMatchUrlService.getResourceSearch(queryUrl).getSearchParameterMap();
+		spMap.setLoadSynchronous(true);
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myObservationDao.search(spMap, newSrd());
+		List<String> resultIds = toUnqualifiedVersionlessIdValues(results);
+
+		// Verify
+		if (theExpectMatch) {
+			assertThat(resultIds).containsExactly("Observation/O0");
+		} else {
+			assertThat(resultIds).isEmpty();
+		}
+
+		assertThat(myCaptureQueriesListener).has(
+			// Make sure we searched the non-unique index table
+			onCurrentThread()
+				.selectSqlAtIndex(0).countInstances(theExpectUseComboTable ? 1 : 0, ResourceIndexedComboTokenNonUnique.HFJ_IDX_CMB_TOK_NU)
+				.selectSqlAtIndex(0).mightContain(theExpectUseDateTable, ResourceIndexedSearchParamDate.HFJ_SPIDX_DATE)
+		);
+	}
+
+
+	@ParameterizedTest
+	@CsvSource(delimiter = '|', textBlock = """
+		# Use Date | Query
+		# Table    |
+		false      | Bundle?composition.date=2022-01-02&composition.subject=Patient/PAT-0
+		false      | Bundle?composition.date=ge2022-01-01&composition.subject=Patient/PAT-0
+		false      | Bundle?composition.date=gt2022-01-01&composition.subject=Patient/PAT-0
+		false      | Bundle?composition.date=lt2022-01-03&composition.subject=Patient/PAT-0
+		false      | Bundle?composition.date=le2022-01-03&composition.subject=Patient/PAT-0
+		
+		true       | Bundle?composition.date=ge2022-01-01T12:00:00Z&composition.subject=Patient/PAT-0
+		
+		false      | Bundle?composition.date=ge2022-01-01&composition.date=le2022-01-03&composition.subject=Patient/PAT-0
+		""")
+	void testRangedDate_Chained(boolean theExpectUseDateTable, String theSearch) {
+		// Setup
+		myComboSearchParameterTestHelper.createDocumentSubjectAndRangedDateSp();
+
+		createPatient(withId("PAT-0"), withActiveTrue());
+
+		Bundle document = new Bundle();
+		document.setId("DOC-0");
+		document.setType(Bundle.BundleType.DOCUMENT);
+		Composition composition = new Composition();
+		composition.getSubject().setReference("Patient/PAT-0");
+		composition.setDateElement(new DateTimeType("2022-01-02T03:44:55Z"));
+		document.addEntry().setResource(composition);
+		myBundleDao.update(document, mySrd);
+
+		logAllNonUniqueIndexes();
+
+		// Test
+		SearchParameterMap spMap = myMatchUrlService.getResourceSearch(theSearch).getSearchParameterMap();
+		spMap.setLoadSynchronous(true);
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myBundleDao.search(spMap, newSrd());
+		List<String> resultIds = toUnqualifiedVersionlessIdValues(results);
+
+		myCaptureQueriesListener.logSelectQueries();
+
+		// Verify
+		assertThat(resultIds).containsExactly("Bundle/DOC-0");
+
+		assertThat(myCaptureQueriesListener).has(
+			// Make sure we searched the non-unique index table
+			onCurrentThread()
+				.selectSqlAtIndex(0).contains(ResourceIndexedComboTokenNonUnique.HFJ_IDX_CMB_TOK_NU)
+				.selectSqlAtIndex(0).mightContain(theExpectUseDateTable, ResourceIndexedSearchParamDate.HFJ_SPIDX_DATE)
+		);
+
+	}
+
+	@ParameterizedTest
+	@CsvSource(delimiter = '|', textBlock = """
+		# Match | Obs Period Start           | Obs Period End             | Search Param
+		true    | 2021-01-01T12:00:00-04:00  | 2021-01-03T12:00:00-04:00  | date=gt2021-01-02
+		false   | 2021-01-01T12:00:00-04:00  | 2021-01-03T12:00:00-04:00  | date=lt2021-01-02
+		true    | 2021-01-01T12:00:00-04:00  |                            | date=lt2021-01-02
+		""")
+	void testRangedDate_Period(boolean theExpectMatch, String theObservationStart, String theObservationEnd, String theDate) {
+		// Setup
+		myComboSearchParameterTestHelper.createObservationSubjectCodeAndRangedEffective();
+
+		createPatient(withId("P0"), withActiveTrue());
+
+		createObservation(
+			withId("O0"),
+			withSubject("Patient/P0"),
+			withObservationCode("http://foo", "bar"),
+			withEffectivePeriod(theObservationStart, theObservationEnd));
+
+		logAllNonUniqueIndexes();
+
+		// Test
+		String queryUrl = "Observation?" + theDate + "&subject=Patient/P0&code=http://foo|bar";
+		SearchParameterMap spMap = myMatchUrlService.getResourceSearch(queryUrl).getSearchParameterMap();
+		spMap.setLoadSynchronous(true);
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myObservationDao.search(spMap, newSrd());
+		List<String> resultIds = toUnqualifiedVersionlessIdValues(results);
+
+		// Verify
+		if (theExpectMatch) {
+			assertThat(resultIds).containsExactly("Observation/O0");
+		} else {
+			assertThat(resultIds).isEmpty();
+		}
+
+		boolean theExpectUseComboTable = true;
+		boolean theExpectUseDateTable = false;
+		assertThat(myCaptureQueriesListener).has(
+			// Make sure we searched the non-unique index table
+			onCurrentThread()
+				.selectSqlAtIndex(0).countInstances(theExpectUseComboTable ? 1 : 0, ResourceIndexedComboTokenNonUnique.HFJ_IDX_CMB_TOK_NU)
+				.selectSqlAtIndex(0).mightContain(theExpectUseDateTable, ResourceIndexedSearchParamDate.HFJ_SPIDX_DATE)
+		);
+
+	}
+
+
+
+	@ParameterizedTest
+	@CsvSource(textBlock = """
+		# Observation Date      , Search URL Date         , Expect Match , Expect Use Date Index Table
+		2021-02-02              , 2021-02-02              , true         , false
+		2021-02-02T11:22:33Z    , 2021-02-02T11:22:33Z    , true         , true
+		2021-02-02T11:22:33Z    , 2021-02-02T11:22:01Z    , false        , true
+		""")
+	void testStringAndDate_Create(String theObservationDate, String theSearchDate, boolean theExpectMatch, boolean theExpectUseDateIndexTable) {
+		createStringAndDateCombo_ObservationValueAndEffective();
+
+		IIdType id1 = createObservation(
+			withObservationValueString("hello"),
+			withEffectiveInstant(theObservationDate));
+
+		IIdType id2 = createObservation(
+			withObservationValueString("goodbye"),
+			withEffectiveInstant(theObservationDate));
+
+		logAllNonUniqueIndexes();
+		runInTransaction(() -> {
+			List<ResourceIndexedComboTokenNonUnique> indexedTokens = myResourceIndexedComboTokensNonUniqueDao.findAll();
+			indexedTokens.sort(Comparator.comparing(ResourceIndexedComboTokenNonUnique::getId));
+			assertEquals(2, indexedTokens.size());
+			String expected = "Observation?date=2021-02-02&value-string=HELLO";
+			assertEquals(expected, indexedTokens.get(0).getIndexString());
+			assertEquals(-53995296465088005L, indexedTokens.get(0).getHashComplete().longValue());
+		});
+
+		myMessages.clear();
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("value-string", new StringParam("hello"));
+		params.add("date", new DateParam(theSearchDate));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myObservationDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		if (theExpectMatch) {
+			assertThat(actual).contains(id1.toUnqualifiedVersionless().getValue());
+		} else {
+			assertThat(actual).isEmpty();
+		}
+
+		if (theExpectUseDateIndexTable) {
+			String expected = "SELECT t0.RES_ID FROM HFJ_IDX_CMB_TOK_NU t0 INNER JOIN HFJ_SPIDX_DATE";
+			assertThat(myCaptureQueriesListener).has(
+				onCurrentThread().selectSqlAtIndex(0).contains(expected)
+			);
+		} else {
+			String expected = "SELECT t0.RES_ID FROM HFJ_IDX_CMB_TOK_NU t0 WHERE (t0.HASH_COMPLETE = '-53995296465088005') fetch first '10000' rows only";
+			assertThat(myCaptureQueriesListener).has(
+				onCurrentThread().selectSqlAtIndex(0).contains(expected)
+			);
+		}
+
+		logCapturedMessages();
+		assertThat(myMessages.toString()).contains("INFO Using NON_UNIQUE index(es) for query for search: Observation?date=2021-02-02&value-string=HELLO");
+		myMessages.clear();
+	}
+
+	@Test
+	void testStringAndReference_Create() {
+		createStringAndReferenceCombo_FamilyAndOrganization();
+
+		createOrg();
+
+		IIdType id1 = createPatient1(ORG_ID_QUALIFIED);
+		createPatient2(ORG_ID_QUALIFIED);
+
+		logAllNonUniqueIndexes();
+		runInTransaction(() -> {
+			List<ResourceIndexedComboTokenNonUnique> indexedTokens = myResourceIndexedComboTokensNonUniqueDao.findAll();
+			indexedTokens.sort(Comparator.comparing(ResourceIndexedComboTokenNonUnique::getId));
+			assertEquals(2, indexedTokens.size());
+			assertEquals("Patient?family=FAMILY1&organization=Organization%2Fmy-org", indexedTokens.get(0).getIndexString());
+		});
+
+		myMessages.clear();
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("family", new StringParam("fAmIlY1")); // weird casing to test normalization
+		params.add("organization", new ReferenceParam(ORG_ID_QUALIFIED));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myPatientDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(actual).contains(id1.toUnqualifiedVersionless().getValue());
+
+		String expected = "SELECT t0.RES_ID FROM HFJ_IDX_CMB_TOK_NU t0 WHERE (t0.HASH_COMPLETE = '2591238402961312979') fetch first '10000' rows only";
+		assertEquals(expected, myCaptureQueriesListener.getSelectQueriesForCurrentThread().get(0).getSql(true, false));
+	}
+
+	@Test
+	void testStringAndReference_SearchByUnqualifiedReference() {
+		createStringAndReferenceCombo_FamilyAndOrganization();
+
+		createOrg();
+
+		IIdType id1 = createPatient1(ORG_ID_QUALIFIED);
+		createPatient2(ORG_ID_QUALIFIED);
+
+		myMessages.clear();
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("family", new StringParam("family1"));
+		// "orgid" instead of "Organization/orgid"
+		params.add("organization", new ReferenceParam(ORG_ID_UNQUALIFIED));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myPatientDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		assertThat(actual).contains(id1.toUnqualifiedVersionless().getValue());
+
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(myCaptureQueriesListener.getSelectQueriesForCurrentThread().get(0).getSql(true, false)).contains("where (rt1_0.FHIR_ID='my-org')");
+		String sql = myCaptureQueriesListener.getSelectQueriesForCurrentThread().get(1).getSql(true, false);
+		assertThat(sql).contains("SP_VALUE_NORMALIZED LIKE 'FAMILY1%'");
+		assertThat(sql).contains("t1.TARGET_RESOURCE_ID");
+
+		assertThat(myMessages.get(0)).contains("Search is not a candidate for unique combo searching - Reference with no type specified for parameter 'organization'");
+	}
+
+	@ParameterizedTest
+	@EnumSource(StorageSettings.TagStorageModeEnum.class)
+	void testTagProfileSecurityLabels_Search_FindsCorrectResultAndUsesComboIndex(StorageSettings.TagStorageModeEnum theTagStorageMode) {
+		// Setup
+
+		myStorageSettings.setTagStorageMode(theTagStorageMode);
+		createTagProfileSecurityLabelParameters();
+
+		for (int i = 0; i <= 2; i++) {
+			createPatient(
+				withId("PT" + i),
+				withTag("http://tag", Integer.toString(i)),
+				withSecurity("http://security", Integer.toString(i)),
+				withProfile("http://profile-" + i));
+		}
+		logAllNonUniqueIndexes();
+		logAllTokenIndexes();
+
+		// Test
+
+		myMessages.clear();
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add(Patient.SP_RES_TAG, new TokenParam("http://tag", "1"));
+		params.add(Patient.SP_RES_SECURITY, new TokenParam("http://security", "1"));
+		params.add(Patient.SP_RES_PROFILE, new TokenParam("http://profile-1"));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myPatientDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+
+		// Verify
+		assertThat(actual).containsExactly("Patient/PT1");
+		assertThat(myCaptureQueriesListener).has(
+			onCurrentThread()
+				.selectCount((theTagStorageMode == StorageSettings.TagStorageModeEnum.INLINE) ? 2 : 3)
+				.selectSqlAtIndex(0).contains("SELECT t0.RES_ID FROM HFJ_IDX_CMB_TOK_NU t0")
+				.selectSqlAtIndex(0).doesNotContain("join")
+			);
+
+		assertThat(myMessages.get(0)).contains("INFO Using NON_UNIQUE index(es) for query for search");
+	}
+
+	@ParameterizedTest
+	@EnumSource(StorageSettings.TagStorageModeEnum.class)
+	void testTagProfileSecurityLabels_MetaAddOperation_UpdateComboIndex(StorageSettings.TagStorageModeEnum theTagStorageMode) {
+		// Setup
+
+		myStorageSettings.setTagStorageMode(theTagStorageMode);
+		createTagProfileSecurityLabelParameters();
+
+		createPatient(withId("PT0"), withActiveTrue());
+
+		// Test
+
+		Meta metaAdd = new Meta();
+		metaAdd.addTag().setSystem("http://tag").setCode("0");
+		metaAdd.addSecurity().setSystem("http://security").setCode("0");
+		metaAdd.addProfile("http://profile");
+		myPatientDao.metaAddOperation(new IdType("Patient/PT0"), metaAdd, newSrd(), new TransactionDetails());
+
+		// Verify
+
+		logAllNonUniqueIndexes();
+		runInTransaction(()->{
+			List<ResourceIndexedComboTokenNonUnique> allIndexes = myResourceIndexedComboTokensNonUniqueDao.findAll();
+			List<String> comboStrings = allIndexes.stream().map(ResourceIndexedComboTokenNonUnique::getIndexString).toList();
+			if (theTagStorageMode == StorageSettings.TagStorageModeEnum.INLINE) {
+				// The meta operations don't currently work in INLINE mode - if that ever gets
+				// fixed, this test will need updating
+				assertThat(comboStrings).isEmpty();
+			} else {
+				assertThat(comboStrings).containsExactlyInAnyOrder("Patient?_profile=http%3A%2F%2Fprofile&_security=http%3A%2F%2Fsecurity%7C0&_tag=http%3A%2F%2Ftag%7C0");
+			}
+		});
+
+	}
+
+	@ParameterizedTest
+	@EnumSource(StorageSettings.TagStorageModeEnum.class)
+	void testTagProfileSecurityLabels_MetaDeleteOperation_UpdateComboIndex(StorageSettings.TagStorageModeEnum theTagStorageMode) {
+		// Setup
+
+		myStorageSettings.setTagStorageMode(theTagStorageMode);
+		createTagProfileSecurityLabelParameters();
+		createPatient(withId("PT0"),
+			withActiveTrue(),
+			withTag("http://tag", "0"),
+			withSecurity("http://security", "0"),
+			withProfile("http://profile"));
+
+		runInTransaction(()->assertEquals(1, myResourceIndexedComboTokensNonUniqueDao.count()));
+
+		// Test
+
+		Meta metaAdd = new Meta();
+		metaAdd.addTag().setSystem("http://tag").setCode("0");
+		metaAdd.addSecurity().setSystem("http://security").setCode("0");
+		metaAdd.addProfile("http://profile");
+		myPatientDao.metaDeleteOperation(new IdType("Patient/PT0"), metaAdd, newSrd(), new TransactionDetails());
+
+		// Verify
+
+		logAllNonUniqueIndexes();
+		runInTransaction(()->{
+			List<ResourceIndexedComboTokenNonUnique> allIndexes = myResourceIndexedComboTokensNonUniqueDao.findAll();
+			List<String> comboStrings = allIndexes.stream().map(ResourceIndexedComboTokenNonUnique::getIndexString).toList();
+			if (theTagStorageMode == StorageSettings.TagStorageModeEnum.INLINE) {
+				// The meta operations don't currently work in INLINE mode - if that ever gets
+				// fixed, this test will need updating
+				assertThat(comboStrings).containsExactlyInAnyOrder("Patient?_profile=http%3A%2F%2Fprofile&_security=http%3A%2F%2Fsecurity%7C0&_tag=http%3A%2F%2Ftag%7C0");
+			} else {
+				assertThat(comboStrings).isEmpty();
+			}
+		});
+
+	}
+
+	@ParameterizedTest
+	@CsvSource(useHeadersInDisplayName = true, textBlock = """
+		AllowlistTag , AllowlistProfile, ExpectComboIndexEntry, ExpectMatch, ExpectUseComboIndex
+		# Use the combo index because the indexed value is in the allow list
+		http://tag|1 , http://prof     , true                 , true       , true
+		http://tag|  , http://prof     , true                 , true       , true
+		          |1 , http://prof     , true                 , true       , true
+		# Only one of the components has an allow list
+		http://tag|1 , http://prof     , true                 , true       , true
+		             ,                 , true                 , true       , true
+		# Don't use the combo index because the indexed value is not in the allow list
+		http://foo|1 , http://prof     , false                , true       , false
+		http://foo|  , http://prof     , false                , true       , false
+		          |2 , http://prof     , false                , true       , false
+		""")
+	void testAllowLists(String theAllowlistTag, String theAllowlistProfile, boolean theExpectComboIndexEntry, boolean theExpectMatch, boolean theExpectUseComboIndex) {
+		// Setup
+		SearchParameter tagSp = createTagSearchParameter();
+		SearchParameter profileSp = createProfileSearchParameter();
+
+		SearchParameter comboSp = createComboSearchParameter("Patient", false, new SearchParameter[]{tagSp, profileSp}, sp -> {
+			TokenParam tag = parseToken(theAllowlistTag);
+			if (tag != null) {
+				sp.getComponent().get(0).addExtension(HapiExtensions.EXT_SP_COMBO_COMPONENT_FILTER_ALLOWLIST,
+					new Identifier().setSystem(tag.getSystem()).setValue(tag.getValue()));
+			}
+			if (isNotBlank(theAllowlistProfile)) {
+				sp.getComponent().get(1).addExtension(HapiExtensions.EXT_SP_COMBO_COMPONENT_FILTER_ALLOWLIST,
+					new UriType().setValue(theAllowlistProfile));
+			}
+		});
+		ourLog.info("Combo SP:\n{}", myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(comboSp));
+
+		myMessages.clear();
+
+		createPatient(
+			withId("PT"),
+			withTag("http://tag", "1"),
+			withProfile("http://prof"));
+
+		logAllNonUniqueIndexes();
+		logAllTokenIndexes();
+		runInTransaction(() -> {
+			List<ResourceIndexedComboTokenNonUnique> comboIndexes = myResourceIndexedComboTokensNonUniqueDao.findAll();
+			if (theExpectComboIndexEntry) {
+				assertThat(comboIndexes).hasSize(1);
+			} else {
+				assertThat(comboIndexes).isEmpty();
+			}
+		});
+
+		// Test
+
+		myMessages.clear();
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add(Patient.SP_RES_TAG, parseToken("http://tag|1"));
+		params.add(Patient.SP_RES_PROFILE, new TokenParam("http://prof"));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myPatientDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+
+		// Verify
+		if (theExpectMatch) {
+			assertThat(actual).containsExactly("Patient/PT");
+		} else {
+			assertThat(actual).isEmpty();
+		}
+		
+		if (theExpectUseComboIndex) {
+			assertThat(myCaptureQueriesListener).has(
+				onCurrentThread()
+					// Perform the search using the combo index
+					.selectSqlAtIndex(0).contains("SELECT t0.RES_ID FROM HFJ_IDX_CMB_TOK_NU t0")
+					.selectSqlAtIndex(0).doesNotContain("join")
+			);
+		} else {
+			assertThat(myCaptureQueriesListener).has(
+				onCurrentThread()
+					// The first query is for resolving the tag definitions
+					.selectSqlAtIndex(0).contains("from HFJ_TAG_DEF td1_0")
+					.selectSqlAtIndex(0).doesNotContain("join")
+					// The second query performs the search and should not use the combo index
+					.selectSqlAtIndex(1).contains("FROM HFJ_RESOURCE t0 INNER JOIN HFJ_RES_TAG t1")
+					.selectSqlAtIndex(1).doesNotContain("HFJ_IDX_CMB_TOK_NU")
+					.selectSqlAtIndex(1).contains("join")
+			);
+		}
+	}
+	
+	/**
+	 * If there are two parameters as a part of a combo param, and we have
+	 * multiple AND repetitions for both, then we can just join on the
+	 * combo index twice.
+	 */
+	@Test
+	void testMultipleAndCombinations_EqualNumbers() {
+		createStringAndStringCombo_FamilyAndGiven();
+
+		createPatient(
+			withId("A"),
+			withFamily("SIMPSON"), withGiven("HOMER"),
+			withFamily("jones"), withGiven("frank")
+		);
+		createPatient(
+			withId("B"),
+			withFamily("SIMPSON"), withGiven("MARGE")
+		);
+
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("family", new StringAndListParam().addAnd(new StringParam("simpson")).addAnd(new StringParam("JONES")));
+		params.add("given", new StringAndListParam().addAnd(new StringParam("homer")).addAnd(new StringParam("frank")));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myPatientDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(actual).contains("Patient/A");
+
+		String expected = "SELECT t0.RES_ID FROM HFJ_IDX_CMB_TOK_NU t0 INNER JOIN HFJ_IDX_CMB_TOK_NU t1 ON (t0.RES_ID = t1.RES_ID) WHERE ((t0.HASH_COMPLETE = '822090206952728926') AND (t1.HASH_COMPLETE = '-8088946700286918311')) fetch first '10000' rows only";
+		assertEquals(expected, myCaptureQueriesListener.getSelectQueriesForCurrentThread().get(0).getSql(true, false));
+	}
+
+	/**
+	 * If there are two parameters as a part of a combo param, and we have
+	 * multiple AND repetitions for one but not the other, than we'll use
+	 * the combo index for the first pair, but we don't create a second pair.
+	 * We could probably optimize this to use the combo index for both, but
+	 * it's not clear that this would actually help and this is probably
+	 * a pretty contrived use case.
+	 */
+	@Test
+	void testMultipleAndCombinations_NonEqualNumbers() {
+		createStringAndStringCombo_FamilyAndGiven();
+
+		createPatient(
+			withId("A"),
+			withFamily("SIMPSON"), withGiven("HOMER"),
+			withFamily("jones"), withGiven("frank")
+		);
+		createPatient(
+			withId("B"),
+			withFamily("SIMPSON"), withGiven("MARGE")
+		);
+
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("family", new StringAndListParam().addAnd(new StringParam("simpson")).addAnd(new StringParam("JONES")));
+		params.add("given", new StringAndListParam().addAnd(new StringParam("homer")));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myPatientDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(actual).contains("Patient/A");
+
+		String expected = "SELECT t0.RES_ID FROM HFJ_IDX_CMB_TOK_NU t0 INNER JOIN HFJ_SPIDX_STRING t1 ON (t0.RES_ID = t1.RES_ID) WHERE ((t0.HASH_COMPLETE = '822090206952728926') AND ((t1.HASH_NORM_PREFIX = '-3664262414674370905') AND (t1.SP_VALUE_NORMALIZED LIKE 'JONES%'))) fetch first '10000' rows only";
+		assertEquals(expected, myCaptureQueriesListener.getSelectQueriesForCurrentThread().get(0).getSql(true, false));
+
+	}
+
+	/**
+	 * Index document with <code>composition.subject</code> and <code>composition.type</code>
+	 * in a combo param.
+	 */
+	@Test
+	void testIndexAndSearchDocument() {
+		createCompositionSubjectAndTypeComboSp();
+
+		createPatient(withId("PAT-0"), withActiveTrue());
+
+		Bundle document = new Bundle();
+		document.setId("DOC-0");
+		document.setType(Bundle.BundleType.DOCUMENT);
+		Composition composition = new Composition();
+		composition.getSubject().setReference("Patient/PAT-0");
+		composition.getType().addCoding().setSystem("http://foo").setCode("123");
+		document.addEntry().setResource(composition);
+		myBundleDao.update(document, mySrd);
+
+		// Non-matching
+		document = new Bundle();
+		document.setId("DOC-1");
+		document.setType(Bundle.BundleType.DOCUMENT);
+		composition = new Composition();
+		composition.getSubject().setReference("Patient/PAT-0");
+		composition.getType().addCoding().setSystem("http://foo").setCode("456");
+		document.addEntry().setResource(composition);
+		myBundleDao.update(document, mySrd);
+
+		logAllNonUniqueIndexes();
+		runInTransaction(()->{
+			List<String> indexStrings = myResourceIndexedComboTokensNonUniqueDao.findAll().stream().map(t -> t.getIndexString()).toList();
+			assertThat(indexStrings).containsExactlyInAnyOrder(
+				"Bundle?composition.subject=Patient%2FPAT-0&composition.type=http%3A%2F%2Ffoo%7C123",
+				"Bundle?composition.subject=Patient%2FPAT-0&composition.type=http%3A%2F%2Ffoo%7C456"
+			);
+		});
+
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("composition", new ReferenceParam("subject", "Patient/PAT-0"));
+		params.add("composition", new ReferenceParam("type", "http://foo|123"));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myBundleDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(actual).containsOnly("Bundle/DOC-0");
+
+		String querySql = myCaptureQueriesListener.getSelectQueries().get(0).getSql(true, true);
+		assertThat(querySql).contains("HFJ_IDX_CMB_TOK_NU t0");
+		assertThat(querySql).contains("t0.HASH_COMPLETE = '-2371971990958459035'");
+	}
+
+	/**
+	 * Index document with <code>composition.subject</code> and <code>composition.type</code>
+	 * in a combo param, and <code>composition.date</code> added to the search URL as well
+	 */
+	@Test
+	void testIndexAndSearchDocument_ComboPlusExtraSp() {
+		SearchParameter sp = new SearchParameter();
+		sp.setId("Bundle-composition-date");
+		sp.setUrl("http://example.org/SearchParameter/Bundle-composition-date");
+		sp.setName("composition.date");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.setCode("composition.date");
+		sp.addBase("Bundle");
+		sp.setType(Enumerations.SearchParamType.DATE);
+		sp.setExpression("Bundle.where(type = 'document').entry[0].resource.as(Composition).date");
+		mySearchParameterDao.update(sp, mySrd);
+
+		createCompositionSubjectAndTypeComboSp();
+
+		createPatient(withId("PAT-0"), withActiveTrue());
+
+		// Will match
+		Bundle document = new Bundle();
+		document.setId("DOC-0");
+		document.setType(Bundle.BundleType.DOCUMENT);
+		Composition composition = new Composition();
+		composition.getSubject().setReference("Patient/PAT-0");
+		composition.getType().addCoding().setSystem("http://foo").setCode("123");
+		composition.setDateElement(new DateTimeType("2021-02-02"));
+		document.addEntry().setResource(composition);
+		myBundleDao.update(document, mySrd);
+
+		// Won't match, wrong year in the date
+		document = new Bundle();
+		document.setId("DOC-1");
+		document.setType(Bundle.BundleType.DOCUMENT);
+		composition = new Composition();
+		composition.getSubject().setReference("Patient/PAT-0");
+		composition.getType().addCoding().setSystem("http://foo").setCode("123");
+		composition.setDateElement(new DateTimeType("2022-02-02"));
+		document.addEntry().setResource(composition);
+		myBundleDao.update(document, mySrd);
+
+		logAllNonUniqueIndexes();
+
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("composition", new ReferenceParam("subject", "Patient/PAT-0"));
+		params.add("composition", new ReferenceParam("type", "http://foo|123"));
+		params.add("composition", new ReferenceParam("date", "2021"));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myBundleDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(actual).containsOnly("Bundle/DOC-0");
+
+		String querySql = myCaptureQueriesListener.getSelectQueries().get(0).getSql(true, true);
+		assertThat(querySql).contains("HFJ_IDX_CMB_TOK_NU t0");
+		assertThat(querySql).contains("t0.HASH_COMPLETE = '-2371971990958459035'");
+	}
+
+	@Test
+	void testOrQuery() {
+		createTokenAndReferenceCombo_FamilyAndOrganization();
+
+		createPatient(withId("PAT"), withActiveTrue());
+		createObservation(withId("O1"), withSubject("Patient/PAT"), withStatus("final"));
+		createObservation(withId("O2"), withSubject("Patient/PAT"), withStatus("registered"));
+
+		SearchParameterMap params = SearchParameterMap.newSynchronous();
+		params.add("patient", new ReferenceParam("Patient/PAT"));
+		params.add("status", new TokenOrListParam("http://hl7.org/fhir/observation-status", "preliminary", "final", "amended"));
+		myCaptureQueriesListener.clear();
+		IBundleProvider results = myObservationDao.search(params, mySrd);
+		List<String> actual = toUnqualifiedVersionlessIdValues(results);
+		myCaptureQueriesListener.logSelectQueries();
+		assertThat(actual).contains("Observation/O1");
+
+		String expected = "SELECT t0.RES_ID FROM HFJ_IDX_CMB_TOK_NU t0 WHERE (t0.HASH_COMPLETE IN ('-8398039560302268601','-8321617344753007996','8635278213650709883') ) fetch first '10000' rows only";
+		assertEquals(expected, myCaptureQueriesListener.getSelectQueriesForCurrentThread().get(0).getSql(true, false));
+
+		logCapturedMessages();
+		assertThat(myMessages.toString()).contains("Observation?patient=Patient%2FPAT&status=http%3A%2F%2Fhl7.org%2Ffhir%2Fobservation-status%7Camended", "Observation?patient=Patient%2FPAT&status=http%3A%2F%2Fhl7.org%2Ffhir%2Fobservation-status%7Cfinal", "Observation?patient=Patient%2FPAT&status=http%3A%2F%2Fhl7.org%2Ffhir%2Fobservation-status%7Cpreliminary");
+		myMessages.clear();
+
+	}
+
+	private void createCompositionSubjectAndTypeComboSp() {
+		SearchParameter sp = new SearchParameter();
+		sp.setId("Bundle-composition-subject");
+		sp.setUrl("http://example.org/SearchParameter/Bundle-composition-subject");
+		sp.setName("composition.subject");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.setCode("composition.subject");
+		sp.addBase("Bundle");
+		sp.setType(Enumerations.SearchParamType.REFERENCE);
+		sp.setExpression("Bundle.where(type = 'document').entry[0].resource.as(Composition).subject");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("Bundle-composition-type");
+		sp.setUrl("http://example.org/SearchParameter/Bundle-composition-type");
+		sp.setName("composition.type");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.setCode("composition.type");
+		sp.addBase("Bundle");
+		sp.setType(Enumerations.SearchParamType.TOKEN);
+		sp.setExpression("Bundle.where(type = 'document').entry[0].resource.as(Composition).type");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/Bundle-composition-subject-and-type");
+		sp.addExtension().setUrl("http://hapifhir.io/fhir/StructureDefinition/sp-unique").setValue(new BooleanType(false));
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.setCode("bundle-composition-subject-and-type");
+		sp.addBase("Bundle");
+		sp.setType(Enumerations.SearchParamType.COMPOSITE);
+		sp.setExpression("Bundle");
+		sp.addComponent(new SearchParameter.SearchParameterComponentComponent().setDefinition("SearchParameter/Bundle-composition-subject").setExpression("Bundle"));
+		sp.addComponent(new SearchParameter.SearchParameterComponentComponent().setDefinition("SearchParameter/Bundle-composition-type").setExpression("Bundle"));
+		mySearchParameterDao.update(sp, mySrd);
+
+		mySearchParamRegistry.forceRefresh();
+	}
+
+
+
+	private void createOrg() {
+		Organization org = new Organization();
+		org.setName("Some Org");
+		org.setId(ORG_ID_QUALIFIED);
+		myOrganizationDao.update(org, mySrd);
+	}
+
+	private void createPatientFamilySp() {
+		SearchParameter sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-family");
+		sp.setType(Enumerations.SearchParamType.STRING);
+		sp.setCode("family");
+		sp.setExpression("Patient.name.family");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		mySearchParameterDao.update(sp, mySrd);
+	}
+
+	private void createPatientIdentifierSp() {
+		SearchParameter sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-identifier");
+		sp.setType(Enumerations.SearchParamType.TOKEN);
+		sp.setCode("identifier");
+		sp.setExpression("Patient.identifier");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		mySearchParameterDao.update(sp, mySrd);
+	}
+
+	private void createStringAndDateCombo_ObservationValueAndEffective() {
+		SearchParameter sp = new SearchParameter();
+		sp.setId("SearchParameter/observation-value-string");
+		sp.setType(Enumerations.SearchParamType.STRING);
+		sp.setCode("value-string");
+		sp.setExpression("Observation.value.ofType(string)");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Observation");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/observation-date");
+		sp.setType(Enumerations.SearchParamType.DATE);
+		sp.setCode("date");
+		sp.setExpression("Observation.effective");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Observation");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/observation-value-string-and-date");
+		sp.setType(Enumerations.SearchParamType.COMPOSITE);
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Observation");
+		sp.addComponent()
+			.setExpression("Observation")
+			.setDefinition("SearchParameter/observation-value-string");
+		sp.addComponent()
+			.setExpression("Observation")
+			.setDefinition("SearchParameter/observation-date");
+		sp.addExtension()
+			.setUrl(HapiExtensions.EXT_SP_UNIQUE)
+			.setValue(new BooleanType(false));
+		mySearchParameterDao.update(sp, mySrd);
+
+		mySearchParamRegistry.forceRefresh();
+
+		myMessages.clear();
+	}
+
+	private void createStringAndStringCombo_FamilyAndGiven() {
+		createPatientFamilySp();
+		SearchParameter sp;
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-given");
+		sp.setType(Enumerations.SearchParamType.STRING);
+		sp.setCode("given");
+		sp.setExpression("Patient.name.given");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-names");
+		sp.setType(Enumerations.SearchParamType.COMPOSITE);
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		sp.addComponent()
+			.setExpression("Patient")
+			.setDefinition("SearchParameter/patient-family");
+		sp.addComponent()
+			.setExpression("Patient")
+			.setDefinition("SearchParameter/patient-given");
+		sp.addExtension()
+			.setUrl(HapiExtensions.EXT_SP_UNIQUE)
+			.setValue(new BooleanType(false));
+		mySearchParameterDao.update(sp, mySrd);
+
+		mySearchParamRegistry.forceRefresh();
+
+		myMessages.clear();
+	}
+
+	private void createStringAndTokenCombo_NameAndGender() {
+		createPatientFamilySp();
+		SearchParameter sp;
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-given");
+		sp.setType(Enumerations.SearchParamType.STRING);
+		sp.setCode("given");
+		sp.setExpression("Patient.name.given");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-gender");
+		sp.setType(Enumerations.SearchParamType.TOKEN);
+		sp.setCode("gender");
+		sp.setExpression("Patient.gender");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-names-and-gender");
+		sp.setType(Enumerations.SearchParamType.COMPOSITE);
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		sp.addComponent()
+			.setExpression("Patient")
+			.setDefinition("SearchParameter/patient-family");
+		sp.addComponent()
+			.setExpression("Patient")
+			.setDefinition("SearchParameter/patient-given");
+		sp.addComponent()
+			.setExpression("Patient")
+			.setDefinition("SearchParameter/patient-gender");
+		sp.addExtension()
+			.setUrl(HapiExtensions.EXT_SP_UNIQUE)
+			.setValue(new BooleanType(false));
+		mySearchParameterDao.update(sp, mySrd);
+
+		mySearchParamRegistry.forceRefresh();
+
+		myMessages.clear();
+	}
+
+	private void createStringAndReferenceCombo_FamilyAndOrganization() {
+		createPatientFamilySp();
+		SearchParameter sp;
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-managingorg");
+		sp.setType(Enumerations.SearchParamType.REFERENCE);
+		sp.setCode(Patient.SP_ORGANIZATION);
+		sp.setExpression("Patient.managingOrganization");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/patient-family-and-org");
+		sp.setType(Enumerations.SearchParamType.COMPOSITE);
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Patient");
+		sp.addComponent()
+			.setExpression("Patient")
+			.setDefinition("SearchParameter/patient-family");
+		sp.addComponent()
+			.setExpression("Patient")
+			.setDefinition("SearchParameter/patient-managingorg");
+		sp.addExtension()
+			.setUrl(HapiExtensions.EXT_SP_UNIQUE)
+			.setValue(new BooleanType(false));
+		mySearchParameterDao.update(sp, mySrd);
+
+		mySearchParamRegistry.forceRefresh();
+
+		myMessages.clear();
+	}
+
+
+	private void createTagProfileSecurityLabelParameters() {
+		SearchParameter tagSp = createTagSearchParameter();
+		SearchParameter securitySp = createSecuritySearchParameter();
+		SearchParameter profileSp = createProfileSearchParameter();
+
+		String base = "Patient";
+		boolean unique = false;
+		SearchParameter[] searchParameters = new SearchParameter[] {tagSp, securitySp, profileSp};
+
+		createComboSearchParameter(base, unique, searchParameters);
+
+		mySearchParamRegistry.forceRefresh();
+
+		myMessages.clear();
+	}
+
+	private SearchParameter createComboSearchParameter(String theBase, boolean theUnique, SearchParameter[] theSearchParameters, Consumer<SearchParameter>... theModifiers) {
+		SearchParameter comboSp = new SearchParameter();
+		comboSp.setId(UUID.randomUUID().toString());
+		comboSp.setType(Enumerations.SearchParamType.COMPOSITE);
+		comboSp.setStatus(PublicationStatus.ACTIVE);
+		comboSp.addBase(theBase);
+		for (SearchParameter sp : theSearchParameters) {
+			comboSp.addComponent()
+				.setDefinition("SearchParameter/" + sp.getIdPart());
+		}
+		comboSp.addExtension()
+			.setUrl(HapiExtensions.EXT_SP_UNIQUE)
+			.setValue(new BooleanType(theUnique));
+
+		Arrays.stream(theModifiers).forEach(m -> m.accept(comboSp));
+
+		mySearchParameterDao.update(comboSp, mySrd);
+
+		return comboSp;
+	}
+
+	private SearchParameter createSecuritySearchParameter() {
+		SearchParameter securitySp = new SearchParameter();
+		securitySp.setId("Resource-security");
+		securitySp.setUrl("http://hl7.org/fhir/SearchParameter/Resource-security");
+		securitySp.setCode("_security");
+		securitySp.setName("_security");
+		securitySp.addBase("Resource");
+		securitySp.setType(Enumerations.SearchParamType.TOKEN);
+		securitySp.setExpression("Resource.meta.security");
+		securitySp.setStatus(PublicationStatus.ACTIVE);
+		mySearchParameterDao.update(securitySp, mySrd);
+		return securitySp;
+	}
+
+	private SearchParameter createProfileSearchParameter() {
+		SearchParameter profileSp = new SearchParameter();
+		profileSp.setId("Resource-profile");
+		profileSp.setUrl("http://hl7.org/fhir/SearchParameter/Resource-profile");
+		profileSp.setCode("_profile");
+		profileSp.setName("_profile");
+		profileSp.addBase("Resource");
+		profileSp.setType(Enumerations.SearchParamType.URI);
+		profileSp.setExpression("Resource.meta.profile");
+		profileSp.setStatus(PublicationStatus.ACTIVE);
+		mySearchParameterDao.update(profileSp, mySrd);
+		return profileSp;
+	}
+
+	private SearchParameter createTagSearchParameter() {
+		SearchParameter tagSp = new SearchParameter();
+		tagSp.setId("Resource-tag");
+		tagSp.setUrl("http://hl7.org/fhir/SearchParameter/Resource-tag");
+		tagSp.setCode("_tag");
+		tagSp.setName("_tag");
+		tagSp.addBase("Resource");
+		tagSp.setType(Enumerations.SearchParamType.TOKEN);
+		tagSp.setExpression("Resource.meta.tag");
+		tagSp.setStatus(PublicationStatus.ACTIVE);
+		mySearchParameterDao.update(tagSp, mySrd);
+		return tagSp;
+	}
+
+	private void createTokenAndReferenceCombo_FamilyAndOrganization() {
+		SearchParameter sp = new SearchParameter();
+		sp.setId("SearchParameter/Observation-status");
+		sp.setType(Enumerations.SearchParamType.TOKEN);
+		sp.setCode(Observation.SP_STATUS);
+		sp.setExpression("Observation.status");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Observation");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/clinical-patient");
+		sp.setType(Enumerations.SearchParamType.REFERENCE);
+		sp.setCode(Observation.SP_PATIENT);
+		sp.setExpression("Observation.subject.where(resolve() is Patient)");
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Observation");
+		mySearchParameterDao.update(sp, mySrd);
+
+		sp = new SearchParameter();
+		sp.setId("SearchParameter/observation-status-and-patient");
+		sp.setType(Enumerations.SearchParamType.COMPOSITE);
+		sp.setStatus(PublicationStatus.ACTIVE);
+		sp.addBase("Observation");
+		sp.addComponent()
+			.setExpression("Observation")
+			.setDefinition("SearchParameter/Observation-status");
+		sp.addComponent()
+			.setExpression("Observation")
+			.setDefinition("SearchParameter/clinical-patient");
+		sp.addExtension()
+			.setUrl(HapiExtensions.EXT_SP_UNIQUE)
+			.setValue(new BooleanType(false));
+		mySearchParameterDao.update(sp, mySrd);
+
+		mySearchParamRegistry.forceRefresh();
+
+		myMessages.clear();
+	}
+
+	private IIdType createPatient1(String theOrgId) {
+		Patient pt1 = new Patient();
+		pt1.getNameFirstRep().setFamily("Family1").addGiven("Given1");
+		pt1.setGender(Enumerations.AdministrativeGender.MALE);
+		pt1.setBirthDateElement(new DateType("2021-02-02"));
+		pt1.getManagingOrganization().setReference(theOrgId);
+		return myPatientDao.create(pt1, mySrd).getId().toUnqualified();
+	}
+
+	private IIdType createPatient2(String theOrgId) {
+		Patient pt2 = new Patient();
+		pt2.getNameFirstRep().setFamily("Family2").addGiven("Given2");
+		pt2.setGender(Enumerations.AdministrativeGender.MALE);
+		pt2.setBirthDateElement(new DateType("2021-02-02"));
+		pt2.getManagingOrganization().setReference(theOrgId);
+		return myPatientDao.create(pt2, mySrd).getId().toUnqualified();
+	}
+
+	/**
+	 * A few tests where the combo index should not be used
+	 */
+	@Nested
+	class ShouldNotUseComboIndexTest {
+
+		@BeforeEach
+		void before() {
+			SearchParameter sp = new SearchParameter();
+			sp.setId("SearchParameter/Observation-date");
+			sp.setType(Enumerations.SearchParamType.DATE);
+			sp.setCode("date");
+			sp.setExpression("Observation.effective");
+			sp.setStatus(PublicationStatus.ACTIVE);
+			sp.addBase("Observation");
+			mySearchParameterDao.update(sp, mySrd);
+
+			sp = new SearchParameter();
+			sp.setId("SearchParameter/Observation-note-text");
+			sp.setType(Enumerations.SearchParamType.STRING);
+			sp.setCode("note-text");
+			sp.setExpression("Observation.note.text");
+			sp.setStatus(PublicationStatus.ACTIVE);
+			sp.addBase("Observation");
+			mySearchParameterDao.update(sp, mySrd);
+
+			sp = new SearchParameter();
+			sp.setId("SearchParameter/observation-date-and-note-text");
+			sp.setType(Enumerations.SearchParamType.COMPOSITE);
+			sp.setStatus(PublicationStatus.ACTIVE);
+			sp.addBase("Observation");
+			sp.addComponent()
+				.setExpression("Observation")
+				.setDefinition("SearchParameter/Observation-date");
+			sp.addComponent()
+				.setExpression("Observation")
+				.setDefinition("SearchParameter/Observation-note-text");
+			sp.addExtension()
+				.setUrl(HapiExtensions.EXT_SP_UNIQUE)
+				.setValue(new BooleanType(false));
+			mySearchParameterDao.update(sp, mySrd);
+
+			mySearchParamRegistry.forceRefresh();
+
+			myMessages.clear();
+		}
+
+		@Test
+		void testTooManyPermutations() {
+			// Test
+			StringOrListParam noteTextParam = new StringOrListParam();
+			DateOrListParam dateParam = new DateOrListParam();
+			for (int i = 0; i < 30; i++) {
+				noteTextParam.add(new StringParam("A" + i));
+				noteTextParam.add(new StringParam("B" + i));
+				noteTextParam.add(new StringParam("C" + i));
+				noteTextParam.add(new StringParam("D" + i));
+				dateParam.add(new DateParam("2020-01-" + String.format("%02d", i+1)));
+			}
+
+			SearchParameterMap params = SearchParameterMap
+				.newSynchronous()
+				.add("note-text", noteTextParam)
+				.add("date", dateParam);
+			myCaptureQueriesListener.clear();
+			IBundleProvider results = myObservationDao.search(params, mySrd);
+			assertThat(toUnqualifiedIdValues(results)).isEmpty();
+
+			// Verify
+			myCaptureQueriesListener.logSelectQueries();
+			String formatted = myCaptureQueriesListener.getSelectQueries().get(0).getSql(true, true);
+			assertThat(formatted).doesNotContain("HFJ_IDX_CMB_TOK_NU");
+		}
+
+
+		/**
+		 * Can't create or search for combo params with dateTimes that don't have DAY precision
+		 */
+		@ParameterizedTest
+		@CsvSource(value = {
+			"2021-01-02T12:00:01.000Z , true",
+			"2021-01-02T12:00:01Z     , true",
+			"2021-01-02               , true", // <-- DAY precision
+			"2021-01                  , false",
+			"2021                     , false",
+		})
+		void testPartialDateTime(String theDateValue, boolean theShouldUseComboIndex) {
+			IIdType id1 = createObservation(theDateValue);
+
+			logAllNonUniqueIndexes();
+			runInTransaction(() -> {
+				List<ResourceIndexedComboTokenNonUnique> indexedTokens = myResourceIndexedComboTokensNonUniqueDao.findAll();
+				if (theShouldUseComboIndex) {
+					assertEquals(1, indexedTokens.size());
+				} else {
+					assertEquals(0, indexedTokens.size());
+				}
+			});
+
+			SearchParameterMap params = SearchParameterMap
+				.newSynchronous()
+				.add("note-text", new StringParam("Hello"))
+				.add("date", new DateParam(theDateValue));
+			myCaptureQueriesListener.clear();
+			IBundleProvider results = myObservationDao.search(params, mySrd);
+			List<String> actual = toUnqualifiedVersionlessIdValues(results);
+			myCaptureQueriesListener.logSelectQueries();
+			assertThat(actual).contains(id1.toUnqualifiedVersionless().getValue());
+
+			if (theShouldUseComboIndex) {
+				assertComboIndexUsed();
+			} else {
+				assertComboIndexNotUsed();
+				assertThat(myMessages.toString()).contains("INFO Search with params [date, note-text] is not a candidate for combo searching - Date search with less than DAY precision for parameter 'date'");
+			}
+		}
+
+		@ParameterizedTest
+		@ValueSource(booleans = {true, false})
+		void testDateModifier(boolean theUseComparator) {
+			IIdType id1 = createObservation("2021-01-02");
+			createObservation("2023-01-02");
+
+			SearchParameterMap params = SearchParameterMap
+				.newSynchronous()
+				.add("note-text", new StringParam("Hello"))
+				.add("date", new DateParam("2021-01-02").setPrefix(theUseComparator ? ParamPrefixEnum.LESSTHAN_OR_EQUALS : null));
+			myCaptureQueriesListener.clear();
+			IBundleProvider results = myObservationDao.search(params, mySrd);
+			List<String> actual = toUnqualifiedVersionlessIdValues(results);
+			myCaptureQueriesListener.logSelectQueries();
+			assertThat(actual).contains(id1.toUnqualifiedVersionless().getValue());
+
+			if (theUseComparator) {
+				assertComboIndexNotUsed();
+				assertThat(myMessages.toString()).contains("INFO Search with params [date, note-text] is not a candidate for combo searching - Parameter 'date' has prefix: 'le'");
+			} else {
+				assertComboIndexUsed();
+			}
+
+		}
+
+		/**
+		 * This test asserts that a date query string prefixed with 'eq' still qualifies the query for combo indexes
+		 * inspection. This approach is preferred over disqualifying the query as it would be the case with any other
+		 * prefixes (gt, le, lt, etc) since date=2025-01-01 and date=eq2025-01-01 are equivalent searches.
+		 */
+		@ParameterizedTest
+		@ValueSource(strings = {
+			"2025-01-01",
+			"eq2025-01-01"})
+		void testSearchWithDateQueryString_whenModifierEqualIsPresent_willUseComboSearchIndexes(String theDateQueryParameter){
+			// given
+			IIdType id1 = createObservation("2025-01-01");
+
+			SearchParameterMap params = SearchParameterMap
+				.newSynchronous()
+				.add("note-text", new StringParam("Hello"))
+				.add("date", new DateParam(theDateQueryParameter));
+
+			logAllNonUniqueIndexes();
+			logAllDateIndexes();
+
+			myCaptureQueriesListener.clear();
+
+			// when
+			IBundleProvider results = myObservationDao.search(params, mySrd);
+			// then
+			assertComboIndexUsed();
+
+			List<String> actual = toUnqualifiedVersionlessIdValues(results);
+			assertThat(actual).contains(id1.toUnqualifiedVersionless().getValue());
+		}
+
+		@ParameterizedTest
+		@ValueSource(booleans = {true, false})
+		void testStringModifier(boolean theUseExact) {
+			IIdType id1 = createObservation("2021-01-02");
+			createObservation("2023-01-02");
+
+			SearchParameterMap params = SearchParameterMap
+				.newSynchronous()
+				.add("note-text", new StringParam("Hello").setExact(theUseExact))
+				.add("date", new DateParam("2021-01-02"));
+			myCaptureQueriesListener.clear();
+			IBundleProvider results = myObservationDao.search(params, mySrd);
+			List<String> actual = toUnqualifiedVersionlessIdValues(results);
+			myCaptureQueriesListener.logSelectQueries();
+			assertThat(actual).contains(id1.toUnqualifiedVersionless().getValue());
+
+			if (theUseExact) {
+				assertComboIndexNotUsed();
+				assertThat(myMessages.toString()).contains("INFO Search with params [date, note-text] is not a candidate for combo searching - Parameter 'note-text' has modifier: ':exact'");
+			} else {
+				assertComboIndexUsed();
+			}
+
+		}
+
+		@ParameterizedTest
+		@ValueSource(booleans = {true, false})
+		void testMissing(boolean theUseMissing) {
+			myStorageSettings.setIndexMissingFields(StorageSettings.IndexEnabledEnum.ENABLED);
+
+			IIdType id1 = createObservation("2021-01-02");
+			createObservation("2023-01-02");
+
+			SearchParameterMap params = SearchParameterMap
+				.newSynchronous()
+				.add("note-text", new StringParam("Hello").setMissing(theUseMissing ? false : null))
+				.add("date", new DateParam("2021-01-02"));
+			myCaptureQueriesListener.clear();
+			IBundleProvider results = myObservationDao.search(params, mySrd);
+			List<String> actual = toUnqualifiedVersionlessIdValues(results);
+			myCaptureQueriesListener.logSelectQueries();
+			assertThat(actual).contains(id1.toUnqualifiedVersionless().getValue());
+
+			if (theUseMissing) {
+				assertComboIndexNotUsed();
+				assertThat(myMessages.toString()).contains("INFO Search with params [date, note-text] is not a candidate for combo searching - Parameter 'note-text' has modifier: ':missing'");
+			} else {
+				assertComboIndexUsed();
+			}
+
+		}
+
+		private void assertComboIndexUsed() {
+			String sql = myCaptureQueriesListener.getSelectQueriesForCurrentThread().get(0).getSql(true, false);
+			assertThat(sql).contains("HFJ_IDX_CMB_TOK_NU");
+
+			assertThat(myMessages.toString()).contains("Using NON_UNIQUE index(es) for query");
+		}
+
+		private void assertComboIndexNotUsed() {
+			String sql = myCaptureQueriesListener.getSelectQueriesForCurrentThread().get(0).getSql(true, false);
+			assertThat(sql).doesNotContain("HFJ_IDX_CMB_TOK_NU");
+
+			assertThat(myMessages.toString()).doesNotContain("Using NON_UNIQUE index(es) for query");
+		}
+
+		private IIdType createObservation(String theDateValue) {
+			Observation pt1 = new Observation();
+			pt1.addNote().setText("Hello");
+			pt1.setEffective(new DateTimeType(theDateValue));
+			return myObservationDao.create(pt1, mySrd).getId().toUnqualified();
+		}
+
+		/**
+		 * Creating an Observation whose effective is a Timing with only boundsPeriod (no events)
+		 * must succeed. The indexed date has no usable date portion, so the combo non-unique
+		 * extractor should skip that entry rather than fail the write.
+		 */
+		@Test
+		void testCreateObservation_TimingWithOnlyBoundsPeriod_ShouldSucceed() {
+			Observation pt1 = new Observation();
+			pt1.addNote().setText("Hello");
+			Timing timing = new Timing();
+			timing.getRepeat().setBounds(new Period().setStartElement(new DateTimeType("2021-01-02")));
+			pt1.setEffective(timing);
+
+			IIdType id1 = myObservationDao.create(pt1, mySrd).getId().toUnqualified();
+			assertThat(id1).isNotNull();
+			assertThat(id1.getIdPart()).isNotBlank();
+		}
+
+		/**
+		 * Creating an Observation whose effective is a Timing with a well-formed event datetime
+		 * must succeed — the date portion is well-defined and the combo non-unique entry is indexed.
+		 */
+		@Test
+		void testCreateObservation_TimingWithEvent_ShouldSucceed() {
+			Observation pt1 = new Observation();
+			pt1.addNote().setText("Hello");
+			Timing timing = new Timing();
+			timing.addEvent(new DateTimeType("2021-01-02T12:00:01Z").getValue());
+			pt1.setEffective(timing);
+
+			IIdType id1 = myObservationDao.create(pt1, mySrd).getId().toUnqualified();
+			assertThat(id1).isNotNull();
+			assertThat(id1.getIdPart()).isNotBlank();
+		}
+
+	}
+
+	@Nullable
+	private TokenParam parseToken(String theToken) {
+		if (isBlank(theToken)) {
+			return null;
+		}
+		int barIndex = theToken.indexOf('|');
+		if (barIndex == -1) {
+			return new TokenParam(theToken);
+		}
+		return new TokenParam(defaultIfBlank(theToken.substring(0, barIndex), null), defaultIfBlank(theToken.substring(barIndex + 1), null));
+	}
+
+}

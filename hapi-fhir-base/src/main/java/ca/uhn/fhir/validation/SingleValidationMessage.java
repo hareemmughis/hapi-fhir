@@ -1,17 +1,15 @@
-package ca.uhn.fhir.validation;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,11 +17,17 @@ package ca.uhn.fhir.validation;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.validation;
 
 import org.apache.commons.lang3.builder.EqualsBuilder;
 import org.apache.commons.lang3.builder.HashCodeBuilder;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.apache.commons.lang3.ObjectUtils.isNotEmpty;
 
 public class SingleValidationMessage {
 
@@ -31,7 +35,29 @@ public class SingleValidationMessage {
 	private Integer myLocationLine;
 	private String myLocationString;
 	private String myMessage;
+	private String myMessageId;
 	private ResultSeverityEnum mySeverity;
+	private List<String> mySliceMessages;
+
+	/**
+	 * Constructor
+	 */
+	public SingleValidationMessage() {
+		super();
+	}
+
+	/**
+	 * Copy constructor
+	 */
+	public SingleValidationMessage(SingleValidationMessage theMessage) {
+		this.myLocationCol = theMessage.myLocationCol;
+		this.myLocationLine = theMessage.myLocationLine;
+		this.myLocationString = theMessage.myLocationString;
+		this.myMessage = theMessage.myMessage;
+		this.myMessageId = theMessage.myMessageId;
+		this.mySeverity = theMessage.mySeverity;
+		this.mySliceMessages = theMessage.mySliceMessages == null ? null : new ArrayList<>(theMessage.mySliceMessages);
+	}
 
 	@Override
 	public boolean equals(Object obj) {
@@ -51,6 +77,7 @@ public class SingleValidationMessage {
 		b.append(myLocationString, other.myLocationString);
 		b.append(myMessage, other.myMessage);
 		b.append(mySeverity, other.mySeverity);
+		b.append(mySliceMessages, other.mySliceMessages);
 		return b.isEquals();
 	}
 
@@ -70,6 +97,10 @@ public class SingleValidationMessage {
 		return myMessage;
 	}
 
+	public String getMessageId() {
+		return myMessageId;
+	}
+
 	public ResultSeverityEnum getSeverity() {
 		return mySeverity;
 	}
@@ -82,6 +113,7 @@ public class SingleValidationMessage {
 		b.append(myLocationString);
 		b.append(myMessage);
 		b.append(mySeverity);
+		b.append(mySliceMessages);
 		return b.toHashCode();
 	}
 
@@ -101,6 +133,10 @@ public class SingleValidationMessage {
 		myMessage = theMessage;
 	}
 
+	public void setMessageId(String messageId) {
+		myMessageId = messageId;
+	}
+
 	public void setSeverity(ResultSeverityEnum theSeverity) {
 		mySeverity = theSeverity;
 	}
@@ -109,17 +145,34 @@ public class SingleValidationMessage {
 	public String toString() {
 		ToStringBuilder b = new ToStringBuilder(this, ToStringStyle.SHORT_PREFIX_STYLE);
 		if (myLocationCol != null || myLocationLine != null) {
-			b.append("myLocationCol", myLocationCol);
-			b.append("myLocationRow", myLocationLine);
+			b.append("col", myLocationCol);
+			b.append("row", myLocationLine);
 		}
 		if (myLocationString != null) {
-			b.append("myLocationString", myLocationString);
+			b.append("locationString", myLocationString);
 		}
-		b.append("myMessage", myMessage);
+		b.append("message", myMessage);
+		if (myMessageId != null) {
+			b.append(myMessageId);
+		}
 		if (mySeverity != null) {
-			b.append("mySeverity", mySeverity.getCode());
+			b.append("severity", mySeverity.getCode());
+		}
+		if (mySliceMessages != null) {
+			b.append("sliceMessages", mySliceMessages);
 		}
 		return b.toString();
 	}
 
+	public void setSliceMessages(List<String> theSliceMessages) {
+		mySliceMessages = theSliceMessages;
+	}
+
+	public List<String> getSliceMessages() {
+		return mySliceMessages;
+	}
+
+	public boolean hasSliceMessages() {
+		return isNotEmpty(mySliceMessages);
+	}
 }

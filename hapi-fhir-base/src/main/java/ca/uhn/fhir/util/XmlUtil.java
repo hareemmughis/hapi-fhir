@@ -1,17 +1,15 @@
-package ca.uhn.fhir.util;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,42 +17,77 @@ package ca.uhn.fhir.util;
  * limitations under the License.
  * #L%
  */
-import java.io.*;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
-
-import javax.xml.stream.*;
-
-import org.apache.commons.lang3.StringEscapeUtils;
-import org.codehaus.stax2.XMLOutputFactory2;
-import org.codehaus.stax2.io.EscapingWriterFactory;
-
-import com.ctc.wstx.api.WstxInputProperties;
-import com.ctc.wstx.stax.WstxOutputFactory;
+package ca.uhn.fhir.util;
 
 import ca.uhn.fhir.context.ConfigurationException;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.primitive.XhtmlDt;
+import ca.uhn.fhir.parser.DataFormatException;
 import ca.uhn.fhir.util.jar.DependencyLogFactory;
 import ca.uhn.fhir.util.jar.IDependencyLog;
+import com.ctc.wstx.api.WstxInputProperties;
+import com.ctc.wstx.stax.WstxOutputFactory;
+import org.apache.commons.text.StringEscapeUtils;
+import org.codehaus.stax2.XMLOutputFactory2;
+import org.codehaus.stax2.io.EscapingWriterFactory;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.xml.sax.InputSource;
+import org.xml.sax.SAXException;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.Reader;
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.io.UnsupportedEncodingException;
+import java.io.Writer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.stream.FactoryConfigurationError;
+import javax.xml.stream.XMLEventReader;
+import javax.xml.stream.XMLEventWriter;
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLOutputFactory;
+import javax.xml.stream.XMLResolver;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamWriter;
+import javax.xml.stream.events.XMLEvent;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerException;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
 
 /**
  * Utility methods for working with the StAX API.
- * 
+ * <p>
  * This class contains code adapted from the Apache Axiom project.
  */
 public class XmlUtil {
+	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(XmlUtil.class);
+	private static final Map<String, Integer> VALID_ENTITY_NAMES;
+	private static final ExtendedEntityReplacingXmlResolver XML_RESOLVER = new ExtendedEntityReplacingXmlResolver();
 	private static XMLOutputFactory ourFragmentOutputFactory;
 	private static volatile boolean ourHaveLoggedStaxImplementation;
 	private static volatile XMLInputFactory ourInputFactory;
-	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(XmlUtil.class);
 	private static Throwable ourNextException;
 	private static volatile XMLOutputFactory ourOutputFactory;
-	private static Boolean ourStaxPresent;
-	private static final Map<String, Integer> VALID_ENTITY_NAMES;
-	private static final ExtendedEntityReplacingXmlResolver XML_RESOLVER = new ExtendedEntityReplacingXmlResolver();
+	private static volatile TransformerFactory ourTransformerFactory;
 
 	static {
-		HashMap<String, Integer> validEntityNames = new HashMap<String, Integer>(1448);
+		HashMap<String, Integer> validEntityNames = new HashMap<>(1448);
 		validEntityNames.put("AElig", 0x000C6);
 		validEntityNames.put("Aacute", 0x000C1);
 		validEntityNames.put("Abreve", 0x00102);
@@ -1503,21 +1536,28 @@ public class XmlUtil {
 		validEntityNames.put("zscr", 0x1D4CF);
 		validEntityNames.put("zwj", 0x0200D);
 		validEntityNames.put("zwnj", 0x0200C);
-		
+
 		VALID_ENTITY_NAMES = Collections.unmodifiableMap(validEntityNames);
 	}
+
+	/**
+	 * Non-instantiable
+	 */
+	private XmlUtil() {}
 
 	private static XMLOutputFactory createOutputFactory() throws FactoryConfigurationError {
 		try {
 			// Detect if we're running with the Android lib, and force repackaged Woodstox to be used
 			Class.forName("ca.uhn.fhir.repackage.javax.xml.stream.XMLOutputFactory");
-			System.setProperty("javax.xml.stream.XMLOutputFactory", "com.ctc.wstx.stax.WstxOutputFactory");
+			System.setProperty(
+					javax.xml.stream.XMLOutputFactory.class.getName(),
+					com.ctc.wstx.stax.WstxOutputFactory.class.getName());
 		} catch (ClassNotFoundException e) {
 			// ok
 		}
 
 		XMLOutputFactory outputFactory = newOutputFactory();
-		
+
 		if (!ourHaveLoggedStaxImplementation) {
 			logStaxImplementation(outputFactory.getClass());
 		}
@@ -1529,6 +1569,7 @@ public class XmlUtil {
 		try {
 			Class.forName("com.ctc.wstx.stax.WstxOutputFactory");
 			if (outputFactory instanceof WstxOutputFactory) {
+				//				((WstxOutputFactory)outputFactory).getConfig().setAttrValueEscaperFactory(new MyEscaper());
 				outputFactory.setProperty(XMLOutputFactory2.P_TEXT_ESCAPER, new MyEscaper());
 			}
 		} catch (ClassNotFoundException e) {
@@ -1537,34 +1578,53 @@ public class XmlUtil {
 		return outputFactory;
 	}
 
-	public static XMLEventWriter createXmlFragmentWriter(Writer theWriter) throws FactoryConfigurationError, XMLStreamException {
+	private static XMLEventWriter createXmlFragmentWriter(Writer theWriter)
+			throws FactoryConfigurationError, XMLStreamException {
 		XMLOutputFactory outputFactory = getOrCreateFragmentOutputFactory();
-		XMLEventWriter retVal = outputFactory.createXMLEventWriter(theWriter);
-		return retVal;
+		return outputFactory.createXMLEventWriter(theWriter);
 	}
 
 	public static XMLEventReader createXmlReader(Reader reader) throws FactoryConfigurationError, XMLStreamException {
 		throwUnitTestExceptionIfConfiguredToDoSo();
-		
+
 		XMLInputFactory inputFactory = getOrCreateInputFactory();
 
 		// Now.. create the reader and return it
-		XMLEventReader er = inputFactory.createXMLEventReader(reader);
-		return er;
+		return inputFactory.createXMLEventReader(reader);
 	}
 
-	public static XMLStreamWriter createXmlStreamWriter(Writer theWriter) throws FactoryConfigurationError, XMLStreamException {
+	public static XMLStreamWriter createXmlStreamWriter(Writer theWriter)
+			throws FactoryConfigurationError, XMLStreamException {
 		throwUnitTestExceptionIfConfiguredToDoSo();
-		
+
 		XMLOutputFactory outputFactory = getOrCreateOutputFactory();
-		XMLStreamWriter retVal = outputFactory.createXMLStreamWriter(theWriter);
-		return retVal;
+		return outputFactory.createXMLStreamWriter(theWriter);
 	}
 
-	public static XMLEventWriter createXmlWriter(Writer theWriter) throws FactoryConfigurationError, XMLStreamException {
+	public static XMLEventWriter createXmlWriter(Writer theWriter)
+			throws FactoryConfigurationError, XMLStreamException {
 		XMLOutputFactory outputFactory = getOrCreateOutputFactory();
-		XMLEventWriter retVal = outputFactory.createXMLEventWriter(theWriter);
-		return retVal;
+		return outputFactory.createXMLEventWriter(theWriter);
+	}
+
+	/**
+	 * Encode a set of StAX events into a String
+	 */
+	public static String encode(List<XMLEvent> theEvents) {
+		try {
+			StringWriter w = new StringWriter();
+			XMLEventWriter ew = XmlUtil.createXmlFragmentWriter(w);
+
+			for (XMLEvent next : theEvents) {
+				ew.add(next);
+			}
+			ew.close();
+			return w.toString();
+		} catch (XMLStreamException e) {
+			throw new DataFormatException(Msg.code(1751) + "Problem with the contained XML events", e);
+		} catch (FactoryConfigurationError e) {
+			throw new ConfigurationException(Msg.code(1752) + e);
+		}
 	}
 
 	private static XMLOutputFactory getOrCreateFragmentOutputFactory() throws FactoryConfigurationError {
@@ -1584,11 +1644,13 @@ public class XmlUtil {
 			try {
 				// Detect if we're running with the Android lib, and force repackaged Woodstox to be used
 				Class.forName("ca.uhn.fhir.repackage.javax.xml.stream.XMLInputFactory");
-				System.setProperty("javax.xml.stream.XMLInputFactory", "com.ctc.wstx.stax.WstxInputFactory");
+				System.setProperty(
+						javax.xml.stream.XMLInputFactory.class.getName(),
+						com.ctc.wstx.stax.WstxInputFactory.class.getName());
 			} catch (ClassNotFoundException e) {
 				// ok
 			}
-			
+
 			XMLInputFactory inputFactory = newInputFactory();
 
 			if (!ourHaveLoggedStaxImplementation) {
@@ -1596,26 +1658,25 @@ public class XmlUtil {
 			}
 
 			/*
-			 * These two properties disable external entity processing, which can 
-			 * be a security vulnerability.
-			 * 
-			 * See https://github.com/jamesagnew/hapi-fhir/issues/339
-			 * https://www.owasp.org/index.php/XML_External_Entity_%28XXE%29_Processing
-			 */
-			inputFactory.setProperty(XMLInputFactory.SUPPORT_DTD, false); // This disables DTDs entirely for that factory
-			inputFactory.setProperty("javax.xml.stream.isSupportingExternalEntities", false); // disable external entities
-
-			
-			/*
 			 * In the following few lines, you can uncomment the first and comment the second to disable automatic
 			 * parsing of extended entities, e.g. &sect;
-			 * 
+			 *
 			 * Note that these properties are Woodstox specific and they cause a crash in environments where SJSXP is
 			 * being used (e.g. glassfish) so we don't set them there.
 			 */
 			try {
 				Class.forName("com.ctc.wstx.stax.WstxInputFactory");
-				if (inputFactory instanceof com.ctc.wstx.stax.WstxInputFactory) {
+				boolean isWoodstox = inputFactory instanceof com.ctc.wstx.stax.WstxInputFactory;
+				if (!isWoodstox) {
+					// Check if implementation is woodstox by property since instanceof check does not work if running
+					// in JBoss
+					try {
+						isWoodstox = inputFactory.getProperty("org.codehaus.stax2.implVersion") != null;
+					} catch (Exception e) {
+						// ignore
+					}
+				}
+				if (isWoodstox) {
 					// inputFactory.setProperty(WstxInputFactory.IS_REPLACING_ENTITY_REFERENCES, false);
 					inputFactory.setProperty(WstxInputProperties.P_UNDECLARED_ENTITY_RESOLVER, XML_RESOLVER);
 					try {
@@ -1647,14 +1708,30 @@ public class XmlUtil {
 		ourHaveLoggedStaxImplementation = true;
 	}
 
-	
 	static XMLInputFactory newInputFactory() throws FactoryConfigurationError {
 		XMLInputFactory inputFactory;
 		try {
 			inputFactory = XMLInputFactory.newInstance();
+			if (inputFactory.isPropertySupported(XMLInputFactory.IS_REPLACING_ENTITY_REFERENCES)) {
+				inputFactory.setProperty(XMLInputFactory.IS_REPLACING_ENTITY_REFERENCES, true);
+			}
+
+			/*
+			 * These two properties disable external entity processing, which can
+			 * be a security vulnerability.
+			 *
+			 * See https://github.com/hapifhir/hapi-fhir/issues/339
+			 * https://www.owasp.org/index.php/XML_External_Entity_%28XXE%29_Processing
+			 */
+			inputFactory.setProperty(
+					XMLInputFactory.SUPPORT_DTD, false); // This disables DTDs entirely for that factory
+			inputFactory.setProperty(
+					XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false); // disable external entities
+
 			throwUnitTestExceptionIfConfiguredToDoSo();
 		} catch (Throwable e) {
-			throw new ConfigurationException("Unable to initialize StAX - XML processing is disabled", e);
+			throw new ConfigurationException(
+					Msg.code(1753) + "Unable to initialize StAX - XML processing is disabled", e);
 		}
 		return inputFactory;
 	}
@@ -1665,9 +1742,55 @@ public class XmlUtil {
 			outputFactory = XMLOutputFactory.newInstance();
 			throwUnitTestExceptionIfConfiguredToDoSo();
 		} catch (Throwable e) {
-			throw new ConfigurationException("Unable to initialize StAX - XML processing is disabled", e);
+			throw new ConfigurationException(
+					Msg.code(1754) + "Unable to initialize StAX - XML processing is disabled", e);
 		}
 		return outputFactory;
+	}
+
+	/**
+	 * Parses an XML string into a set of StAX events
+	 */
+	public static List<XMLEvent> parse(String theValue) {
+		if (isBlank(theValue)) {
+			return Collections.emptyList();
+		}
+
+		String val = theValue.trim();
+		if (!val.startsWith("<")) {
+			val = XhtmlDt.DIV_OPEN_FIRST + val + "</div>";
+		}
+		boolean hasProcessingInstruction = val.startsWith("<?");
+		if (hasProcessingInstruction && val.endsWith("?>")) {
+			return null;
+		}
+
+		try {
+			ArrayList<XMLEvent> value = new ArrayList<>();
+			StringReader reader = new StringReader(val);
+			XMLEventReader er = XmlUtil.createXmlReader(reader);
+			boolean first = true;
+			while (er.hasNext()) {
+				XMLEvent next = er.nextEvent();
+				if (first) {
+					first = false;
+					continue;
+				}
+				if (er.hasNext()) {
+					// don't add the last event
+					value.add(next);
+				}
+			}
+			return value;
+
+		} catch (XMLStreamException e) {
+			throw new DataFormatException(
+					Msg.code(1755) + "String does not appear to be valid XML/XHTML (error is \"" + e.getMessage()
+							+ "\"): " + theValue,
+					e);
+		} catch (FactoryConfigurationError e) {
+			throw new ConfigurationException(Msg.code(1756) + e);
+		}
 	}
 
 	/**
@@ -1677,19 +1800,105 @@ public class XmlUtil {
 		ourNextException = theException;
 	}
 
-	private static void throwUnitTestExceptionIfConfiguredToDoSo() throws FactoryConfigurationError, XMLStreamException {
+	private static void throwUnitTestExceptionIfConfiguredToDoSo()
+			throws FactoryConfigurationError, XMLStreamException {
 		if (ourNextException != null) {
-			if (ourNextException instanceof FactoryConfigurationError) {
-				throw ((FactoryConfigurationError)ourNextException);
-			} else {
-				throw (XMLStreamException)ourNextException;
+			if (ourNextException instanceof javax.xml.stream.FactoryConfigurationError) {
+				throw ((javax.xml.stream.FactoryConfigurationError) ourNextException);
+			}
+			throw (XMLStreamException) ourNextException;
+		}
+	}
+
+	public static Document parseDocument(String theInput) throws IOException, SAXException {
+		StringReader reader = new StringReader(theInput);
+		return parseDocument(reader);
+	}
+
+	public static Document parseDocument(Reader reader) throws SAXException, IOException {
+		return parseDocument(reader, true, false);
+	}
+
+	public static Document parseDocument(Reader theReader, boolean theNamespaceAware, boolean allowDoctypeDeclaration)
+			throws SAXException, IOException {
+		DocumentBuilder builder;
+		try {
+			DocumentBuilderFactory docBuilderFactory = DocumentBuilderFactory.newInstance();
+			docBuilderFactory.setNamespaceAware(theNamespaceAware);
+			docBuilderFactory.setXIncludeAware(false);
+			docBuilderFactory.setExpandEntityReferences(false);
+			try {
+				docBuilderFactory.setFeature(
+						"http://apache.org/xml/features/disallow-doctype-decl", !allowDoctypeDeclaration);
+				docBuilderFactory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+				docBuilderFactory.setFeature("http://apache.org/xml/features/nonvalidating/load-dtd-grammar", false);
+				docBuilderFactory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+				docBuilderFactory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+				throwUnitTestExceptionIfConfiguredToDoSo();
+			} catch (Exception e) {
+				ourLog.warn("Failed to set feature on XML parser: " + e.toString());
+			}
+
+			builder = docBuilderFactory.newDocumentBuilder();
+		} catch (ParserConfigurationException e) {
+			throw new ConfigurationException(Msg.code(1757) + e);
+		}
+
+		InputSource src = new InputSource(theReader);
+		return builder.parse(src);
+	}
+
+	public static List<Element> getChildrenByTagName(Element theParent, String theName) {
+		List<Element> nodeList = new ArrayList<Element>();
+		for (Node child = theParent.getFirstChild(); child != null; child = child.getNextSibling()) {
+			if (child.getNodeType() == Node.ELEMENT_NODE && theName.equals(child.getNodeName())) {
+				nodeList.add((Element) child);
 			}
 		}
+
+		return nodeList;
+	}
+
+	public static String encodeDocument(Node theElement) throws TransformerException {
+		return encodeDocument(theElement, false);
+	}
+
+	public static String encodeDocument(Node theElement, boolean theIndent) throws TransformerException {
+		TransformerFactory transFactory = getTransformerFactory();
+		Transformer transformer = transFactory.newTransformer();
+		StringWriter buffer = new StringWriter();
+		transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
+		if (theIndent) {
+			transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+		}
+		transformer.transform(new DOMSource(theElement), new StreamResult(buffer));
+		return buffer.toString();
+	}
+
+	/**
+	 * Returns a singleton transformer factory with lazy initialization
+	 */
+	private static TransformerFactory getTransformerFactory() {
+		TransformerFactory transFactory = ourTransformerFactory;
+		if (transFactory == null) {
+			// This call is surprisingly expensive at large scale, so we lazy-initialize it
+			// as opposed to calling it each time
+			transFactory = TransformerFactory.newInstance();
+			ourTransformerFactory = transFactory;
+		}
+		return transFactory;
+	}
+
+	/**
+	 * FOR UNIT TESTS ONLY - Used to reset OutputFactory for test cases that customize OutputFactory
+	 */
+	public static void resetOutputFactoryForTest() {
+		ourOutputFactory = null;
 	}
 
 	private static final class ExtendedEntityReplacingXmlResolver implements XMLResolver {
 		@Override
-		public Object resolveEntity(String thePublicID, String theSystemID, String theBaseURI, String theNamespace) throws XMLStreamException {
+		public Object resolveEntity(String thePublicID, String theSystemID, String theBaseURI, String theNamespace) {
 			if (thePublicID == null && theSystemID == null) {
 				if (theNamespace != null && VALID_ENTITY_NAMES.containsKey(theNamespace)) {
 					return new String(Character.toChars(VALID_ENTITY_NAMES.get(theNamespace)));
@@ -1700,26 +1909,6 @@ public class XmlUtil {
 		}
 	}
 
-	/**
-	 * This method will return <code>true</code> if a StAX XML parsing library is present
-	 * on the classpath 
-	 */
-	public static boolean isStaxPresent() {
-		Boolean retVal = ourStaxPresent;
-		if (retVal == null) {
-			try {
-				newInputFactory();
-				ourStaxPresent = Boolean.TRUE;
-				retVal = Boolean.TRUE;
-			} catch (ConfigurationException e) {
-				ourLog.info("StAX not detected on classpath, XML processing will be disabled");
-				ourStaxPresent = Boolean.FALSE;
-				retVal = Boolean.FALSE;
-			}
-		}
-		return retVal;
-	}
-	
 	public static class MyEscaper implements EscapingWriterFactory {
 
 		@Override
@@ -1728,7 +1917,7 @@ public class XmlUtil {
 		}
 
 		@Override
-		public Writer createEscapingWriterFor(final Writer theW, String theEnc) throws UnsupportedEncodingException {
+		public Writer createEscapingWriterFor(final Writer theW, String theEnc) {
 			return new Writer() {
 
 				@Override
@@ -1747,14 +1936,14 @@ public class XmlUtil {
 					for (int i = 0; i < theLen && !hasEscapable; i++) {
 						char nextChar = theCbuf[i + theOff];
 						switch (nextChar) {
-						case '<':
-						case '>':
-						case '"':
-						case '&':
-							hasEscapable = true;
-							break;
-						default:
-							break;
+							case '<':
+							case '>':
+							case '"':
+							case '&':
+								hasEscapable = true;
+								break;
+							default:
+								break;
 						}
 					}
 
@@ -1768,7 +1957,5 @@ public class XmlUtil {
 				}
 			};
 		}
-
 	}
-
 }

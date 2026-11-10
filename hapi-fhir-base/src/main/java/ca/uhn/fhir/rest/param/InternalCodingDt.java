@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.param;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,9 +17,9 @@ package ca.uhn.fhir.rest.param;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.param;
 
-import java.util.List;
-
+import ca.uhn.fhir.i18n.Msg;
 import ca.uhn.fhir.model.api.ICompositeDatatype;
 import ca.uhn.fhir.model.api.IElement;
 import ca.uhn.fhir.model.api.IQueryParameterType;
@@ -35,8 +33,12 @@ import ca.uhn.fhir.model.primitive.StringDt;
 import ca.uhn.fhir.model.primitive.UriDt;
 import ca.uhn.fhir.util.CoverageIgnore;
 
+import java.util.List;
+
 @CoverageIgnore
 public class InternalCodingDt extends BaseCodingDt implements ICompositeDatatype {
+
+	private static final long serialVersionUID = 993056016725918652L;
 
 	/**
 	 * Constructor
@@ -54,33 +56,51 @@ public class InternalCodingDt extends BaseCodingDt implements ICompositeDatatype
 	}
 
 	@Child(name = "system", type = UriDt.class, order = 0, min = 0, max = 1)
-	@Description(shortDefinition = "Identity of the terminology system", formalDefinition = "The identification of the code system that defines the meaning of the symbol in the code.")
+	@Description(
+			shortDefinition = "Identity of the terminology system",
+			formalDefinition =
+					"The identification of the code system that defines the meaning of the symbol in the code.")
 	private UriDt mySystem;
 
 	@Child(name = "version", type = StringDt.class, order = 1, min = 0, max = 1)
-	@Description(shortDefinition = "Version of the system - if relevant", formalDefinition = "The version of the code system which was used when choosing this code. Note that a well-maintained code system does not need the version reported, because the meaning of codes is consistent across versions. However this cannot consistently be assured. and When the meaning is not guaranteed to be consistent, the version SHOULD be exchanged")
+	@Description(
+			shortDefinition = "Version of the system - if relevant",
+			formalDefinition =
+					"The version of the code system which was used when choosing this code. Note that a well-maintained code system does not need the version reported, because the meaning of codes is consistent across versions. However this cannot consistently be assured. and When the meaning is not guaranteed to be consistent, the version SHOULD be exchanged")
 	private StringDt myVersion;
 
 	@Child(name = "code", type = CodeDt.class, order = 2, min = 0, max = 1)
-	@Description(shortDefinition = "Symbol in syntax defined by the system", formalDefinition = "A symbol in syntax defined by the system. The symbol may be a predefined code or an expression in a syntax defined by the coding system (e.g. post-coordination)")
+	@Description(
+			shortDefinition = "Symbol in syntax defined by the system",
+			formalDefinition =
+					"A symbol in syntax defined by the system. The symbol may be a predefined code or an expression in a syntax defined by the coding system (e.g. post-coordination)")
 	private CodeDt myCode;
 
 	@Child(name = "display", type = StringDt.class, order = 3, min = 0, max = 1)
-	@Description(shortDefinition = "Representation defined by the system", formalDefinition = "A representation of the meaning of the code in the system, following the rules of the system.")
+	@Description(
+			shortDefinition = "Representation defined by the system",
+			formalDefinition =
+					"A representation of the meaning of the code in the system, following the rules of the system.")
 	private StringDt myDisplay;
 
 	@Child(name = "primary", type = BooleanDt.class, order = 4, min = 0, max = 1)
-	@Description(shortDefinition = "If this code was chosen directly by the user", formalDefinition = "Indicates that this code was chosen by a user directly - i.e. off a pick list of available items (codes or displays)")
+	@Description(
+			shortDefinition = "If this code was chosen directly by the user",
+			formalDefinition =
+					"Indicates that this code was chosen by a user directly - i.e. off a pick list of available items (codes or displays)")
 	private BooleanDt myPrimary;
 
 	@Override
 	public boolean isEmpty() {
-		return super.isBaseEmpty() && ca.uhn.fhir.util.ElementUtil.isEmpty(mySystem, myVersion, myCode, myDisplay, myPrimary);
+		return super.isBaseEmpty()
+				&& ca.uhn.fhir.util.ElementUtil.isEmpty(mySystem, myVersion, myCode, myDisplay, myPrimary);
 	}
 
+	@Deprecated // override deprecated method
 	@Override
 	public <T extends IElement> List<T> getAllPopulatedChildElementsOfType(Class<T> theType) {
-		return ca.uhn.fhir.util.ElementUtil.allPopulatedChildElements(theType, mySystem, myVersion, myCode, myDisplay, myPrimary);
+		return ca.uhn.fhir.util.ElementUtil.allPopulatedChildElements(
+				theType, mySystem, myVersion, myCode, myDisplay, myPrimary);
 	}
 
 	/**
@@ -90,6 +110,7 @@ public class InternalCodingDt extends BaseCodingDt implements ICompositeDatatype
 	 * <b>Definition:</b> The identification of the code system that defines the meaning of the symbol in the code.
 	 * </p>
 	 */
+	@Override
 	public UriDt getSystemElement() {
 		if (mySystem == null) {
 			mySystem = new UriDt();
@@ -116,6 +137,7 @@ public class InternalCodingDt extends BaseCodingDt implements ICompositeDatatype
 	 * <b>Definition:</b> The identification of the code system that defines the meaning of the symbol in the code.
 	 * </p>
 	 */
+	@Override
 	public InternalCodingDt setSystem(String theUri) {
 		mySystem = new UriDt(theUri);
 		return this;
@@ -129,11 +151,25 @@ public class InternalCodingDt extends BaseCodingDt implements ICompositeDatatype
 	 * is consistent across versions. However this cannot consistently be assured. and When the meaning is not guaranteed to be consistent, the version SHOULD be exchanged
 	 * </p>
 	 */
-	public StringDt getVersion() {
+	@Override
+	public StringDt getVersionElement() {
 		if (myVersion == null) {
 			myVersion = new StringDt();
 		}
 		return myVersion;
+	}
+
+	@Override
+	public BooleanDt getUserSelectedElement() {
+		return new BooleanDt();
+	}
+
+	/**
+	 * Legacy name for {@link #getVersionElement()}
+	 */
+	@Deprecated(since = "7.0.0")
+	public StringDt getVersion() {
+		return getVersionElement();
 	}
 
 	/**
@@ -169,6 +205,7 @@ public class InternalCodingDt extends BaseCodingDt implements ICompositeDatatype
 	 * <b>Definition:</b> A symbol in syntax defined by the system. The symbol may be a predefined code or an expression in a syntax defined by the coding system (e.g. post-coordination)
 	 * </p>
 	 */
+	@Override
 	public CodeDt getCodeElement() {
 		if (myCode == null) {
 			myCode = new CodeDt();
@@ -195,6 +232,7 @@ public class InternalCodingDt extends BaseCodingDt implements ICompositeDatatype
 	 * <b>Definition:</b> A symbol in syntax defined by the system. The symbol may be a predefined code or an expression in a syntax defined by the coding system (e.g. post-coordination)
 	 * </p>
 	 */
+	@Override
 	public InternalCodingDt setCode(String theCode) {
 		myCode = new CodeDt(theCode);
 		return this;
@@ -233,6 +271,7 @@ public class InternalCodingDt extends BaseCodingDt implements ICompositeDatatype
 	 * <b>Definition:</b> A representation of the meaning of the code in the system, following the rules of the system.
 	 * </p>
 	 */
+	@Override
 	public InternalCodingDt setDisplay(String theString) {
 		myDisplay = new StringDt(theString);
 		return this;
@@ -284,7 +323,7 @@ public class InternalCodingDt extends BaseCodingDt implements ICompositeDatatype
 	 * </p>
 	 */
 	public BaseResourceReferenceDt getValueSet() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(1949));
 	}
 
 	@Override
@@ -292,14 +331,15 @@ public class InternalCodingDt extends BaseCodingDt implements ICompositeDatatype
 		return getDisplay();
 	}
 
+	@Deprecated // override deprecated method
 	@Override
 	public Boolean getMissing() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(1950));
 	}
 
+	@Deprecated // override deprecated method
 	@Override
 	public IQueryParameterType setMissing(Boolean theMissing) {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(1951));
 	}
-
 }

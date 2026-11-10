@@ -1,0 +1,1768 @@
+package org.hl7.fhir.common.hapi.validation.support;
+
+import ca.uhn.fhir.context.BaseRuntimeElementDefinition;
+import ca.uhn.fhir.context.ConfigurationException;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.context.support.ConceptValidationOptions;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.LookupCodeRequest;
+import ca.uhn.fhir.context.support.TranslateConceptResults;
+import ca.uhn.fhir.context.support.ValidateCodeRequest;
+import ca.uhn.fhir.context.support.ValidationSupportContext;
+import ca.uhn.fhir.context.support.ValidationSupportUnavailableException;
+import ca.uhn.fhir.context.support.ValueSetExpansionOptions;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException;
+import ca.uhn.fhir.sl.cache.Cache;
+import ca.uhn.fhir.sl.cache.CacheFactory;
+import ca.uhn.fhir.util.FhirTerser;
+import ca.uhn.fhir.util.Logs;
+import ca.uhn.fhir.util.StopWatch;
+import ca.uhn.fhir.util.UrlUtil;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Strings;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import org.apache.commons.lang3.Validate;
+import org.apache.commons.lang3.concurrent.BasicThreadFactory;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+import org.slf4j.Logger;
+
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+import static org.apache.commons.lang3.ObjectUtils.defaultIfNull;
+import static org.apache.commons.lang3.StringUtils.defaultIfBlank;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+/**
+ * This validation support module has two primary purposes: It can be used to
+ * chain multiple backing modules together, and it can optionally cache the
+ * results.
+ * <p>
+ * The following chaining logic is used:
+ * <ul>
+ * <li>
+ *     Calls to {@literal fetchAll...} methods such as {@link #fetchAllConformanceResources()}
+ *     and {@link #fetchAllStructureDefinitions()} will call every method in the chain in
+ *     order, and aggregate the results into a single list to return.
+ * </li>
+ * <li>
+ *     Calls to fetch or validate codes, such as {@link #validateCode(ValidationSupportContext, ConceptValidationOptions, String, String, String, String)}
+ *     and {@link #lookupCode(ValidationSupportContext, LookupCodeRequest)} will first test
+ *     each module in the chain using the {@link #isCodeSystemSupported(ValidationSupportContext, String)}
+ *     or {@link #isValueSetSupported(ValidationSupportContext, String)}
+ *     methods (depending on whether a ValueSet URL is present in the method parameters)
+ *     and will invoke any methods in the chain which return that they can handle the given
+ *     CodeSystem/ValueSet URL. The first non-null value returned by a method in the chain
+ *     that can support the URL will be returned to the caller.
+ * </li>
+ * <li>
+ *     All other methods will invoke each method in the chain in order, and will stop processing and return
+ *     immediately as soon as the first non-null value is returned.
+ * </li>
+ * </ul>
+ * </p>
+ * <p>
+ * The following caching logic is used if caching is enabled using {@link CacheConfiguration}.
+ * You can use {@link CacheConfiguration#disabled()} if you want to disable caching.
+ * <ul>
+ * <li>
+ *     Calls to fetch StructureDefinitions including {@link #fetchAllStructureDefinitions()},
+ *     {@link #fetchStructureDefinition(String)} and {@link #fetchStructureDefinition(String, String)}
+ *     are cached in a non-expiring cache.
+ *     This is because the {@link org.hl7.fhir.common.hapi.validation.validator.FhirInstanceValidator}
+ *     module makes assumptions that these objects will not change for the lifetime
+ *     of the validator for performance reasons.
+ * </li>
+ * <li>
+ *     Calls to all other {@literal fetchAll...} methods including
+ *     {@link #fetchAllConformanceResources()} and {@link #fetchAllSearchParameters()}
+ *     cache their results in an expiring cache, but will refresh that cache asynchronously.
+ * </li>
+ * <li>
+ *     Results of {@link #generateSnapshot(ValidationSupportContext, IBaseResource, String, String, String)}
+ *     are not cached, since this method is generally called in contexts where the results
+ *     are cached.
+ * </li>
+ * <li>
+ *     Results of all other methods are stored in an expiring cache.
+ * </li>
+ * </ul>
+ * </p>
+ * <p>
+ * Note that caching functionality used to be provided by a separate provider
+ * called {@literal CachingValidationSupport} but that functionality has been
+ * moved into this class as of HAPI FHIR 8.0.0, because it is possible to
+ * provide a more efficient chain when these functions are combined.
+ * </p>
+ */
+public class ValidationSupportChain implements IValidationSupport {
+	public static final ValueSetExpansionOptions EMPTY_EXPANSION_OPTIONS = new ValueSetExpansionOptions();
+	static Logger ourLog = Logs.getTerminologyTroubleshootingLog();
+	private final List<IValidationSupport> myChain = new CopyOnWriteArrayList<>();
+
+	@Nullable
+	private final Cache<BaseKey<?>, Object> myExpiringCache;
+
+	@Nullable
+	private final Map<BaseKey<?>, Object> myNonExpiringCache;
+
+	/**
+	 * See class documentation for an explanation of why this is separate
+	 * and non-expiring. Note that this field is non-synchronized. If you
+	 * access it, you should first wrap the call in
+	 * <code>synchronized(myStructureDefinitionsByUrl)</code>.
+	 * <p>
+	 * One instance can be cached under several URLs - a base definition is the same resource with or
+	 * without its version - so the map is kept in insertion order and
+	 * {@link #getDistinctStructureDefinitions()} lists each instance once.
+	 * </p>
+	 */
+	@Nonnull
+	private final Map<String, IBaseResource> myStructureDefinitionsByUrl = new LinkedHashMap<>();
+
+	private final ThreadPoolExecutor myBackgroundExecutor;
+	private final CacheConfiguration myCacheConfiguration;
+	private boolean myCodeableConceptValidationSuccessfulIfNotAllCodingsAreValid;
+	private String myName = getClass().getSimpleName();
+	private ValidationSupportChainMetrics myMetrics;
+	private volatile boolean myHaveFetchedAllStructureDefinitions = false;
+
+	/**
+	 * Constructor which initializes the chain with no modules (modules
+	 * must subsequently be registered using {@link #addValidationSupport(IValidationSupport)}).
+	 * The cache will be enabled using {@link CacheConfiguration#defaultValues()}.
+	 */
+	public ValidationSupportChain() {
+		/*
+		 * Note, this constructor is called by default when
+		 * FhirContext#getValidationSupport() is called, so it should
+		 * provide sensible defaults.
+		 */
+		this(Collections.emptyList());
+	}
+
+	/**
+	 * Constructor which initializes the chain with the given modules.
+	 * The cache will be enabled using {@link CacheConfiguration#defaultValues()}.
+	 */
+	public ValidationSupportChain(IValidationSupport... theValidationSupportModules) {
+		this(
+				theValidationSupportModules != null
+						? Arrays.asList(theValidationSupportModules)
+						: Collections.emptyList());
+	}
+
+	/**
+	 * Constructor which initializes the chain with the given modules.
+	 * The cache will be enabled using {@link CacheConfiguration#defaultValues()}.
+	 */
+	public ValidationSupportChain(List<IValidationSupport> theValidationSupportModules) {
+		this(CacheConfiguration.defaultValues(), theValidationSupportModules);
+	}
+
+	/**
+	 * Constructor
+	 *
+	 * @param theCacheConfiguration       The caching configuration
+	 * @param theValidationSupportModules The initial modules to add to the chain
+	 */
+	public ValidationSupportChain(
+			@Nonnull CacheConfiguration theCacheConfiguration, IValidationSupport... theValidationSupportModules) {
+		this(
+				theCacheConfiguration,
+				theValidationSupportModules != null
+						? Arrays.asList(theValidationSupportModules)
+						: Collections.emptyList());
+	}
+
+	/**
+	 * Constructor
+	 *
+	 * @param theCacheConfiguration       The caching configuration
+	 * @param theValidationSupportModules The initial modules to add to the chain
+	 */
+	public ValidationSupportChain(
+			@Nonnull CacheConfiguration theCacheConfiguration,
+			@Nonnull List<IValidationSupport> theValidationSupportModules) {
+
+		Validate.notNull(theCacheConfiguration, "theCacheConfiguration must not be null");
+		Validate.notNull(theValidationSupportModules, "theValidationSupportModules must not be null");
+
+		myCacheConfiguration = theCacheConfiguration;
+		if (theCacheConfiguration.getCacheSize() == 0 || theCacheConfiguration.getCacheTimeout() == 0) {
+			myExpiringCache = null;
+			myNonExpiringCache = null;
+			myBackgroundExecutor = null;
+		} else {
+			myExpiringCache =
+					CacheFactory.build(theCacheConfiguration.getCacheTimeout(), theCacheConfiguration.getCacheSize());
+			myNonExpiringCache = Collections.synchronizedMap(new HashMap<>());
+
+			LinkedBlockingQueue<Runnable> executorQueue = new LinkedBlockingQueue<>(1000);
+			BasicThreadFactory threadFactory = new BasicThreadFactory.Builder()
+					.namingPattern("CachingValidationSupport-%d")
+					.daemon(false)
+					.priority(Thread.NORM_PRIORITY)
+					.build();
+
+			// NOTE: We're not using ThreadPoolUtil here, because that class depends on Spring and
+			// we want the validator infrastructure to not require spring dependencies.
+			myBackgroundExecutor = new ThreadPoolExecutor(
+					1,
+					1,
+					0L,
+					TimeUnit.MILLISECONDS,
+					executorQueue,
+					threadFactory,
+					new ThreadPoolExecutor.DiscardPolicy());
+		}
+
+		for (IValidationSupport next : theValidationSupportModules) {
+			if (next != null) {
+				addValidationSupport(next);
+			}
+		}
+	}
+
+	@Override
+	public String getName() {
+		return myName;
+	}
+
+	/**
+	 * Sets a name for this chain. This name will be returned by
+	 * {@link #getName()} and used by OpenTelemetry.
+	 */
+	public void setName(String theName) {
+		Validate.notBlank(theName, "theName must not be blank");
+		myName = theName;
+	}
+
+	@PostConstruct
+	public void start() {
+		if (myMetrics == null) {
+			myMetrics = new ValidationSupportChainMetrics(this);
+			myMetrics.start();
+		}
+	}
+
+	@PreDestroy
+	public void stop() {
+		if (myMetrics != null) {
+			myMetrics.stop();
+			myMetrics = null;
+		}
+	}
+
+	@Override
+	public boolean isCodeableConceptValidationSuccessfulIfNotAllCodingsAreValid() {
+		return myCodeableConceptValidationSuccessfulIfNotAllCodingsAreValid;
+	}
+
+	/**
+	 * When validating a CodeableConcept containing multiple codings, this method can be used to control whether
+	 * the validator requires all codings in the CodeableConcept to be valid in order to consider the
+	 * CodeableConcept valid.
+	 * <p>
+	 * See WorkerContextValidationSupportAdapter#validateCode in hapi-fhir-validation, and refer to the values below
+	 * for the behaviour associated with each value.
+	 * </p>
+	 * <p>
+	 *   <ul>
+	 *     <li>If <code>false</code> (default setting) the validation for codings will return a positive result only if
+	 *     ALL codings are valid.</li>
+	 * 	   <li>If <code>true</code> the validation for codings will return a positive result if ANY codings are valid.
+	 * 	   </li>
+	 * 	  </ul>
+	 * </p>
+	 *
+	 * @param theCodeableConceptValidationSuccessfulIfNotAllCodingsAreValid {@literal true} to accept a CodeableConcept
+	 *                                                                      when ANY of its codings is valid
+	 * @return this chain
+	 */
+	public ValidationSupportChain setCodeableConceptValidationSuccessfulIfNotAllCodingsAreValid(
+			boolean theCodeableConceptValidationSuccessfulIfNotAllCodingsAreValid) {
+		myCodeableConceptValidationSuccessfulIfNotAllCodingsAreValid =
+				theCodeableConceptValidationSuccessfulIfNotAllCodingsAreValid;
+		return this;
+	}
+
+	@Override
+	public TranslateConceptResults translateConcept(TranslateCodeRequest theRequest) {
+		TranslateConceptKey key = new TranslateConceptKey(theRequest);
+		CacheValue<TranslateConceptResults> retVal = getFromCache(key);
+		if (retVal == null) {
+
+			/*
+			 * The chain behaviour for this method is to call every element in the
+			 * chain and aggregate the results (as opposed to just using the first
+			 * module which provides a response).
+			 */
+			retVal = CacheValue.empty();
+
+			TranslateConceptResults outcome = null;
+			for (IValidationSupport next : myChain) {
+				TranslateConceptResults translations = next.translateConcept(theRequest);
+				if (translations != null) {
+					if (outcome == null) {
+						outcome = new TranslateConceptResults();
+					}
+
+					if (outcome.getMessage() == null) {
+						outcome.setMessage(translations.getMessage());
+					}
+
+					if (translations.getResult() && !outcome.getResult()) {
+						outcome.setResult(translations.getResult());
+						outcome.setMessage(translations.getMessage());
+					}
+
+					if (!translations.isEmpty()) {
+						ourLog.debug(
+								"{} found {} concept translation{} for {}",
+								next.getName(),
+								translations.size(),
+								translations.size() > 1 ? "s" : "",
+								theRequest);
+						outcome.getResults().addAll(translations.getResults());
+					}
+				}
+			}
+
+			if (outcome != null) {
+				retVal = new CacheValue<>(outcome);
+			}
+
+			putInCache(key, retVal);
+		}
+
+		return retVal.getValue();
+	}
+
+	@Override
+	public void invalidateCaches() {
+		ourLog.debug("Invalidating caches in {} validation support modules", myChain.size());
+		myHaveFetchedAllStructureDefinitions = false;
+		for (IValidationSupport next : myChain) {
+			next.invalidateCaches();
+		}
+		if (myNonExpiringCache != null) {
+			myNonExpiringCache.clear();
+		}
+		if (myExpiringCache != null) {
+			myExpiringCache.invalidateAll();
+		}
+		synchronized (myStructureDefinitionsByUrl) {
+			myStructureDefinitionsByUrl.clear();
+		}
+	}
+
+	/**
+	 * Invalidate the expiring cache, but not the permanent StructureDefinition cache
+	 *
+	 * @since 8.0.0
+	 */
+	public void invalidateExpiringCaches() {
+		if (myExpiringCache != null) {
+			myExpiringCache.invalidateAll();
+		}
+	}
+
+	@Override
+	public boolean isValueSetSupported(ValidationSupportContext theValidationSupportContext, String theValueSetUrl) {
+		// On this signature a ValueSet can only name a version by carrying it packed as "url|version"
+		UrlUtil.CanonicalUrlParts valueSet = UrlUtil.parseCanonicalUrl(theValueSetUrl);
+		String valueSetVersion = valueSet.versionId().orElse(null);
+		return isValueSetSupported(theValidationSupportContext, valueSet.url(), valueSetVersion);
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	public boolean isValueSetSupported(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nullable String theValueSetUrl,
+			@Nullable String theVersion) {
+		for (IValidationSupport next : myChain) {
+			boolean retVal;
+			try {
+				retVal = isValueSetSupported(theValidationSupportContext, next, theValueSetUrl, theVersion);
+			} catch (ValidationSupportUnavailableException e) {
+				logUnavailable(next, e);
+				continue;
+			}
+			if (retVal) {
+				ourLog.debug(
+						"ValueSet {} found in {}", UrlUtil.toCanonicalUrl(theValueSetUrl, theVersion), next.getName());
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Whether one module in the chain supports the given ValueSet version. A module holding the ValueSet
+	 * at a different version does not support it, for the same reason as
+	 * {@link #isCodeSystemSupported(ValidationSupportContext, IValidationSupport, String, String)}.
+	 *
+	 * @throws ValidationSupportUnavailableException if the module could not answer, which is not cached
+	 */
+	private boolean isValueSetSupported(
+			ValidationSupportContext theValidationSupportContext,
+			IValidationSupport theValidationSupport,
+			String theValueSetUrl,
+			@Nullable String theValueSetVersion) {
+		IsValueSetSupportedKey key = new IsValueSetSupportedKey(
+				theValidationSupport, UrlUtil.toCanonicalUrl(theValueSetUrl, theValueSetVersion));
+		CacheValue<Boolean> value = getFromCache(key);
+		if (value == null) {
+			value = new CacheValue<>(theValidationSupport.isValueSetSupported(
+					theValidationSupportContext, theValueSetUrl, theValueSetVersion));
+			putInCache(key, value);
+		}
+		return value.getValue();
+	}
+
+	@Override
+	public IBaseResource generateSnapshot(
+			ValidationSupportContext theValidationSupportContext,
+			IBaseResource theInput,
+			String theUrl,
+			String theWebUrl,
+			String theProfileName) {
+
+		/*
+		 * No caching for this method because we typically cache the results anyhow.
+		 * If this ever changes, make sure to update the class javadocs and the
+		 * HAPI FHIR documentation which indicate that this isn't cached.
+		 */
+
+		for (IValidationSupport next : myChain) {
+			IBaseResource retVal =
+					next.generateSnapshot(theValidationSupportContext, theInput, theUrl, theWebUrl, theProfileName);
+			if (retVal != null) {
+				ourLog.atDebug()
+						.setMessage("Profile snapshot for {} generated by {}")
+						.addArgument(theInput::getIdElement)
+						.addArgument(next::getName)
+						.log();
+				return retVal;
+			}
+		}
+		return null;
+	}
+
+	@Override
+	public FhirContext getFhirContext() {
+		if (myChain.isEmpty()) {
+			return null;
+		}
+		return myChain.get(0).getFhirContext();
+	}
+
+	/**
+	 * Add a validation support module to the chain.
+	 * <p>
+	 * Note that this method is not thread-safe. All validation support modules should be added prior to use.
+	 * </p>
+	 *
+	 * @param theValidationSupport The validation support. Must not be null, and must have a {@link #getFhirContext() FhirContext} that is configured for the same FHIR version as other entries in the chain.
+	 */
+	public void addValidationSupport(IValidationSupport theValidationSupport) {
+		int index = myChain.size();
+		addValidationSupport(index, theValidationSupport);
+	}
+
+	/**
+	 * Add a validation support module to the chain at the given index.
+	 * <p>
+	 * Note that this method is not thread-safe. All validation support modules should be added prior to use.
+	 * </p>
+	 *
+	 * @param theIndex             The index to add to
+	 * @param theValidationSupport The validation support. Must not be null, and must have a {@link #getFhirContext() FhirContext} that is configured for the same FHIR version as other entries in the chain.
+	 */
+	public void addValidationSupport(int theIndex, IValidationSupport theValidationSupport) {
+		Validate.notNull(theValidationSupport, "theValidationSupport must not be null");
+		invalidateCaches();
+
+		if (theValidationSupport.getFhirContext() == null) {
+			String message = "Can not add validation support: getFhirContext() returns null";
+			throw new ConfigurationException(Msg.code(708) + message);
+		}
+
+		FhirContext existingFhirContext = getFhirContext();
+		if (existingFhirContext != null) {
+			FhirVersionEnum newVersion =
+					theValidationSupport.getFhirContext().getVersion().getVersion();
+			FhirVersionEnum existingVersion = existingFhirContext.getVersion().getVersion();
+			if (!existingVersion.equals(newVersion)) {
+				String message = "Trying to add validation support of version " + newVersion + " to chain with "
+						+ myChain.size() + " entries of version " + existingVersion;
+				throw new ConfigurationException(Msg.code(709) + message);
+			}
+		}
+
+		myChain.add(theIndex, theValidationSupport);
+	}
+
+	/**
+	 * Checks if the validation support chain is empty.
+	 * This method is useful for subclasses that need to determine whether validators
+	 * have already been added to the chain, particularly in scenarios where the same
+	 * chain instance may be shared across multiple application contexts.
+	 *
+	 * @return true if the chain is empty, false otherwise
+	 */
+	protected boolean isChainEmpty() {
+		return myChain.isEmpty();
+	}
+
+	/**
+	 * Removes an item from the chain. Note that this method is mostly intended for testing. Removing items from the chain while validation is
+	 * actually occurring is not an expected use case for this class.
+	 */
+	public void removeValidationSupport(IValidationSupport theValidationSupport) {
+		invalidateCaches();
+		myChain.remove(theValidationSupport);
+	}
+
+	@Nullable
+	@Override
+	public ValueSetExpansionOutcome expandValueSet(
+			ValidationSupportContext theValidationSupportContext,
+			@Nullable ValueSetExpansionOptions theExpansionOptions,
+			@Nonnull String theValueSetUrlToExpand)
+			throws ResourceNotFoundException {
+		ValueSetExpansionOptions expansionOptions = defaultIfNull(theExpansionOptions, EMPTY_EXPANSION_OPTIONS);
+		ExpandValueSetKey key = new ExpandValueSetKey(expansionOptions, null, theValueSetUrlToExpand);
+		CacheValue<ValueSetExpansionOutcome> retVal = getFromCache(key);
+
+		if (retVal == null) {
+			retVal = CacheValue.empty();
+			UrlUtil.CanonicalUrlParts valueSetToExpand = UrlUtil.parseCanonicalUrl(theValueSetUrlToExpand);
+			String valueSetVersion = valueSetToExpand.versionId().orElse(null);
+			for (IValidationSupport next : myChain) {
+				if (isValueSetSupported(theValidationSupportContext, next, valueSetToExpand.url(), valueSetVersion)) {
+					ValueSetExpansionOutcome expanded =
+							next.expandValueSet(theValidationSupportContext, expansionOptions, theValueSetUrlToExpand);
+					if (expanded != null) {
+						ourLog.debug("ValueSet {} expanded by URL by {}", theValueSetUrlToExpand, next.getName());
+						retVal = new CacheValue<>(expanded);
+						break;
+					}
+				}
+			}
+
+			putInCache(key, retVal);
+		}
+
+		if (retVal.getValue() == null) {
+			throw new ResourceNotFoundException(
+					Msg.code(2788) + "Unknown ValueSet: " + UrlUtil.escapeUrlParam(theValueSetUrlToExpand));
+		}
+
+		return retVal.getValue();
+	}
+
+	@Override
+	public ValueSetExpansionOutcome expandValueSet(
+			ValidationSupportContext theValidationSupportContext,
+			ValueSetExpansionOptions theExpansionOptions,
+			@Nonnull IBaseResource theValueSetToExpand) {
+
+		ValueSetExpansionOptions expansionOptions = defaultIfNull(theExpansionOptions, EMPTY_EXPANSION_OPTIONS);
+		String id = theValueSetToExpand.getIdElement().getValue();
+		ExpandValueSetKey key = null;
+		CacheValue<ValueSetExpansionOutcome> retVal = null;
+		if (isNotBlank(id)) {
+			key = new ExpandValueSetKey(expansionOptions, id, null);
+			retVal = getFromCache(key);
+		}
+		if (retVal == null) {
+			retVal = CacheValue.empty();
+			for (IValidationSupport next : myChain) {
+				ValueSetExpansionOutcome expanded =
+						next.expandValueSet(theValidationSupportContext, expansionOptions, theValueSetToExpand);
+				if (expanded != null) {
+					ourLog.debug("ValueSet {} expanded by {}", theValueSetToExpand.getIdElement(), next.getName());
+					retVal = new CacheValue<>(expanded);
+					break;
+				}
+			}
+
+			if (key != null) {
+				putInCache(key, retVal);
+			}
+		}
+
+		return retVal.getValue();
+	}
+
+	@Override
+	public boolean isRemoteTerminologyServiceConfigured() {
+		return myChain.stream().anyMatch(RemoteTerminologyServiceValidationSupport.class::isInstance);
+	}
+
+	@Override
+	public List<IBaseResource> fetchAllConformanceResources() {
+		FetchAllKey key = new FetchAllKey(FetchAllKey.TypeEnum.ALL);
+		Supplier<List<IBaseResource>> loader = () -> {
+			List<IBaseResource> allCandidates = new ArrayList<>();
+			for (IValidationSupport next : myChain) {
+				List<IBaseResource> candidates = next.fetchAllConformanceResources();
+				if (candidates != null) {
+					allCandidates.addAll(candidates);
+				}
+			}
+			return allCandidates;
+		};
+
+		return getFromCacheWithAsyncRefresh(key, loader);
+	}
+
+	@SuppressWarnings("unchecked")
+	@Override
+	@Nonnull
+	public List<IBaseResource> fetchAllStructureDefinitions() {
+		if (!myHaveFetchedAllStructureDefinitions) {
+			FhirTerser terser = getFhirContext().newTerser();
+			List<IBaseResource> allStructureDefinitions =
+					doFetchStructureDefinitions(IValidationSupport::fetchAllStructureDefinitions);
+			if (myExpiringCache != null) {
+				synchronized (myStructureDefinitionsByUrl) {
+					for (IBaseResource structureDefinition : allStructureDefinitions) {
+						String url = terser.getSinglePrimitiveValueOrNull(structureDefinition, "url");
+						String version = terser.getSinglePrimitiveValueOrNull(structureDefinition, "version");
+
+						// Most queries to the base structure definitions are versionless
+						// And they shouldn't be overwritten with multiple versions anyway
+						// (see JpaPersistedResourceValidationSupportChain#doFetchResource())
+						// So we'll cache them without version.
+						boolean shouldAppendVersionToUrl = !Strings.isNullOrEmpty(url)
+								&& version != null
+								&& !url.startsWith(URL_PREFIX_STRUCTURE_DEFINITION);
+						if (shouldAppendVersionToUrl) {
+							url = url + "|" + version;
+						}
+
+						url = defaultIfBlank(url, UUID.randomUUID().toString());
+						myStructureDefinitionsByUrl.putIfAbsent(url, structureDefinition);
+					}
+				}
+			}
+			myHaveFetchedAllStructureDefinitions = true;
+		}
+		synchronized (myStructureDefinitionsByUrl) {
+			return getDistinctStructureDefinitions();
+		}
+	}
+
+	/**
+	 * The cached structure definitions, each instance once, in the order first cached. The caller must hold
+	 * the lock on {@link #myStructureDefinitionsByUrl}.
+	 */
+	// Created by Claude Opus 5.5
+	private List<IBaseResource> getDistinctStructureDefinitions() {
+		Set<IBaseResource> distinct = Collections.newSetFromMap(new IdentityHashMap<>());
+		return myStructureDefinitionsByUrl.values().stream()
+				.filter(distinct::add)
+				.toList();
+	}
+
+	@SuppressWarnings("unchecked")
+	@Override
+	public List<IBaseResource> fetchAllNonBaseStructureDefinitions() {
+		FetchAllKey key = new FetchAllKey(FetchAllKey.TypeEnum.ALL_NON_BASE_STRUCTUREDEFINITIONS);
+		Supplier<List<IBaseResource>> loader =
+				() -> doFetchStructureDefinitions(IValidationSupport::fetchAllNonBaseStructureDefinitions);
+		return getFromCacheWithAsyncRefresh(key, loader);
+	}
+
+	@SuppressWarnings("unchecked")
+	@Nullable
+	@Override
+	public <T extends IBaseResource> List<T> fetchAllSearchParameters() {
+		FetchAllKey key = new FetchAllKey(FetchAllKey.TypeEnum.ALL_SEARCHPARAMETERS);
+		Supplier<List<IBaseResource>> loader =
+				() -> doFetchStructureDefinitions(IValidationSupport::fetchAllSearchParameters);
+		return (List<T>) getFromCacheWithAsyncRefresh(key, loader);
+	}
+
+	private List<IBaseResource> doFetchStructureDefinitions(
+			Function<IValidationSupport, List<IBaseResource>> theFunction) {
+		ArrayList<IBaseResource> retVal = new ArrayList<>();
+		Set<String> urls = new HashSet<>();
+		for (IValidationSupport nextSupport : myChain) {
+			List<IBaseResource> allStructureDefinitions = theFunction.apply(nextSupport);
+			if (allStructureDefinitions != null) {
+				for (IBaseResource next : allStructureDefinitions) {
+
+					IPrimitiveType<?> urlType =
+							getFhirContext().newTerser().getSingleValueOrNull(next, "url", IPrimitiveType.class);
+					if (urlType == null
+							|| isBlank(urlType.getValueAsString())
+							|| urls.add(urlType.getValueAsString())) {
+						retVal.add(next);
+					}
+				}
+			}
+		}
+		return retVal;
+	}
+
+	@Override
+	public IBaseResource fetchCodeSystem(String theSystem) {
+		// On this signature a code system can only name a version by carrying it packed as "system|version"
+		UrlUtil.CanonicalUrlParts codeSystem = UrlUtil.parseCanonicalUrl(theSystem);
+		return fetchCodeSystem(codeSystem.url(), codeSystem.versionId().orElse(null));
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	@Nullable
+	public IBaseResource fetchCodeSystem(@Nonnull String theSystem, @Nullable String theVersion) {
+		Function<IValidationSupport, IBaseResource> invoker = v -> v.fetchCodeSystem(theSystem, theVersion);
+		// Two versions of one code system are different resources, so the version belongs in the cache key
+		String canonicalUrl = UrlUtil.toCanonicalUrl(theSystem, theVersion);
+		ResourceByUrlKey<IBaseResource> key =
+				new ResourceByUrlKey<>(ResourceByUrlKey.TypeEnum.CODESYSTEM, canonicalUrl);
+		return fetchValue(key, invoker, canonicalUrl);
+	}
+
+	private <T> T fetchValue(ResourceByUrlKey<T> theKey, Function<IValidationSupport, T> theInvoker, String theUrl) {
+		CacheValue<T> retVal = getFromCache(theKey);
+
+		if (retVal == null) {
+			retVal = CacheValue.empty();
+			boolean moduleUnavailable = false;
+			for (IValidationSupport next : myChain) {
+				T outcome;
+				try {
+					outcome = theInvoker.apply(next);
+				} catch (ValidationSupportUnavailableException e) {
+					logUnavailable(next, e);
+					moduleUnavailable = true;
+					continue;
+				}
+				if (outcome != null) {
+					ourLog.debug("{} {} with URL {} fetched by {}", theKey.myType, outcome, theUrl, next.getName());
+					retVal = new CacheValue<>(outcome);
+					break;
+				}
+			}
+			// a module that could not answer may hold it, so finding nothing is only known once it answers
+			if (retVal.getValue() != null || !moduleUnavailable) {
+				putInCache(theKey, retVal);
+			}
+		}
+
+		return retVal.getValue();
+	}
+
+	@Override
+	public IBaseResource fetchValueSet(String theUrl) {
+		// On this signature a value set can only name a version by carrying it packed as "url|version"
+		UrlUtil.CanonicalUrlParts valueSet = UrlUtil.parseCanonicalUrl(theUrl);
+		String valueSetVersion = valueSet.versionId().orElse(null);
+		return fetchValueSet(valueSet.url(), valueSetVersion);
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	@Nullable
+	public IBaseResource fetchValueSet(@Nonnull String theUrl, @Nullable String theVersion) {
+		Function<IValidationSupport, IBaseResource> invoker = v -> v.fetchValueSet(theUrl, theVersion);
+		// Two versions of one value set are different resources, so the version belongs in the cache key
+		String canonicalUrl = UrlUtil.toCanonicalUrl(theUrl, theVersion);
+		ResourceByUrlKey<IBaseResource> key = new ResourceByUrlKey<>(ResourceByUrlKey.TypeEnum.VALUESET, canonicalUrl);
+		return fetchValue(key, invoker, canonicalUrl);
+	}
+
+	@Override
+	public <T extends IBaseResource> T fetchResource(Class<T> theClass, String theUri) {
+		// On this signature a resource can only name a version by carrying it packed as "url|version"
+		UrlUtil.CanonicalUrlParts resource = UrlUtil.parseCanonicalUrl(theUri);
+		String resourceVersion = resource.versionId().orElse(null);
+		return fetchResource(theClass, resource.url(), resourceVersion);
+	}
+
+	// Created by Claude Opus 5
+	@SuppressWarnings("unchecked")
+	@Override
+	@Nullable
+	public <T extends IBaseResource> T fetchResource(
+			@Nullable Class<T> theClass, @Nonnull String theUri, @Nullable String theVersion) {
+
+		/*
+		 * If we're looking for a common type with a dedicated fetch method, use that
+		 * so that we can use a common cache location for lookups wanting a given
+		 * URL on both methods (the validator will call both paths when looking for a
+		 * specific URL so this improves cache efficiency).
+		 */
+		if (theClass != null) {
+			BaseRuntimeElementDefinition<?> elementDefinition = getFhirContext().getElementDefinition(theClass);
+			if (elementDefinition != null) {
+				switch (elementDefinition.getName()) {
+					case "ValueSet":
+						return (T) fetchValueSet(theUri, theVersion);
+					case "CodeSystem":
+						return (T) fetchCodeSystem(theUri, theVersion);
+					case "StructureDefinition":
+						return (T) fetchStructureDefinition(theUri, theVersion);
+				}
+			}
+		}
+
+		Function<IValidationSupport, T> invoker = v -> v.fetchResource(theClass, theUri, theVersion);
+		// Two versions of one resource are different resources, so the version belongs in the cache key
+		String canonicalUrl = UrlUtil.toCanonicalUrl(theUri, theVersion);
+		TypedResourceByUrlKey<T> key = new TypedResourceByUrlKey<>(theClass, canonicalUrl);
+		return fetchValue(key, invoker, canonicalUrl);
+	}
+
+	@Override
+	public byte[] fetchBinary(String theKey) {
+		Function<IValidationSupport, byte[]> invoker = v -> v.fetchBinary(theKey);
+		ResourceByUrlKey<byte[]> key = new ResourceByUrlKey<>(ResourceByUrlKey.TypeEnum.BINARY, theKey);
+		return fetchValue(key, invoker, theKey);
+	}
+
+	@Override
+	public IBaseResource fetchStructureDefinition(String theUrl) {
+		// On this signature a structure definition can only name a version by carrying it packed as "url|version"
+		UrlUtil.CanonicalUrlParts structureDefinition = UrlUtil.parseCanonicalUrl(theUrl);
+		String structureDefinitionVersion = structureDefinition.versionId().orElse(null);
+		return fetchStructureDefinition(structureDefinition.url(), structureDefinitionVersion);
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	@Nullable
+	public IBaseResource fetchStructureDefinition(@Nonnull String theUrl, @Nullable String theVersion) {
+		// Two versions of one structure definition are different resources, so the version belongs in the key
+		String canonicalUrl = UrlUtil.toCanonicalUrl(theUrl, theVersion);
+		synchronized (myStructureDefinitionsByUrl) {
+			IBaseResource candidate = myStructureDefinitionsByUrl.get(canonicalUrl);
+			if (candidate == null) {
+				Function<IValidationSupport, IBaseResource> invoker =
+						v -> v.fetchStructureDefinition(theUrl, theVersion);
+				ResourceByUrlKey<IBaseResource> key =
+						new ResourceByUrlKey<>(ResourceByUrlKey.TypeEnum.STRUCTUREDEFINITION, canonicalUrl);
+				candidate = fetchValue(key, invoker, canonicalUrl);
+				if (myExpiringCache != null) {
+					if (candidate != null) {
+						myStructureDefinitionsByUrl.putIfAbsent(canonicalUrl, candidate);
+					}
+				}
+			}
+			return candidate;
+		}
+	}
+
+	@Override
+	public boolean isCodeSystemSupported(ValidationSupportContext theValidationSupportContext, String theSystem) {
+		// On this signature a code system can only name a version by carrying it packed as "system|version"
+		UrlUtil.CanonicalUrlParts codeSystem = UrlUtil.parseCanonicalUrl(theSystem);
+		String codeSystemVersion = codeSystem.versionId().orElse(null);
+		return isCodeSystemSupported(theValidationSupportContext, codeSystem.url(), codeSystemVersion);
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	public boolean isCodeSystemSupported(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nullable String theSystem,
+			@Nullable String theVersion) {
+		for (IValidationSupport next : myChain) {
+			boolean supported;
+			try {
+				supported = isCodeSystemSupported(theValidationSupportContext, next, theSystem, theVersion);
+			} catch (ValidationSupportUnavailableException e) {
+				logUnavailable(next, e);
+				continue;
+			}
+			if (supported) {
+				if (ourLog.isDebugEnabled()) {
+					ourLog.debug(
+							"CodeSystem with System {} is supported by {}",
+							UrlUtil.toCanonicalUrl(theSystem, theVersion),
+							next.getName());
+				}
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Whether one module in the chain supports the given code system version. A module which implements the
+	 * version-aware isCodeSystemSupported and holds the system at a different version does not support it:
+	 * that is what lets the chain pick the module holding the version the caller asked for, rather than
+	 * whichever module comes first.
+	 *
+	 * @throws ValidationSupportUnavailableException if the module could not answer, which is not cached
+	 */
+	private boolean isCodeSystemSupported(
+			ValidationSupportContext theValidationSupportContext,
+			IValidationSupport theValidationSupport,
+			String theCodeSystemUrl,
+			@Nullable String theCodeSystemVersion) {
+		IsCodeSystemSupportedKey key = new IsCodeSystemSupportedKey(
+				theValidationSupport, UrlUtil.toCanonicalUrl(theCodeSystemUrl, theCodeSystemVersion));
+		CacheValue<Boolean> value = getFromCache(key);
+		if (value == null) {
+			value = new CacheValue<>(theValidationSupport.isCodeSystemSupported(
+					theValidationSupportContext, theCodeSystemUrl, theCodeSystemVersion));
+			putInCache(key, value);
+		}
+		return value.getValue();
+	}
+
+	@Override
+	public CodeValidationResult validateCode(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nonnull ConceptValidationOptions theOptions,
+			String theCodeSystem,
+			String theCode,
+			String theDisplay,
+			String theValueSetUrl) {
+		// On this signature a code system can only name a version by carrying it packed as "system|version"
+		UrlUtil.CanonicalUrlParts codeSystem = UrlUtil.parseCanonicalUrl(theCodeSystem);
+		return validateCode(
+				theValidationSupportContext,
+				theOptions,
+				new ValidateCodeRequest(
+						codeSystem.url(), codeSystem.versionId().orElse(null), theCode, theDisplay, theValueSetUrl));
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	@Nullable
+	public CodeValidationResult validateCode(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nonnull ConceptValidationOptions theOptions,
+			@Nonnull ValidateCodeRequest theRequest) {
+		String codeSystem = theRequest.getCodeSystem();
+		String codeSystemVersion = theRequest.getCodeSystemVersion();
+		String code = theRequest.getCode();
+		String valueSetUrl = theRequest.getValueSetUrl();
+
+		ValidateCodeKey key = new ValidateCodeKey(
+				theOptions, codeSystem, codeSystemVersion, code, theRequest.getDisplay(), valueSetUrl, null);
+		CacheValue<CodeValidationResult> retVal = getFromCache(key);
+		if (retVal == null) {
+			retVal = CacheValue.empty();
+
+			UrlUtil.CanonicalUrlParts valueSet = UrlUtil.parseCanonicalUrl(valueSetUrl);
+			String valueSetVersion = valueSet.versionId().orElse(null);
+			ValidationSupportUnavailableException unavailable = null;
+			for (IValidationSupport next : myChain) {
+				try {
+					// A named ValueSet decides which module answers; without one, the code system does
+					boolean moduleCanAnswer = isBlank(valueSetUrl)
+							? isCodeSystemSupported(theValidationSupportContext, next, codeSystem, codeSystemVersion)
+							: isValueSetSupported(theValidationSupportContext, next, valueSet.url(), valueSetVersion);
+					if (moduleCanAnswer) {
+						CodeValidationResult outcome =
+								next.validateCode(theValidationSupportContext, theOptions, theRequest);
+						if (outcome != null) {
+							ourLog.debug(
+									"Code {}|{} '{}' in ValueSet {} validated by {}",
+									codeSystem,
+									code,
+									theRequest.getDisplay(),
+									valueSetUrl,
+									next.getName());
+							retVal = new CacheValue<>(outcome);
+							break;
+						}
+					}
+				} catch (ValidationSupportUnavailableException e) {
+					logUnavailable(next, e);
+					unavailable = defaultIfNull(unavailable, e);
+				}
+			}
+
+			if (retVal.getValue() == null && unavailable != null) {
+				// not cached, so the code is checked again once the module that could not answer has recovered
+				return generateResultForUnavailableModule(unavailable);
+			}
+
+			if (retVal.getValue() == null) {
+				CodeValidationResult unknownCodeSystemResult = generateResultForUnknownCodeSystem(
+						codeSystem, codeSystemVersion, code, isNotBlank(valueSetUrl));
+				if (unknownCodeSystemResult != null) {
+					retVal = new CacheValue<>(unknownCodeSystemResult);
+				}
+			}
+
+			putInCache(key, retVal);
+		}
+
+		return retVal.getValue();
+	}
+
+	/**
+	 * Generates a {@link CodeValidationResult} for an unknown CodeSystem.
+	 * <p>
+	 * If theCodeSystem is null, this method returns null.
+	 * If a ValidationSupport in the chain can fetch the CodeSystem, it returns null
+	 * Otherwise, it returns a CodeValidationResult with an error message. The message severity is set to ERROR by this function,
+	 * but it might be overridden after
+	 * - by the core validator, which has its own logic for determining the severity of an issue for an unknown CodeSystem,
+	 *   which is based on the binding strength. See https://github.com/hapifhir/org.hl7.fhir.core/issues/2129
+	 * - and by the {@link ca.uhn.fhir.rest.server.interceptor.validation.ValidationMessageUnknownCodeSystemPostProcessingInterceptor}
+	 *   to a configured severity if it is registered.
+	 * </p>
+	 *
+	 * <p>
+	 * A code system which is known, but not at the version the caller named, is not an unknown code system: it
+	 * gets an error of its own, worded as the HL7 validator words it. A stored copy without a version does not
+	 * stand in for the named version, as it does not in the HL7 validator either.
+	 * </p>
+	 *
+	 * This function was originally part of now deprecated UnknownCodeSystemWarningValidationSupport
+	 * @param theCodeSystem        The CodeSystem URL to validate
+	 * @param theCodeSystemVersion The CodeSystem version the caller asked for, named in the message so they can
+	 *                             see which one was not found. Whether the code system is known at all is
+	 *                             decided on the URL alone.
+	 * @param theCode              The code to validate
+	 * @param theValueSetNamed     Whether the caller asked about a ValueSet. The code system version is then not
+	 *                             reported, since the question was membership of the ValueSet.
+	 * @return A CodeValidationResult indicating the error, or null if theCodeSystem is null
+	 * or a validation support can fetch the code system at the version asked for.
+	 */
+	@Nullable
+	private CodeValidationResult generateResultForUnknownCodeSystem(
+			String theCodeSystem, @Nullable String theCodeSystemVersion, String theCode, boolean theValueSetNamed) {
+
+		if (theCodeSystem == null) {
+			return null;
+		}
+		UrlUtil.CanonicalUrlParts codeSystemParts = UrlUtil.parseCanonicalUrl(theCodeSystem, theCodeSystemVersion);
+		String codeSystemUrl = codeSystemParts.url();
+		String codeSystemVersion = codeSystemParts.versionId().orElse(null);
+		IBaseResource codeSystem = fetchCodeSystem(codeSystemUrl, null);
+		if (codeSystem != null) {
+			if (theValueSetNamed
+					|| codeSystemVersion == null
+					|| fetchCodeSystem(codeSystemUrl, codeSystemVersion) != null) {
+				return null;
+			}
+			return generateResultForUnknownCodeSystemVersion(codeSystemUrl, codeSystemVersion);
+		}
+
+		String codeSystemCanonical = UrlUtil.toCanonicalUrl(codeSystemUrl, codeSystemVersion);
+		CodeValidationResult result = new CodeValidationResult();
+		result.setSeverity(IssueSeverity.ERROR);
+		String message = "CodeSystem is unknown and can't be validated: %s for '%s#%s'"
+				.formatted(codeSystemCanonical, codeSystemCanonical, theCode);
+		result.setMessage(message);
+		result.addUnknownSystem(codeSystemCanonical);
+
+		result.addIssue(new CodeValidationIssue(
+				message, IssueSeverity.ERROR, CodeValidationIssueCode.NOT_FOUND, CodeValidationIssueCoding.NOT_FOUND));
+		return result;
+	}
+
+	/**
+	 * The code could not be checked because a module that could have answered could not: a warning naming that
+	 * failure, since it is no fault of the code or the resource being validated.
+	 */
+	// Created by Claude Opus 5.5
+	private static CodeValidationResult generateResultForUnavailableModule(
+			ValidationSupportUnavailableException theException) {
+		String message = theException.getMessage();
+		CodeValidationIssue issue =
+				new CodeValidationIssue(message, IssueSeverity.WARNING, CodeValidationIssueCode.TRANSIENT);
+		// details text with no coding: the constructor would add a null one
+		issue.setDetails(new CodeValidationIssueDetails(message));
+		return new CodeValidationResult()
+				.setSeverity(IssueSeverity.WARNING)
+				.setMessage(message)
+				.addIssue(issue);
+	}
+
+	// Created by Claude Opus 5.5
+	private static void logUnavailable(
+			IValidationSupport theModule, ValidationSupportUnavailableException theException) {
+		ourLog.debug("{} could not answer, asking the next module: {}", theModule.getName(), theException.getMessage());
+	}
+
+	// Created by Claude Opus 5
+	private CodeValidationResult generateResultForUnknownCodeSystemVersion(
+			String theCodeSystemUrl, String theCodeSystemVersion) {
+		String message =
+				"A definition for CodeSystem '%s' version '%s' could not be found, so the code cannot be validated"
+						.formatted(theCodeSystemUrl, theCodeSystemVersion);
+		CodeValidationResult result = new CodeValidationResult();
+		result.setSeverity(IssueSeverity.ERROR);
+		result.setMessage(message);
+		result.addUnknownSystem(UrlUtil.toCanonicalUrl(theCodeSystemUrl, theCodeSystemVersion));
+		result.addIssue(new CodeValidationIssue(
+				message, IssueSeverity.ERROR, CodeValidationIssueCode.NOT_FOUND, CodeValidationIssueCoding.NOT_FOUND));
+		return result;
+	}
+
+	@Override
+	public CodeValidationResult validateCodeInValueSet(
+			ValidationSupportContext theValidationSupportContext,
+			ConceptValidationOptions theOptions,
+			String theCodeSystem,
+			String theCode,
+			String theDisplay,
+			@Nonnull IBaseResource theValueSet) {
+		// two versions of one canonical can include different code system versions, so the version belongs in
+		// the cache key as well as the url
+		UrlUtil.CanonicalUrlParts valueSetCanonical = UrlUtil.getCanonicalUrl(getFhirContext(), theValueSet);
+		String url = valueSetCanonical.url();
+		String valueSetVersion = valueSetCanonical.versionId().orElse(null);
+
+		ValidateCodeKey key = null;
+		CacheValue<CodeValidationResult> retVal = null;
+		if (isNotBlank(url)) {
+			// validateCodeInValueSet names no code system version
+			key = new ValidateCodeKey(theOptions, theCodeSystem, null, theCode, theDisplay, url, valueSetVersion);
+			retVal = getFromCache(key);
+		}
+		if (retVal != null) {
+			return retVal.getValue();
+		}
+
+		retVal = CacheValue.empty();
+		ValidationSupportUnavailableException unavailable = null;
+		for (IValidationSupport next : myChain) {
+			try {
+				// The ValueSet itself is supplied, so this only gates which module is asked. Narrowing it by the
+				// resource's version would skip a module holding that same ValueSet unversioned.
+				if (isBlank(url) || isValueSetSupported(theValidationSupportContext, next, url, null)) {
+					CodeValidationResult outcome = next.validateCodeInValueSet(
+							theValidationSupportContext, theOptions, theCodeSystem, theCode, theDisplay, theValueSet);
+					if (outcome != null) {
+						ourLog.debug(
+								"Code {}|{} '{}' in ValueSet {} validated by {}",
+								theCodeSystem,
+								theCode,
+								theDisplay,
+								theValueSet.getIdElement(),
+								next.getName());
+						retVal = new CacheValue<>(outcome);
+						break;
+					}
+				}
+			} catch (ValidationSupportUnavailableException e) {
+				logUnavailable(next, e);
+				unavailable = defaultIfNull(unavailable, e);
+			}
+		}
+
+		if (retVal.getValue() == null && unavailable != null) {
+			// not cached, so the code is checked again once the module that could not answer has recovered
+			return generateResultForUnavailableModule(unavailable);
+		}
+
+		if (key != null) {
+			putInCache(key, retVal);
+		}
+
+		return retVal.getValue();
+	}
+
+	@Override
+	public LookupCodeResult lookupCode(
+			ValidationSupportContext theValidationSupportContext, @Nonnull LookupCodeRequest theLookupCodeRequest) {
+
+		LookupCodeKey key = new LookupCodeKey(theLookupCodeRequest);
+		CacheValue<LookupCodeResult> retVal = getFromCache(key);
+		if (retVal == null) {
+
+			retVal = CacheValue.empty();
+			final String system = theLookupCodeRequest.getSystem();
+			// The version is named on the request where the caller could name it, and otherwise can only
+			// have arrived packed into the system as "url|version"
+			UrlUtil.CanonicalUrlParts codeSystemToLookUp =
+					UrlUtil.parseCanonicalUrl(system, theLookupCodeRequest.getVersion());
+			String codeSystemVersion = codeSystemToLookUp.versionId().orElse(null);
+			ValidationSupportUnavailableException unavailable = null;
+			for (IValidationSupport next : myChain) {
+				try {
+					LookupCodeResult lookupCodeResult = lookupCodeInModule(
+							theValidationSupportContext,
+							next,
+							theLookupCodeRequest,
+							codeSystemToLookUp.url(),
+							codeSystemVersion);
+					if (lookupCodeResult != null) {
+						retVal = new CacheValue<>(lookupCodeResult);
+						break;
+					}
+				} catch (ValidationSupportUnavailableException e) {
+					logUnavailable(next, e);
+					unavailable = defaultIfNull(unavailable, e);
+				}
+			}
+
+			if (retVal.getValue() == null && unavailable != null) {
+				// not cached, so the code is looked up again once the module that could not answer has recovered.
+				// Rethrown rather than answered "not found", which would say the code does not exist.
+				throw unavailable;
+			}
+
+			putInCache(key, retVal);
+		}
+
+		return retVal.getValue();
+	}
+
+	/**
+	 * Looks the code up in one module of the chain, if that module supports its code system.
+	 *
+	 * @return the module's result, or {@code null} if the module does not support the code system or has no answer
+	 * @throws ValidationSupportUnavailableException if the module could not answer
+	 */
+	// Created by Claude Opus 5.5
+	@Nullable
+	private LookupCodeResult lookupCodeInModule(
+			ValidationSupportContext theValidationSupportContext,
+			IValidationSupport theModule,
+			@Nonnull LookupCodeRequest theLookupCodeRequest,
+			String theCodeSystemUrl,
+			@Nullable String theCodeSystemVersion) {
+		if (!isCodeSystemSupported(theValidationSupportContext, theModule, theCodeSystemUrl, theCodeSystemVersion)) {
+			return null;
+		}
+		final String system = theLookupCodeRequest.getSystem();
+		final String code = theLookupCodeRequest.getCode();
+		final String displayLanguage = theLookupCodeRequest.getDisplayLanguage();
+		LookupCodeResult lookupCodeResult = theModule.lookupCode(theValidationSupportContext, theLookupCodeRequest);
+		if (lookupCodeResult == null) {
+			/*
+			This branch has been added as a fall-back mechanism for supporting lookupCode
+			methods marked as deprecated in interface IValidationSupport.
+			*/
+			//noinspection deprecation
+			lookupCodeResult = theModule.lookupCode(theValidationSupportContext, system, code, displayLanguage);
+		}
+		if (lookupCodeResult != null) {
+			ourLog.debug(
+					"Code {}|{}{} {} by {}",
+					system,
+					code,
+					isBlank(displayLanguage) ? "" : " (" + displayLanguage + ")",
+					lookupCodeResult.isFound() ? "found" : "not found",
+					theModule.getName());
+		}
+		return lookupCodeResult;
+	}
+
+	/**
+	 * Returns a view of the {@link IValidationSupport} modules within
+	 * this chain. The returned collection is unmodifiable and will reflect
+	 * changes to the underlying list.
+	 *
+	 * @since 8.0.0
+	 */
+	public List<IValidationSupport> getValidationSupports() {
+		return Collections.unmodifiableList(myChain);
+	}
+
+	private <T> void putInCache(BaseKey<T> key, CacheValue<T> theValue) {
+		if (myExpiringCache != null) {
+			myExpiringCache.put(key, theValue);
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private <T> CacheValue<T> getFromCache(BaseKey<T> key) {
+		if (myExpiringCache != null) {
+			return (CacheValue<T>) myExpiringCache.getIfPresent(key);
+		} else {
+			return null;
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private List<IBaseResource> getFromCacheWithAsyncRefresh(
+			FetchAllKey theKey, Supplier<List<IBaseResource>> theLoader) {
+		if (myExpiringCache == null || myNonExpiringCache == null) {
+			return theLoader.get();
+		}
+
+		CacheValue<List<IBaseResource>> retVal = getFromCache(theKey);
+		if (retVal == null) {
+			retVal = (CacheValue<List<IBaseResource>>) myNonExpiringCache.get(theKey);
+			if (retVal != null) {
+				Runnable loaderTask = () -> {
+					List<IBaseResource> loadedItem = theLoader.get();
+					CacheValue<List<IBaseResource>> value = new CacheValue<>(loadedItem);
+					myNonExpiringCache.put(theKey, value);
+					putInCache(theKey, value);
+				};
+				List<IBaseResource> returnValue = retVal.getValue();
+
+				myBackgroundExecutor.execute(loaderTask);
+
+				return returnValue;
+			} else {
+				// Avoid flooding the validation support modules tons of concurrent
+				// requests for the same thing
+				synchronized (this) {
+					retVal = getFromCache(theKey);
+					if (retVal == null) {
+						StopWatch sw = new StopWatch();
+						ourLog.info("Performing initial retrieval for non-expiring cache: {}", theKey);
+						retVal = new CacheValue<>(theLoader.get());
+						ourLog.info("Initial retrieval for non-expiring cache {} succeeded in {}", theKey, sw);
+						myNonExpiringCache.put(theKey, retVal);
+						putInCache(theKey, retVal);
+					}
+				}
+			}
+		}
+
+		return retVal.getValue();
+	}
+
+	public void logCacheSizes() {
+		String b = "Cache sizes:" + "\n * Expiring: "
+				+ (myExpiringCache != null ? myExpiringCache.estimatedSize() : "(disabled)")
+				+ "\n * Non-Expiring: "
+				+ (myNonExpiringCache != null ? myNonExpiringCache.size() : "(disabled)");
+		ourLog.info(b);
+	}
+
+	long getMetricExpiringCacheEntries() {
+		if (myExpiringCache != null) {
+			return myExpiringCache.estimatedSize();
+		} else {
+			return 0;
+		}
+	}
+
+	int getMetricNonExpiringCacheEntries() {
+		synchronized (myStructureDefinitionsByUrl) {
+			int size = myNonExpiringCache != null ? myNonExpiringCache.size() : 0;
+			return size + getDistinctStructureDefinitions().size();
+		}
+	}
+
+	int getMetricExpiringCacheMaxSize() {
+		return myCacheConfiguration.getCacheSize();
+	}
+
+	/**
+	 * Clears all validation support modules from the chain.
+	 * This method is intended for unit testing purposes only to allow
+	 * rebuilding the chain with different configurations.
+	 */
+	@VisibleForTesting
+	protected void clearChainForUnitTest() {
+		myChain.clear();
+	}
+
+	/**
+	 * @since 5.4.0
+	 */
+	public static class CacheConfiguration {
+
+		private long myCacheTimeout;
+		private int myCacheSize;
+
+		/**
+		 * Non-instantiable. Use the factory methods.
+		 */
+		private CacheConfiguration() {
+			super();
+		}
+
+		public long getCacheTimeout() {
+			return myCacheTimeout;
+		}
+
+		public CacheConfiguration setCacheTimeout(Duration theCacheTimeout) {
+			Validate.isTrue(theCacheTimeout.toMillis() >= 0, "Cache timeout must not be negative");
+			myCacheTimeout = theCacheTimeout.toMillis();
+			return this;
+		}
+
+		public int getCacheSize() {
+			return myCacheSize;
+		}
+
+		public CacheConfiguration setCacheSize(int theCacheSize) {
+			Validate.isTrue(theCacheSize >= 0, "Cache size must not be negative");
+			myCacheSize = theCacheSize;
+			return this;
+		}
+
+		/**
+		 * Creates a cache configuration with sensible default values:
+		 * 10 minutes expiry, and 5000 cache entries.
+		 */
+		public static CacheConfiguration defaultValues() {
+			return new CacheConfiguration()
+					.setCacheTimeout(Duration.ofMinutes(10))
+					.setCacheSize(5000);
+		}
+
+		public static CacheConfiguration disabled() {
+			return new CacheConfiguration().setCacheSize(0).setCacheTimeout(Duration.ofMillis(0));
+		}
+	}
+
+	/**
+	 * @param <V> The value type associated with this key
+	 */
+	@SuppressWarnings("unused")
+	abstract static class BaseKey<V> {
+
+		@Override
+		public abstract boolean equals(Object theO);
+
+		@Override
+		public abstract int hashCode();
+	}
+
+	static class ExpandValueSetKey extends BaseKey<ValueSetExpansionOutcome> {
+
+		private final ValueSetExpansionOptions myOptions;
+		private final String myId;
+		private final String myUrl;
+		private final int myHashCode;
+
+		private ExpandValueSetKey(ValueSetExpansionOptions theOptions, String theId, String theUrl) {
+			myOptions = theOptions;
+			myId = theId;
+			myUrl = theUrl;
+			myHashCode = Objects.hash(myOptions, myId, myUrl);
+		}
+
+		@Override
+		public boolean equals(Object theO) {
+			if (this == theO) return true;
+			if (!(theO instanceof ExpandValueSetKey)) return false;
+			ExpandValueSetKey that = (ExpandValueSetKey) theO;
+			return Objects.equals(myOptions, that.myOptions)
+					&& Objects.equals(myId, that.myId)
+					&& Objects.equals(myUrl, that.myUrl);
+		}
+
+		@Override
+		public int hashCode() {
+			return myHashCode;
+		}
+	}
+
+	static class FetchAllKey extends BaseKey<List<IBaseResource>> {
+
+		private final TypeEnum myType;
+		private final int myHashCode;
+
+		private FetchAllKey(TypeEnum theType) {
+			myType = theType;
+			myHashCode = Objects.hash(myType);
+		}
+
+		@Override
+		public boolean equals(Object theO) {
+			if (this == theO) return true;
+			if (!(theO instanceof FetchAllKey)) return false;
+			FetchAllKey that = (FetchAllKey) theO;
+			return myType == that.myType;
+		}
+
+		@Override
+		public int hashCode() {
+			return myHashCode;
+		}
+
+		private enum TypeEnum {
+			ALL,
+			ALL_STRUCTUREDEFINITIONS,
+			ALL_NON_BASE_STRUCTUREDEFINITIONS,
+			ALL_SEARCHPARAMETERS
+		}
+	}
+
+	static class ResourceByUrlKey<T> extends BaseKey<T> {
+
+		private final TypeEnum myType;
+		private final String myUrl;
+		private final int myHashCode;
+
+		private ResourceByUrlKey(TypeEnum theType, String theUrl) {
+			this(theType, theUrl, Objects.hash("ResourceByUrl", theType, theUrl));
+		}
+
+		private ResourceByUrlKey(TypeEnum theType, String theUrl, int theHashCode) {
+			myType = theType;
+			myUrl = theUrl;
+			myHashCode = theHashCode;
+		}
+
+		@Override
+		public boolean equals(Object theO) {
+			if (this == theO) return true;
+			if (!(theO instanceof ResourceByUrlKey)) return false;
+			ResourceByUrlKey<?> that = (ResourceByUrlKey<?>) theO;
+			return myType == that.myType && Objects.equals(myUrl, that.myUrl);
+		}
+
+		@Override
+		public int hashCode() {
+			return myHashCode;
+		}
+
+		private enum TypeEnum {
+			CODESYSTEM,
+			VALUESET,
+			RESOURCE,
+			BINARY,
+			STRUCTUREDEFINITION
+		}
+	}
+
+	static class TypedResourceByUrlKey<T> extends ResourceByUrlKey<T> {
+
+		private final Class<?> myType;
+
+		private TypedResourceByUrlKey(Class<?> theType, String theUrl) {
+			super(ResourceByUrlKey.TypeEnum.RESOURCE, theUrl, Objects.hash("TypedResourceByUrl", theType, theUrl));
+			myType = theType;
+		}
+
+		@Override
+		public boolean equals(Object theO) {
+			if (this == theO) return true;
+			if (!(theO instanceof TypedResourceByUrlKey)) return false;
+			if (!super.equals(theO)) return false;
+			TypedResourceByUrlKey<?> that = (TypedResourceByUrlKey<?>) theO;
+			return Objects.equals(myType, that.myType);
+		}
+
+		@Override
+		public int hashCode() {
+			return Objects.hash(super.hashCode(), myType);
+		}
+	}
+
+	static class IsValueSetSupportedKey extends BaseKey<Boolean> {
+
+		private final String myValueSetUrl;
+		private final IValidationSupport myValidationSupport;
+		private final int myHashCode;
+
+		private IsValueSetSupportedKey(IValidationSupport theValidationSupport, String theValueSetUrl) {
+			myValidationSupport = theValidationSupport;
+			myValueSetUrl = theValueSetUrl;
+			myHashCode = Objects.hash("IsValueSetSupported", theValidationSupport, myValueSetUrl);
+		}
+
+		@Override
+		public boolean equals(Object theO) {
+			if (this == theO) return true;
+			if (!(theO instanceof IsValueSetSupportedKey)) return false;
+			IsValueSetSupportedKey that = (IsValueSetSupportedKey) theO;
+			return myValidationSupport == that.myValidationSupport && Objects.equals(myValueSetUrl, that.myValueSetUrl);
+		}
+
+		@Override
+		public int hashCode() {
+			return myHashCode;
+		}
+	}
+
+	static class IsCodeSystemSupportedKey extends BaseKey<Boolean> {
+
+		private final String myCodeSystemUrl;
+		private final IValidationSupport myValidationSupport;
+		private final int myHashCode;
+
+		private IsCodeSystemSupportedKey(IValidationSupport theValidationSupport, String theCodeSystemUrl) {
+			myValidationSupport = theValidationSupport;
+			myCodeSystemUrl = theCodeSystemUrl;
+			myHashCode = Objects.hash("IsCodeSystemSupported", theValidationSupport, myCodeSystemUrl);
+		}
+
+		@Override
+		public boolean equals(Object theO) {
+			if (this == theO) return true;
+			if (!(theO instanceof IsCodeSystemSupportedKey)) return false;
+			IsCodeSystemSupportedKey that = (IsCodeSystemSupportedKey) theO;
+			return myValidationSupport == that.myValidationSupport
+					&& Objects.equals(myCodeSystemUrl, that.myCodeSystemUrl);
+		}
+
+		@Override
+		public int hashCode() {
+			return myHashCode;
+		}
+	}
+
+	static class LookupCodeKey extends BaseKey<LookupCodeResult> {
+
+		private final LookupCodeRequest myRequest;
+		private final int myHashCode;
+
+		private LookupCodeKey(LookupCodeRequest theRequest) {
+			myRequest = theRequest;
+			myHashCode = Objects.hash("LookupCode", myRequest);
+		}
+
+		@Override
+		public boolean equals(Object theO) {
+			if (this == theO) return true;
+			if (!(theO instanceof LookupCodeKey)) return false;
+			LookupCodeKey that = (LookupCodeKey) theO;
+			return Objects.equals(myRequest, that.myRequest);
+		}
+
+		@Override
+		public int hashCode() {
+			return myHashCode;
+		}
+	}
+
+	static class TranslateConceptKey extends BaseKey<TranslateConceptResults> {
+
+		private final TranslateCodeRequest myRequest;
+		private final int myHashCode;
+
+		private TranslateConceptKey(TranslateCodeRequest theRequest) {
+			myRequest = theRequest;
+			myHashCode = Objects.hash("TranslateConcept", myRequest);
+		}
+
+		@Override
+		public boolean equals(Object theO) {
+			if (this == theO) return true;
+			if (!(theO instanceof TranslateConceptKey)) return false;
+			TranslateConceptKey that = (TranslateConceptKey) theO;
+			return Objects.equals(myRequest, that.myRequest);
+		}
+
+		@Override
+		public int hashCode() {
+			return myHashCode;
+		}
+	}
+
+	static class ValidateCodeKey extends BaseKey<CodeValidationResult> {
+		private final String mySystem;
+		private final String myCodeSystemVersion;
+		private final String myCode;
+		private final String myDisplay;
+		private final String myValueSetUrl;
+		private final String myValueSetVersion;
+		private final int myHashCode;
+		private final ConceptValidationOptions myOptions;
+
+		private ValidateCodeKey(
+				ConceptValidationOptions theOptions,
+				String theSystem,
+				String theCodeSystemVersion,
+				String theCode,
+				String theDisplay,
+				String theValueSetUrl,
+				String theValueSetVersion) {
+			// copy ConceptValidationOptions because it is mutable
+			myOptions = ConceptValidationOptions.copy(theOptions);
+			mySystem = theSystem;
+			myCodeSystemVersion = theCodeSystemVersion;
+			myCode = theCode;
+			myDisplay = theDisplay;
+			myValueSetUrl = theValueSetUrl;
+			myValueSetVersion = theValueSetVersion;
+			myHashCode = Objects.hash(
+					"ValidateCodeKey",
+					myOptions,
+					mySystem,
+					myCodeSystemVersion,
+					myCode,
+					myDisplay,
+					myValueSetUrl,
+					myValueSetVersion);
+		}
+
+		@Override
+		public boolean equals(Object theO) {
+			if (this == theO) return true;
+			if (!(theO instanceof ValidateCodeKey)) return false;
+			ValidateCodeKey that = (ValidateCodeKey) theO;
+			return Objects.equals(myOptions, that.myOptions)
+					&& Objects.equals(mySystem, that.mySystem)
+					&& Objects.equals(myCodeSystemVersion, that.myCodeSystemVersion)
+					&& Objects.equals(myCode, that.myCode)
+					&& Objects.equals(myDisplay, that.myDisplay)
+					&& Objects.equals(myValueSetUrl, that.myValueSetUrl)
+					&& Objects.equals(myValueSetVersion, that.myValueSetVersion);
+		}
+
+		@Override
+		public int hashCode() {
+			return myHashCode;
+		}
+
+		@Override
+		public String toString() {
+			return "ValidateCodeKey{"
+					+ "mySystem='" + mySystem + '\''
+					+ ", myCodeSystemVersion='" + myCodeSystemVersion + '\''
+					+ ", myCode='" + myCode + '\''
+					+ ", myDisplay='" + myDisplay + '\''
+					+ ", myValueSetUrl='" + myValueSetUrl + '\''
+					+ ", myValueSetVersion='" + myValueSetVersion + '\''
+					+ ", myHashCode=" + myHashCode + '\''
+					+ ", myOptions=" + myOptions + '}';
+		}
+	}
+
+	/**
+	 * This class is basically the same thing as Optional, but is a distinct thing
+	 * because we want to use it as a method parameter value, and compare instances of
+	 * it with null. Both of these things generate warnings in various linters.
+	 */
+	private static class CacheValue<T> {
+
+		private static final CacheValue<CodeValidationResult> EMPTY = new CacheValue<>(null);
+
+		private final T myValue;
+
+		private CacheValue(T theValue) {
+			myValue = theValue;
+		}
+
+		public T getValue() {
+			return myValue;
+		}
+
+		@SuppressWarnings("unchecked")
+		public static <T> CacheValue<T> empty() {
+			return (CacheValue<T>) EMPTY;
+		}
+	}
+}

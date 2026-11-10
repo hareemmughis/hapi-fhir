@@ -1,21 +1,17 @@
 package ca.uhn.fhir.rest.client;
 
-import static org.hamcrest.Matchers.containsString;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
-import java.io.InputStream;
-import java.io.StringReader;
-import java.nio.charset.Charset;
-
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.model.dstu2.resource.Conformance;
+import ca.uhn.fhir.model.dstu2.resource.Patient;
+import ca.uhn.fhir.model.primitive.UriDt;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import ca.uhn.fhir.rest.client.api.ServerValidationModeEnum;
+import ca.uhn.fhir.rest.client.exceptions.FhirClientInappropriateForServerException;
+import ca.uhn.fhir.rest.client.interceptor.BasicAuthInterceptor;
+import ca.uhn.fhir.rest.server.exceptions.AuthenticationException;
+import ca.uhn.fhir.util.TestUtil;
 import org.apache.commons.io.input.ReaderInputStream;
 import org.apache.http.Header;
 import org.apache.http.HttpResponse;
@@ -24,24 +20,30 @@ import org.apache.http.client.HttpClient;
 import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.message.BasicHeader;
 import org.apache.http.message.BasicStatusLine;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.mockito.Matchers;
 import org.mockito.internal.stubbing.defaultanswers.ReturnsDeepStubs;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.model.dstu2.resource.Conformance;
-import ca.uhn.fhir.model.dstu2.resource.Patient;
-import ca.uhn.fhir.model.primitive.UriDt;
-import ca.uhn.fhir.rest.client.exceptions.FhirClientInappropriateForServerException;
-import ca.uhn.fhir.rest.client.interceptor.BasicAuthInterceptor;
-import ca.uhn.fhir.rest.server.Constants;
-import ca.uhn.fhir.rest.server.exceptions.AuthenticationException;
-import ca.uhn.fhir.util.TestUtil;
+import java.io.InputStream;
+import java.io.StringReader;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 public class ClientServerValidationDstu2Test {
 
@@ -51,13 +53,13 @@ public class ClientServerValidationDstu2Test {
 	private HttpClient myHttpClient;
 	private HttpResponse myHttpResponse;
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 
-	@Before
+	@BeforeEach
 	public void before() {
 		myHttpClient = mock(HttpClient.class, new ReturnsDeepStubs());
 		myHttpResponse = mock(HttpResponse.class, new ReturnsDeepStubs());
@@ -69,8 +71,10 @@ public class ClientServerValidationDstu2Test {
 
 	@Test
 	public void testClientUsesInterceptors() throws Exception {
+		String appropriateFhirVersion = "1.0.2";
+		assertEquals(FhirVersionEnum.DSTU2.getFhirVersionString(), appropriateFhirVersion);
 		Conformance conf = new Conformance();
-		conf.setFhirVersion("0.5.0");
+		conf.setFhirVersion(appropriateFhirVersion);
 		final String confResource = myCtx.newXmlParser().encodeResourceToString(conf);
 
 		ArgumentCaptor<HttpUriRequest> capt = ArgumentCaptor.forClass(HttpUriRequest.class);
@@ -99,7 +103,7 @@ public class ClientServerValidationDstu2Test {
 		Patient pt = (Patient) client.read(new UriDt("http://foo/Patient/123"));
 		assertEquals("FAM", pt.getNameFirstRep().getFamilyAsSingleString());
 
-		assertEquals(2, capt.getAllValues().size());
+		assertThat(capt.getAllValues()).hasSize(2);
 
 		Header auth = capt.getAllValues().get(0).getFirstHeader("Authorization");
 		assertNotNull(auth);
@@ -111,8 +115,10 @@ public class ClientServerValidationDstu2Test {
 
 	@Test
 	public void testForceConformanceCheck() throws Exception {
+		String appropriateFhirVersion = "1.0.2";
+		assertEquals(FhirVersionEnum.DSTU2.getFhirVersionString(), appropriateFhirVersion);
 		Conformance conf = new Conformance();
-		conf.setFhirVersion("0.5.0");
+		conf.setFhirVersion(appropriateFhirVersion);
 		final String confResource = myCtx.newXmlParser().encodeResourceToString(conf);
 
 		ArgumentCaptor<HttpUriRequest> capt = ArgumentCaptor.forClass(HttpUriRequest.class);
@@ -142,12 +148,12 @@ public class ClientServerValidationDstu2Test {
 
 		client.forceConformanceCheck();
 
-		assertEquals(1, capt.getAllValues().size());
+		assertThat(capt.getAllValues()).hasSize(1);
 
 		Patient pt = (Patient) client.read(new UriDt("http://foo/Patient/123"));
 		assertEquals("FAM", pt.getNameFirstRep().getFamilyAsSingleString());
 
-		assertEquals(2, capt.getAllValues().size());
+		assertThat(capt.getAllValues()).hasSize(2);
 
 		Header auth = capt.getAllValues().get(0).getFirstHeader("Authorization");
 		assertNotNull(auth);
@@ -174,14 +180,14 @@ public class ClientServerValidationDstu2Test {
 		IGenericClient client = myCtx.newRestfulGenericClient("http://foo");
 		try {
 			client.read().resource(Patient.class).withId("123").execute();
-			fail();
-		} catch (AuthenticationException e) {
+			fail();		} catch (AuthenticationException e) {
 			// good
 		}
 	}
 
+	// This test can should stay to test the leniency of accepting unknown FHIR versions from the server
 	@Test
-	public void testServerReturnsAppropriateVersionForDstu2_040() throws Exception {
+	public void testServerReturnsAppropriateVersionForUnknownVersion() throws Exception {
 		Conformance conf = new Conformance();
 		conf.setFhirVersion("0.5.0");
 		final String confResource = myCtx.newXmlParser().encodeResourceToString(conf);
@@ -215,13 +221,15 @@ public class ClientServerValidationDstu2Test {
 		myCtx.newRestfulGenericClient("http://foo").read(new UriDt("http://foo/Patient/123"));
 
 		// Conformance only loaded once, then 3 reads
-		verify(myHttpClient, times(4)).execute(Matchers.any(HttpUriRequest.class));
+		verify(myHttpClient, times(4)).execute(any(HttpUriRequest.class));
 	}
 
 	@Test
-	public void testServerReturnsAppropriateVersionForDstu2_050() throws Exception {
+	public void testServerReturnsAppropriateVersionForDstu2() throws Exception {
+		String appropriateFhirVersion = "1.0.2";
+		assertEquals(FhirVersionEnum.DSTU2.getFhirVersionString(), appropriateFhirVersion);
 		Conformance conf = new Conformance();
-		conf.setFhirVersion("0.5.0");
+		conf.setFhirVersion(appropriateFhirVersion);
 		final String confResource = myCtx.newXmlParser().encodeResourceToString(conf);
 
 		ArgumentCaptor<HttpUriRequest> capt = ArgumentCaptor.forClass(HttpUriRequest.class);
@@ -253,33 +261,34 @@ public class ClientServerValidationDstu2Test {
 		myCtx.newRestfulGenericClient("http://foo").read(new UriDt("http://foo/Patient/123"));
 
 		// Conformance only loaded once, then 3 reads
-		verify(myHttpClient, times(4)).execute(Matchers.any(HttpUriRequest.class));
+		verify(myHttpClient, times(4)).execute(any(HttpUriRequest.class));
 	}
 
 	@Test
 	public void testServerReturnsWrongVersionForDstu2() throws Exception {
+		String wrongFhirVersion = FhirVersionEnum.DSTU3.getFhirVersionString();
+		assertEquals(FhirVersionEnum.DSTU3.getFhirVersionString(), wrongFhirVersion); // asserting that what we assume to be the DSTU3 FHIR version is still correct
 		Conformance conf = new Conformance();
-		conf.setFhirVersion("0.80");
+		conf.setFhirVersion(wrongFhirVersion);
 		String msg = myCtx.newXmlParser().encodeResourceToString(conf);
 
 		ArgumentCaptor<HttpUriRequest> capt = ArgumentCaptor.forClass(HttpUriRequest.class);
 
 		when(myHttpResponse.getStatusLine()).thenReturn(new BasicStatusLine(new ProtocolVersion("HTTP", 1, 1), 200, "OK"));
 		when(myHttpResponse.getEntity().getContentType()).thenReturn(new BasicHeader("content-type", Constants.CT_FHIR_XML + "; charset=UTF-8"));
-		when(myHttpResponse.getEntity().getContent()).thenReturn(new ReaderInputStream(new StringReader(msg), Charset.forName("UTF-8")));
+		when(myHttpResponse.getEntity().getContent()).thenReturn(new ReaderInputStream(new StringReader(msg), StandardCharsets.UTF_8));
 
 		when(myHttpClient.execute(capt.capture())).thenReturn(myHttpResponse);
 
 		myCtx.getRestfulClientFactory().setServerValidationMode(ServerValidationModeEnum.ONCE);
 		try {
 			myCtx.newRestfulGenericClient("http://foo").read(new UriDt("http://foo/Patient/123"));
-			fail();
-		} catch (FhirClientInappropriateForServerException e) {
+			fail();		} catch (FhirClientInappropriateForServerException e) {
 			String out = e.toString();
-			String want = "The server at base URL \"http://foo/metadata\" returned a conformance statement indicating that it supports FHIR version \"0.80\" which corresponds to DSTU1, but this client is configured to use DSTU2 (via the FhirContext)";
+			String want = "The server at base URL \"http://foo/metadata\" returned a conformance statement indicating that it supports FHIR version \"" + wrongFhirVersion + "\" which corresponds to DSTU3, but this client is configured to use DSTU2 (via the FhirContext)";
 			ourLog.info(out);
 			ourLog.info(want);
-			assertThat(out, containsString(want));
+			assertThat(out).contains(want);
 		}
 	}
 

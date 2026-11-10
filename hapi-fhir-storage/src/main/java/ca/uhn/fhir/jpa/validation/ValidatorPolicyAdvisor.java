@@ -1,0 +1,193 @@
+/*-
+ * #%L
+ * HAPI FHIR Storage api
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.jpa.validation;
+
+import ca.uhn.fhir.context.FhirContext;
+import com.google.common.annotations.VisibleForTesting;
+import org.hl7.fhir.r5.elementmodel.Element;
+import org.hl7.fhir.r5.model.ElementDefinition;
+import org.hl7.fhir.r5.model.StructureDefinition;
+import org.hl7.fhir.r5.model.ValueSet;
+import org.hl7.fhir.r5.utils.validation.IMessagingServices;
+import org.hl7.fhir.r5.utils.validation.IResourceValidator;
+import org.hl7.fhir.r5.utils.validation.IValidationPolicyAdvisor;
+import org.hl7.fhir.r5.utils.validation.constants.BindingKind;
+import org.hl7.fhir.r5.utils.validation.constants.ContainedReferenceValidationPolicy;
+import org.hl7.fhir.r5.utils.validation.constants.ReferenceValidationPolicy;
+import org.hl7.fhir.utilities.i18n.I18nConstants;
+import org.hl7.fhir.utilities.validation.ValidationMessage;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Set;
+
+public class ValidatorPolicyAdvisor implements IValidationPolicyAdvisor {
+
+	@Autowired
+	private ValidationSettings myValidationSettings;
+
+	@Autowired
+	private FhirContext myFhirContext;
+
+	@VisibleForTesting
+	public void setValidationSettingsForUnitTest(ValidationSettings theValidationSettings) {
+		myValidationSettings = theValidationSettings;
+	}
+
+	@VisibleForTesting
+	public void setFhirContextForUnitTest(FhirContext theFhirContext) {
+		myFhirContext = theFhirContext;
+	}
+
+	@Override
+	public EnumSet<ResourceValidationAction> policyForResource(
+			IResourceValidator validator, Object appContext, StructureDefinition type, String path) {
+		return EnumSet.allOf(ResourceValidationAction.class);
+	}
+
+	@Override
+	public EnumSet<ElementValidationAction> policyForElement(
+			IResourceValidator validator,
+			Object appContext,
+			StructureDefinition structure,
+			ElementDefinition element,
+			String path) {
+		return EnumSet.allOf(ElementValidationAction.class);
+	}
+
+	@Override
+	public EnumSet<CodedContentValidationAction> policyForCodedContent(
+			IResourceValidator validator,
+			Object appContext,
+			String stackPath,
+			ElementDefinition definition,
+			StructureDefinition structure,
+			BindingKind kind,
+			AdditionalBindingPurpose purpose,
+			ValueSet valueSet,
+			List<String> systems) {
+		return EnumSet.allOf(CodedContentValidationAction.class);
+	}
+
+	@Override
+	public SpecialValidationAction policyForSpecialValidation(
+			IResourceValidator validator,
+			Object appContext,
+			SpecialValidationRule rule,
+			String stackPath,
+			Element resource,
+			Element element) {
+		return null;
+	}
+
+	@Override
+	public ContainedReferenceValidationPolicy policyForContained(
+			IResourceValidator validator,
+			Object appContext,
+			StructureDefinition structure,
+			ElementDefinition element,
+			String containerType,
+			String containerId,
+			Element.SpecialElement containingResourceType,
+			String path,
+			String url) {
+		return ContainedReferenceValidationPolicy.CHECK_VALID;
+	}
+
+	@Override
+	public List<StructureDefinition> getImpliedProfilesForResource(
+			IResourceValidator validator,
+			Object appContext,
+			String stackPath,
+			ElementDefinition definition,
+			StructureDefinition structure,
+			Element resource,
+			boolean valid,
+			IMessagingServices msgServices,
+			List<ValidationMessage> messages) {
+		return List.of();
+	}
+
+	@Override
+	public String relativeDatePlaceHolder() {
+		// We don't require a placeholder value. null in this return ensures real values are returned.
+		return null;
+	}
+
+	@Override
+	public boolean isSuppressMessageId(String path, String messageId) {
+		// Call this instead of the org.hl7.fhir.core default implementation, which always returns false
+		return this.isSuppressMessageId(path, messageId, null);
+	}
+
+	@Override
+	public boolean isSuppressMessageId(String path, String messageId, Object... theMessageArguments) {
+		if (myValidationSettings != null
+				&& !myValidationSettings
+						.getLocalReferenceValidationDefaultPolicy()
+						.checkValid()) {
+			// The InstanceValidator hardcodes CHECK_VALID for bundle-internal (INTERNAL) and
+			// contained references, bypassing the policy advisor's policyForReference method.
+			// When our configured policy would not have validated reference targets (e.g. IGNORE),
+			// suppress the profile-match errors that arise from the hardcoded CHECK_VALID behavior.
+			if (I18nConstants.REFERENCE_REF_CANTMATCHCHOICE.equals(messageId)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	@Override
+	public ReferenceValidationPolicy policyForReference(
+			IResourceValidator validator,
+			Object appContext,
+			String path,
+			String url,
+			ReferenceDestinationType destinationType) {
+		if (myFhirContext != null && myValidationSettings != null) {
+			int slashIdx = url.indexOf("/");
+			if (slashIdx > 0 && myFhirContext.getResourceTypes().contains(url.substring(0, slashIdx))) {
+				return myValidationSettings.getLocalReferenceValidationDefaultPolicy();
+			}
+		}
+		return ReferenceValidationPolicy.IGNORE;
+	}
+
+	@Override
+	public IValidationPolicyAdvisor getPolicyAdvisor() {
+		return this;
+	}
+
+	@Override
+	public IValidationPolicyAdvisor setPolicyAdvisor(IValidationPolicyAdvisor policyAdvisor) {
+		return this;
+	}
+
+	@Override
+	public ReferenceValidationPolicy getReferencePolicy() {
+		return ReferenceValidationPolicy.IGNORE;
+	}
+
+	@Override
+	public Set<String> getCheckReferencesTo() {
+		return Set.of();
+	}
+}

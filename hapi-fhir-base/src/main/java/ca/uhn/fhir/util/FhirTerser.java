@@ -1,19 +1,15 @@
-package ca.uhn.fhir.util;
-
-import static org.apache.commons.lang3.StringUtils.defaultString;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,24 +17,95 @@ import static org.apache.commons.lang3.StringUtils.defaultString;
  * limitations under the License.
  * #L%
  */
-import java.util.*;
+package ca.uhn.fhir.util;
 
-import org.apache.commons.lang3.Validate;
-import org.hl7.fhir.instance.model.api.*;
-
-import ca.uhn.fhir.context.*;
+import ca.uhn.fhir.context.BaseRuntimeChildDefinition;
+import ca.uhn.fhir.context.BaseRuntimeElementCompositeDefinition;
+import ca.uhn.fhir.context.BaseRuntimeElementDefinition;
 import ca.uhn.fhir.context.BaseRuntimeElementDefinition.ChildTypeEnum;
+import ca.uhn.fhir.context.ConfigurationException;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.context.RuntimeChildChoiceDefinition;
+import ca.uhn.fhir.context.RuntimeChildDirectResource;
+import ca.uhn.fhir.context.RuntimeExtensionDtDefinition;
+import ca.uhn.fhir.context.RuntimeResourceDefinition;
+import ca.uhn.fhir.context.RuntimeSearchParam;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.interceptor.auth.CompartmentSearchParameterModifications;
 import ca.uhn.fhir.model.api.ExtensionDt;
+import ca.uhn.fhir.model.api.IIdentifiableElement;
 import ca.uhn.fhir.model.api.IResource;
 import ca.uhn.fhir.model.api.ISupportsUndeclaredExtensions;
 import ca.uhn.fhir.model.base.composite.BaseContainedDt;
 import ca.uhn.fhir.model.base.composite.BaseResourceReferenceDt;
 import ca.uhn.fhir.model.primitive.StringDt;
 import ca.uhn.fhir.parser.DataFormatException;
+import com.google.common.collect.Lists;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.instance.model.api.IBase;
+import org.hl7.fhir.instance.model.api.IBaseElement;
+import org.hl7.fhir.instance.model.api.IBaseExtension;
+import org.hl7.fhir.instance.model.api.IBaseHasExtensions;
+import org.hl7.fhir.instance.model.api.IBaseHasModifierExtensions;
+import org.hl7.fhir.instance.model.api.IBaseReference;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IDomainResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static org.apache.commons.lang3.StringUtils.defaultString;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isEmpty;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.apache.commons.lang3.function.Consumers.nop;
 
 public class FhirTerser {
 
-	private FhirContext myContext;
+	private static final Pattern COMPARTMENT_MATCHER_PATH =
+			Pattern.compile("([a-zA-Z.]+)\\.where\\(resolve\\(\\) is ([a-zA-Z]+)\\)");
+
+	private static final String USER_DATA_KEY_CONTAIN_RESOURCES_COMPLETED =
+			FhirTerser.class.getName() + "_CONTAIN_RESOURCES_COMPLETED";
+
+	private final FhirContext myContext;
+	private static final Logger ourLog = LoggerFactory.getLogger(FhirTerser.class);
+
+	/**
+	 * This comparator sorts IBaseReferences, and places any that are missing an ID at the end. Those with an ID go to the front.
+	 */
+	private static final Comparator<IBaseReference> REFERENCES_WITH_IDS_FIRST =
+			Comparator.nullsLast(Comparator.comparing(ref -> {
+				if (ref.getResource() == null) return true;
+				if (ref.getResource().getIdElement() == null) return true;
+				if (ref.getResource().getIdElement().getValue() == null) return true;
+				return false;
+			}));
 
 	public FhirTerser(FhirContext theContext) {
 		super();
@@ -46,66 +113,166 @@ public class FhirTerser {
 	}
 
 	private List<String> addNameToList(List<String> theCurrentList, BaseRuntimeChildDefinition theChildDefinition) {
-		if (theChildDefinition == null)
-			return null;
+		if (theChildDefinition == null) return null;
 		if (theCurrentList == null || theCurrentList.isEmpty())
-			return new ArrayList<String>(Arrays.asList(theChildDefinition.getElementName()));
-		List<String> newList = new ArrayList<String>(theCurrentList);
+			return new ArrayList<>(Collections.singletonList(theChildDefinition.getElementName()));
+		List<String> newList = new ArrayList<>(theCurrentList);
 		newList.add(theChildDefinition.getElementName());
 		return newList;
 	}
-	
+
+	private ExtensionDt createEmptyExtensionDt(IBaseExtension<?, ?> theBaseExtension, String theUrl) {
+		return createEmptyExtensionDt(theBaseExtension, false, theUrl);
+	}
+
+	@SuppressWarnings("unchecked")
+	private ExtensionDt createEmptyExtensionDt(IBaseExtension theBaseExtension, boolean theIsModifier, String theUrl) {
+		ExtensionDt retVal = new ExtensionDt(theIsModifier, theUrl);
+		theBaseExtension.getExtension().add(retVal);
+		return retVal;
+	}
+
+	private ExtensionDt createEmptyExtensionDt(
+			ISupportsUndeclaredExtensions theSupportsUndeclaredExtensions, String theUrl) {
+		return createEmptyExtensionDt(theSupportsUndeclaredExtensions, false, theUrl);
+	}
+
+	private ExtensionDt createEmptyExtensionDt(
+			ISupportsUndeclaredExtensions theSupportsUndeclaredExtensions, boolean theIsModifier, String theUrl) {
+		return theSupportsUndeclaredExtensions.addUndeclaredExtension(theIsModifier, theUrl);
+	}
+
+	private IBaseExtension<?, ?> createEmptyExtension(IBaseHasExtensions theBaseHasExtensions, String theUrl) {
+		return (IBaseExtension<?, ?>) theBaseHasExtensions.addExtension().setUrl(theUrl);
+	}
+
+	private IBaseExtension<?, ?> createEmptyModifierExtension(
+			IBaseHasModifierExtensions theBaseHasModifierExtensions, String theUrl) {
+		return (IBaseExtension<?, ?>)
+				theBaseHasModifierExtensions.addModifierExtension().setUrl(theUrl);
+	}
+
+	private ExtensionDt createEmptyModifierExtensionDt(
+			ISupportsUndeclaredExtensions theSupportsUndeclaredExtensions, String theUrl) {
+		return createEmptyExtensionDt(theSupportsUndeclaredExtensions, true, theUrl);
+	}
 
 	/**
 	 * Clones all values from a source object into the equivalent fields in a target object
-	 * @param theSource The source object (must not be null)
-	 * @param theTarget The target object to copy values into (must not be null)
+	 *
+	 * @param theSource              The source object (must not be null)
+	 * @param theTarget              The target object to copy values into (must not be null)
 	 * @param theIgnoreMissingFields The ignore fields in the target which do not exist (if false, an exception will be thrown if the target is unable to accept a value from the source)
+	 * @return Returns the target (which will be the same object that was passed into theTarget) for easy chaining
 	 */
-	public void cloneInto(IBase theSource, IBase theTarget, boolean theIgnoreMissingFields) {
+	public IBase cloneInto(IBase theSource, IBase theTarget, boolean theIgnoreMissingFields) {
 		Validate.notNull(theSource, "theSource must not be null");
 		Validate.notNull(theTarget, "theTarget must not be null");
-		
+
+		// DSTU3+
+		if (theSource instanceof IBaseElement) {
+			IBaseElement source = (IBaseElement) theSource;
+			IBaseElement target = (IBaseElement) theTarget;
+			target.setId(source.getId());
+		}
+
+		// DSTU2 only
+		if (theSource instanceof IIdentifiableElement) {
+			IIdentifiableElement source = (IIdentifiableElement) theSource;
+			IIdentifiableElement target = (IIdentifiableElement) theTarget;
+			target.setElementSpecificId(source.getElementSpecificId());
+		}
+
+		// DSTU2 only
+		if (theSource instanceof IResource) {
+			IResource source = (IResource) theSource;
+			IResource target = (IResource) theTarget;
+			target.setId(source.getId());
+			target.getResourceMetadata().putAll(source.getResourceMetadata());
+		}
+
 		if (theSource instanceof IPrimitiveType<?>) {
 			if (theTarget instanceof IPrimitiveType<?>) {
-				((IPrimitiveType<?>)theTarget).setValueAsString(((IPrimitiveType<?>)theSource).getValueAsString());
-				return;
-			} else {
-				if (theIgnoreMissingFields) {
-					return;
-				} else {
-					throw new DataFormatException("Can not copy value from primitive of type " + theSource.getClass().getName() + " into type " + theTarget.getClass().getName());
+				String valueAsString = ((IPrimitiveType<?>) theSource).getValueAsString();
+				if (isNotBlank(valueAsString)) {
+					((IPrimitiveType<?>) theTarget).setValueAsString(valueAsString);
 				}
+				if (theSource instanceof IBaseHasExtensions && theTarget instanceof IBaseHasExtensions) {
+					List<? extends IBaseExtension<?, ?>> extensions = ((IBaseHasExtensions) theSource).getExtension();
+					for (IBaseExtension<?, ?> nextSource : extensions) {
+						IBaseExtension<?, ?> nextTarget = ((IBaseHasExtensions) theTarget).addExtension();
+						cloneInto(nextSource, nextTarget, theIgnoreMissingFields);
+					}
+				}
+				return theSource;
+			}
+			if (theIgnoreMissingFields) {
+				return theSource;
+			}
+			throw new DataFormatException(Msg.code(1788) + "Can not copy value from primitive of type "
+					+ theSource.getClass().getName() + " into type "
+					+ theTarget.getClass().getName());
+		}
+
+		if (theSource instanceof IBaseReference && theTarget instanceof IBaseReference) {
+			IBaseReference sourceReference = (IBaseReference) theSource;
+			IBaseReference targetReference = (IBaseReference) theTarget;
+			if (sourceReference.getResource() != null) {
+				targetReference.setResource(sourceReference.getResource());
 			}
 		}
-		
-		BaseRuntimeElementCompositeDefinition<?> sourceDef = (BaseRuntimeElementCompositeDefinition<?>) myContext.getElementDefinition(theSource.getClass()); 
-		BaseRuntimeElementCompositeDefinition<?> targetDef = (BaseRuntimeElementCompositeDefinition<?>) myContext.getElementDefinition(theTarget.getClass());
-		
+
+		BaseRuntimeElementCompositeDefinition<?> sourceDef =
+				(BaseRuntimeElementCompositeDefinition<?>) myContext.getElementDefinition(theSource.getClass());
+		BaseRuntimeElementCompositeDefinition<?> targetDef =
+				(BaseRuntimeElementCompositeDefinition<?>) myContext.getElementDefinition(theTarget.getClass());
+
 		List<BaseRuntimeChildDefinition> children = sourceDef.getChildren();
 		if (sourceDef instanceof RuntimeExtensionDtDefinition) {
-			children = ((RuntimeExtensionDtDefinition)sourceDef).getChildrenIncludingUrl();
+			children = ((RuntimeExtensionDtDefinition) sourceDef).getChildrenIncludingUrl();
 		}
-		
-		for (BaseRuntimeChildDefinition nextChild : children) {
+
+		for (BaseRuntimeChildDefinition nextChild : children)
 			for (IBase nextValue : nextChild.getAccessor().getValues(theSource)) {
-				String elementName = nextChild.getChildNameByDatatype(nextValue.getClass());
+				Class<? extends IBase> valueType = nextValue.getClass();
+				String elementName = nextChild.getChildNameByDatatype(valueType);
 				BaseRuntimeChildDefinition targetChild = targetDef.getChildByName(elementName);
 				if (targetChild == null) {
 					if (theIgnoreMissingFields) {
 						continue;
-					} else {
-						throw new DataFormatException("Type " + theTarget.getClass().getName() + " does not have a child with name " + elementName);
 					}
+					throw new DataFormatException(Msg.code(1789) + "Type "
+							+ theTarget.getClass().getName() + " does not have a child with name " + elementName);
 				}
-				
-				BaseRuntimeElementDefinition<?> childDef = targetChild.getChildByName(elementName);
-				IBase target = childDef.newInstance();
+
+				BaseRuntimeElementDefinition<?> element = myContext.getElementDefinition(valueType);
+				Object instanceConstructorArg = targetChild.getInstanceConstructorArguments();
+				IBase target;
+				if (element == null && BaseContainedDt.class.isAssignableFrom(valueType)) {
+					/*
+					 * This is a hack for DSTU2 - The way we did contained resources in
+					 * the DSTU2 model was weird, since the element isn't actually a FHIR type.
+					 * This is fixed in DSTU3+ so this hack only applies there.
+					 */
+					BaseContainedDt containedTarget = (BaseContainedDt) ReflectionUtil.newInstance(valueType);
+					BaseContainedDt containedSource = (BaseContainedDt) nextValue;
+					for (IResource next : containedSource.getContainedResources()) {
+						List containedResources = containedTarget.getContainedResources();
+						containedResources.add(next);
+					}
+					targetChild.getMutator().addValue(theTarget, containedTarget);
+					continue;
+				} else if (instanceConstructorArg != null) {
+					target = element.newInstance(instanceConstructorArg);
+				} else {
+					target = element.newInstance();
+				}
+
 				targetChild.getMutator().addValue(theTarget, target);
 				cloneInto(nextValue, target, theIgnoreMissingFields);
 			}
-		}
-		
+
+		return theTarget;
 	}
 
 	/**
@@ -118,20 +285,24 @@ public class FhirTerser {
 	 * Note on scope: This method will descend into any contained resources ({@link IResource#getContained()}) as well, but will not descend into linked resources (e.g.
 	 * {@link BaseResourceReferenceDt#getResource()}) or embedded resources (e.g. Bundle.entry.resource)
 	 * </p>
-	 * 
-	 * @param theResource
-	 *           The resource instance to search. Must not be null.
-	 * @param theType
-	 *           The type to search for. Must not be null.
+	 *
+	 * @param theResource The resource instance to search. Must not be null.
+	 * @param theType     The type to search for. Must not be null.
 	 * @return Returns a list of all matching elements
 	 */
-	public <T extends IBase> List<T> getAllPopulatedChildElementsOfType(IBaseResource theResource, final Class<T> theType) {
-		final ArrayList<T> retVal = new ArrayList<T>();
+	public <T extends IBase> List<T> getAllPopulatedChildElementsOfType(
+			IBaseResource theResource, final Class<T> theType) {
+		final ArrayList<T> retVal = new ArrayList<>();
 		BaseRuntimeElementCompositeDefinition<?> def = myContext.getResourceDefinition(theResource);
-		visit(new IdentityHashMap<Object, Object>(), theResource, theResource, null, null, def, new IModelVisitor() {
+		visit(newMap(), theResource, theResource, null, null, def, new IModelVisitor() {
 			@SuppressWarnings("unchecked")
 			@Override
-			public void acceptElement(IBaseResource theOuterResource, IBase theElement, List<String> thePathToElement, BaseRuntimeChildDefinition theChildDefinition, BaseRuntimeElementDefinition<?> theDefinition) {
+			public void acceptElement(
+					IBaseResource theOuterResource,
+					IBase theElement,
+					List<String> thePathToElement,
+					BaseRuntimeChildDefinition theChildDefinition,
+					BaseRuntimeElementDefinition<?> theDefinition) {
 				if (theElement == null || theElement.isEmpty()) {
 					return;
 				}
@@ -144,82 +315,365 @@ public class FhirTerser {
 		return retVal;
 	}
 
+	/**
+	 * Extracts all outbound references from a resource
+	 *
+	 * @param theResource the resource to be analyzed
+	 * @return a list of references to other resources
+	 */
 	public List<ResourceReferenceInfo> getAllResourceReferences(final IBaseResource theResource) {
-		final ArrayList<ResourceReferenceInfo> retVal = new ArrayList<ResourceReferenceInfo>();
+		return getAllResourceReferencesExcluding(theResource, Lists.newArrayList());
+	}
+
+	/**
+	 * Extracts all outbound references from a resource, excluding any that are located on black-listed parts of the
+	 * resource
+	 *
+	 * @param theResource       the resource to be analyzed
+	 * @param thePathsToExclude a list of dot-delimited paths not to include in the result
+	 * @return a list of references to other resources
+	 */
+	public List<ResourceReferenceInfo> getAllResourceReferencesExcluding(
+			final IBaseResource theResource, List<String> thePathsToExclude) {
+		final ArrayList<ResourceReferenceInfo> retVal = new ArrayList<>();
 		BaseRuntimeElementCompositeDefinition<?> def = myContext.getResourceDefinition(theResource);
-		visit(new IdentityHashMap<Object, Object>(), theResource, theResource, null, null, def, new IModelVisitor() {
+		List<List<String>> tokenizedPathsToExclude = thePathsToExclude.stream()
+				.map(path -> StringUtils.split(path, "."))
+				.map(Lists::newArrayList)
+				.collect(Collectors.toList());
+
+		visit(newMap(), theResource, theResource, null, null, def, new IModelVisitor() {
 			@Override
-			public void acceptElement(IBaseResource theOuterResource, IBase theElement, List<String> thePathToElement, BaseRuntimeChildDefinition theChildDefinition, BaseRuntimeElementDefinition<?> theDefinition) {
+			public void acceptElement(
+					IBaseResource theOuterResource,
+					IBase theElement,
+					List<String> thePathToElement,
+					BaseRuntimeChildDefinition theChildDefinition,
+					BaseRuntimeElementDefinition<?> theDefinition) {
 				if (theElement == null || theElement.isEmpty()) {
 					return;
 				}
+
+				if (thePathToElement != null && pathShouldBeExcluded(tokenizedPathsToExclude, thePathToElement)) {
+					return;
+				}
 				if (IBaseReference.class.isAssignableFrom(theElement.getClass())) {
-					retVal.add(new ResourceReferenceInfo(myContext, theOuterResource, thePathToElement, (IBaseReference) theElement));
+					retVal.add(new ResourceReferenceInfo(
+							myContext, theOuterResource, thePathToElement, (IBaseReference) theElement));
 				}
 			}
 		});
 		return retVal;
 	}
 
-	private BaseRuntimeChildDefinition getDefinition(BaseRuntimeElementCompositeDefinition<?> theCurrentDef, List<String> theSubList) {
+	private boolean pathShouldBeExcluded(List<List<String>> theTokenizedPathsToExclude, List<String> thePathToElement) {
+		return theTokenizedPathsToExclude.stream().anyMatch(p -> {
+			// Check whether the path to the element starts with the path to be excluded
+			if (p.size() > thePathToElement.size()) {
+				return false;
+			}
+
+			List<String> prefix = thePathToElement.subList(0, p.size());
+
+			return Objects.equals(p, prefix);
+		});
+	}
+
+	private BaseRuntimeChildDefinition getDefinition(
+			BaseRuntimeElementCompositeDefinition<?> theCurrentDef, List<String> theSubList) {
 		BaseRuntimeChildDefinition nextDef = theCurrentDef.getChildByNameOrThrowDataFormatException(theSubList.get(0));
 
 		if (theSubList.size() == 1) {
 			return nextDef;
-		} else {
-			BaseRuntimeElementCompositeDefinition<?> cmp = (BaseRuntimeElementCompositeDefinition<?>) nextDef.getChildByName(theSubList.get(0));
-			return getDefinition(cmp, theSubList.subList(1, theSubList.size()));
 		}
+		BaseRuntimeElementCompositeDefinition<?> cmp =
+				(BaseRuntimeElementCompositeDefinition<?>) nextDef.getChildByName(theSubList.get(0));
+		return getDefinition(cmp, theSubList.subList(1, theSubList.size()));
 	}
 
 	public BaseRuntimeChildDefinition getDefinition(Class<? extends IBaseResource> theResourceType, String thePath) {
 		RuntimeResourceDefinition def = myContext.getResourceDefinition(theResourceType);
 
-		BaseRuntimeElementCompositeDefinition<?> currentDef = def;
-
 		List<String> parts = Arrays.asList(thePath.split("\\."));
 		List<String> subList = parts.subList(1, parts.size());
 		if (subList.size() < 1) {
-			throw new ConfigurationException("Invalid path: " + thePath);
+			throw new ConfigurationException(Msg.code(1790) + "Invalid path: " + thePath);
 		}
-		return getDefinition(currentDef, subList);
-
+		return getDefinition(def, subList);
 	}
 
 	public Object getSingleValueOrNull(IBase theTarget, String thePath) {
-		Class<Object> wantedType = Object.class;
+		Class<IBase> wantedType = IBase.class;
 
 		return getSingleValueOrNull(theTarget, thePath, wantedType);
 	}
 
-	public <T> T getSingleValueOrNull(IBase theTarget, String thePath, Class<T> theWantedType) {
+	public <T extends IBase> T getSingleValueOrNull(IBase theTarget, String thePath, Class<T> theWantedType) {
 		Validate.notNull(theTarget, "theTarget must not be null");
 		Validate.notBlank(thePath, "thePath must not be empty");
 
 		BaseRuntimeElementDefinition<?> def = myContext.getElementDefinition(theTarget.getClass());
 		if (!(def instanceof BaseRuntimeElementCompositeDefinition)) {
-			throw new IllegalArgumentException("Target is not a composite type: " + theTarget.getClass().getName());
+			throw new IllegalArgumentException(Msg.code(1791) + "Target is not a composite type: "
+					+ theTarget.getClass().getName());
 		}
 
 		BaseRuntimeElementCompositeDefinition<?> currentDef = (BaseRuntimeElementCompositeDefinition<?>) def;
-		Object currentObj = theTarget;
 
-		List<String> parts = Arrays.asList(thePath.split("\\."));
-		List<T> retVal = getValues(currentDef, currentObj, parts, theWantedType);
+		List<String> parts = parsePath(currentDef, thePath);
+
+		List<T> retVal = getValues(currentDef, theTarget, parts, theWantedType);
 		if (retVal.isEmpty()) {
 			return null;
-		} else {
-			return retVal.get(0);
 		}
+		return retVal.get(0);
+	}
+
+	public Optional<String> getSinglePrimitiveValue(IBase theTarget, String thePath) {
+		return getSingleValue(theTarget, thePath, IPrimitiveType.class).map(t -> t.getValueAsString());
+	}
+
+	public String getSinglePrimitiveValueOrNull(IBase theTarget, String thePath) {
+		return getSingleValue(theTarget, thePath, IPrimitiveType.class)
+				.map(IPrimitiveType::getValueAsString)
+				.orElse(null);
+	}
+
+	public <T extends IBase> Optional<T> getSingleValue(IBase theTarget, String thePath, Class<T> theWantedType) {
+		return Optional.ofNullable(getSingleValueOrNull(theTarget, thePath, theWantedType));
+	}
+
+	private <T extends IBase> List<T> getValues(
+			BaseRuntimeElementCompositeDefinition<?> theCurrentDef,
+			IBase theCurrentObj,
+			List<String> theSubList,
+			Class<T> theWantedClass) {
+		return getValues(theCurrentDef, theCurrentObj, theSubList, theWantedClass, false, false);
 	}
 
 	@SuppressWarnings("unchecked")
-	private <T> List<T> getValues(BaseRuntimeElementCompositeDefinition<?> theCurrentDef, Object theCurrentObj, List<String> theSubList, Class<T> theWantedClass) {
+	private <T extends IBase> List<T> getValues(
+			BaseRuntimeElementCompositeDefinition<?> theCurrentDef,
+			IBase theCurrentObj,
+			List<String> theSubList,
+			Class<T> theWantedClass,
+			boolean theCreate,
+			boolean theAddExtension) {
+		if (theSubList.isEmpty()) {
+			return Collections.emptyList();
+		}
+
 		String name = theSubList.get(0);
-				
+		List<T> retVal = new ArrayList<>();
+
+		if (name.startsWith("extension('")) {
+			String extensionUrl = name.substring("extension('".length());
+			int endIndex = extensionUrl.indexOf('\'');
+			if (endIndex != -1) {
+				extensionUrl = extensionUrl.substring(0, endIndex);
+			}
+
+			if (myContext.getVersion().getVersion().isOlderThan(FhirVersionEnum.DSTU3)) {
+				// DTSU2
+				final String extensionDtUrlForLambda = extensionUrl;
+				List<ExtensionDt> extensionDts = Collections.emptyList();
+				if (theCurrentObj instanceof ISupportsUndeclaredExtensions) {
+					extensionDts = ((ISupportsUndeclaredExtensions) theCurrentObj)
+							.getUndeclaredExtensions().stream()
+									.filter(t -> t.getUrl().equals(extensionDtUrlForLambda))
+									.collect(Collectors.toList());
+
+					if (theAddExtension
+							&& (!(theCurrentObj instanceof IBaseExtension)
+									|| (extensionDts.isEmpty() && theSubList.size() == 1))) {
+						extensionDts.add(
+								createEmptyExtensionDt((ISupportsUndeclaredExtensions) theCurrentObj, extensionUrl));
+					}
+
+					if (extensionDts.isEmpty() && theCreate) {
+						extensionDts.add(
+								createEmptyExtensionDt((ISupportsUndeclaredExtensions) theCurrentObj, extensionUrl));
+					}
+
+				} else if (theCurrentObj instanceof IBaseExtension) {
+					extensionDts = ((IBaseExtension) theCurrentObj).getExtension();
+
+					if (theAddExtension && (extensionDts.isEmpty() && theSubList.size() == 1)) {
+						extensionDts.add(createEmptyExtensionDt((IBaseExtension) theCurrentObj, extensionUrl));
+					}
+
+					if (extensionDts.isEmpty() && theCreate) {
+						extensionDts.add(createEmptyExtensionDt((IBaseExtension) theCurrentObj, extensionUrl));
+					}
+				}
+
+				for (ExtensionDt next : extensionDts) {
+					if (theWantedClass.isAssignableFrom(next.getClass())) {
+						retVal.add((T) next);
+					}
+				}
+			} else {
+				// DSTU3+
+				final String extensionUrlForLambda = extensionUrl;
+				List<IBaseExtension<?, ?>> extensions = Collections.emptyList();
+				if (theCurrentObj instanceof IBaseHasExtensions) {
+					extensions = ((IBaseHasExtensions) theCurrentObj)
+							.getExtension().stream()
+									.filter(t -> t.getUrl().equals(extensionUrlForLambda))
+									.collect(Collectors.toList());
+
+					if (theAddExtension
+							&& (!(theCurrentObj instanceof IBaseExtension)
+									|| (extensions.isEmpty() && theSubList.size() == 1))) {
+						extensions.add(createEmptyExtension((IBaseHasExtensions) theCurrentObj, extensionUrl));
+					}
+
+					if (extensions.isEmpty() && theCreate) {
+						extensions.add(createEmptyExtension((IBaseHasExtensions) theCurrentObj, extensionUrl));
+					}
+				}
+
+				for (IBaseExtension<?, ?> next : extensions) {
+					if (theWantedClass.isAssignableFrom(next.getClass())) {
+						retVal.add((T) next);
+					}
+				}
+			}
+
+			if (theSubList.size() > 1) {
+				List<T> values = retVal;
+				retVal = new ArrayList<>();
+				for (T nextElement : values) {
+					BaseRuntimeElementCompositeDefinition<?> nextChildDef = (BaseRuntimeElementCompositeDefinition<?>)
+							myContext.getElementDefinition(nextElement.getClass());
+					List<T> foundValues = getValues(
+							nextChildDef,
+							nextElement,
+							theSubList.subList(1, theSubList.size()),
+							theWantedClass,
+							theCreate,
+							theAddExtension);
+					retVal.addAll(foundValues);
+				}
+			}
+
+			return retVal;
+		}
+
+		if (name.startsWith("modifierExtension('")) {
+			String extensionUrl = name.substring("modifierExtension('".length());
+			int endIndex = extensionUrl.indexOf('\'');
+			if (endIndex != -1) {
+				extensionUrl = extensionUrl.substring(0, endIndex);
+			}
+
+			if (myContext.getVersion().getVersion().isOlderThan(FhirVersionEnum.DSTU3)) {
+				// DSTU2
+				final String extensionDtUrlForLambda = extensionUrl;
+				List<ExtensionDt> extensionDts = Collections.emptyList();
+				if (theCurrentObj instanceof ISupportsUndeclaredExtensions) {
+					extensionDts = ((ISupportsUndeclaredExtensions) theCurrentObj)
+							.getUndeclaredModifierExtensions().stream()
+									.filter(t -> t.getUrl().equals(extensionDtUrlForLambda))
+									.collect(Collectors.toList());
+
+					if (theAddExtension
+							&& (!(theCurrentObj instanceof IBaseExtension)
+									|| (extensionDts.isEmpty() && theSubList.size() == 1))) {
+						extensionDts.add(createEmptyModifierExtensionDt(
+								(ISupportsUndeclaredExtensions) theCurrentObj, extensionUrl));
+					}
+
+					if (extensionDts.isEmpty() && theCreate) {
+						extensionDts.add(createEmptyModifierExtensionDt(
+								(ISupportsUndeclaredExtensions) theCurrentObj, extensionUrl));
+					}
+
+				} else if (theCurrentObj instanceof IBaseExtension) {
+					extensionDts = ((IBaseExtension) theCurrentObj).getExtension();
+
+					if (theAddExtension && (extensionDts.isEmpty() && theSubList.size() == 1)) {
+						extensionDts.add(createEmptyExtensionDt((IBaseExtension) theCurrentObj, extensionUrl));
+					}
+
+					if (extensionDts.isEmpty() && theCreate) {
+						extensionDts.add(createEmptyExtensionDt((IBaseExtension) theCurrentObj, extensionUrl));
+					}
+				}
+
+				for (ExtensionDt next : extensionDts) {
+					if (theWantedClass.isAssignableFrom(next.getClass())) {
+						retVal.add((T) next);
+					}
+				}
+			} else {
+				// DSTU3+
+				final String extensionUrlForLambda = extensionUrl;
+				List<IBaseExtension<?, ?>> extensions = Collections.emptyList();
+
+				if (theCurrentObj instanceof IBaseHasModifierExtensions) {
+					extensions = ((IBaseHasModifierExtensions) theCurrentObj)
+							.getModifierExtension().stream()
+									.filter(t -> t.getUrl().equals(extensionUrlForLambda))
+									.collect(Collectors.toList());
+
+					if (theAddExtension
+							&& (!(theCurrentObj instanceof IBaseExtension)
+									|| (extensions.isEmpty() && theSubList.size() == 1))) {
+						extensions.add(
+								createEmptyModifierExtension((IBaseHasModifierExtensions) theCurrentObj, extensionUrl));
+					}
+
+					if (extensions.isEmpty() && theCreate) {
+						extensions.add(
+								createEmptyModifierExtension((IBaseHasModifierExtensions) theCurrentObj, extensionUrl));
+					}
+				}
+
+				for (IBaseExtension<?, ?> next : extensions) {
+					if (theWantedClass.isAssignableFrom(next.getClass())) {
+						retVal.add((T) next);
+					}
+				}
+			}
+
+			if (theSubList.size() > 1) {
+				List<T> values = retVal;
+				retVal = new ArrayList<>();
+				for (T nextElement : values) {
+					BaseRuntimeElementCompositeDefinition<?> nextChildDef = (BaseRuntimeElementCompositeDefinition<?>)
+							myContext.getElementDefinition(nextElement.getClass());
+					List<T> foundValues = getValues(
+							nextChildDef,
+							nextElement,
+							theSubList.subList(1, theSubList.size()),
+							theWantedClass,
+							theCreate,
+							theAddExtension);
+					retVal.addAll(foundValues);
+				}
+			}
+
+			return retVal;
+		}
+
 		BaseRuntimeChildDefinition nextDef = theCurrentDef.getChildByNameOrThrowDataFormatException(name);
 		List<? extends IBase> values = nextDef.getAccessor().getValues(theCurrentObj);
-		List<T> retVal = new ArrayList<T>();
+
+		if (values.isEmpty() && theCreate) {
+			BaseRuntimeElementDefinition<?> childByName = nextDef.getChildByName(name);
+			Object arg = nextDef.getInstanceConstructorArguments();
+			IBase value;
+			if (arg != null) {
+				value = childByName.newInstance(arg);
+			} else {
+				value = childByName.newInstance();
+			}
+			nextDef.getMutator().addValue(theCurrentObj, value);
+			List<IBase> list = new ArrayList<>();
+			list.add(value);
+			values = list;
+		}
 
 		if (theSubList.size() == 1) {
 			if (nextDef instanceof RuntimeChildChoiceDefinition) {
@@ -250,182 +704,559 @@ public class FhirTerser {
 			}
 		} else {
 			for (IBase nextElement : values) {
-				BaseRuntimeElementCompositeDefinition<?> nextChildDef = (BaseRuntimeElementCompositeDefinition<?>) myContext.getElementDefinition(nextElement.getClass());
-				List<T> foundValues = getValues(nextChildDef, nextElement, theSubList.subList(1, theSubList.size()), theWantedClass);
-				retVal.addAll(foundValues);
+				// We can only continue iterating if the current element is composite.
+				// If we haven't reached the end of the path, and we have already reached an element
+				// with a primitive data type, we did not find a match.
+				if (myContext.getElementDefinition(nextElement.getClass())
+						instanceof BaseRuntimeElementCompositeDefinition<?> nextChildDef) {
+					List<T> foundValues = getValues(
+							nextChildDef,
+							nextElement,
+							theSubList.subList(1, theSubList.size()),
+							theWantedClass,
+							theCreate,
+							theAddExtension);
+					retVal.addAll(foundValues);
+				}
 			}
 		}
 		return retVal;
 	}
 
-	public List<Object> getValues(IBaseResource theResource, String thePath) {
-		Class<Object> wantedClass = Object.class;
+	/**
+	 * Returns values stored in an element identified by its path. The list of values is of
+	 * type {@link Object}.
+	 *
+	 * @param theElement The element to be accessed. Must not be null.
+	 * @param thePath    The path for the element to be accessed.@param theElement The resource instance to be accessed. Must not be null.
+	 * @return A list of values of type {@link Object}.
+	 */
+	public List<IBase> getValues(IBase theElement, String thePath) {
+		Class<IBase> wantedClass = IBase.class;
 
-		return getValues(theResource, thePath, wantedClass);
-
+		return getValues(theElement, thePath, wantedClass);
 	}
 
-	public <T> List<T> getValues(IBaseResource theResource, String thePath, Class<T> theWantedClass) {
-		RuntimeResourceDefinition def = myContext.getResourceDefinition(theResource);
+	/**
+	 * Returns values stored in an element identified by its path. The list of values is of
+	 * type {@link Object}.
+	 *
+	 * @param theElement The element to be accessed. Must not be null.
+	 * @param thePath    The path for the element to be accessed.
+	 * @param theCreate  When set to <code>true</code>, the terser will create a null-valued element where none exists.
+	 * @return A list of values of type {@link Object}.
+	 */
+	public List<IBase> getValues(IBase theElement, String thePath, boolean theCreate) {
+		Class<IBase> wantedClass = IBase.class;
 
-		BaseRuntimeElementCompositeDefinition<?> currentDef = def;
-		Object currentObj = theResource;
+		return getValues(theElement, thePath, wantedClass, theCreate);
+	}
 
-		List<String> parts = Arrays.asList(thePath.split("\\."));
-		List<String> subList = parts.subList(1, parts.size());
-		if (subList.size() < 1) {
-			throw new ConfigurationException("Invalid path: " + thePath);
+	/**
+	 * Returns values stored in an element identified by its path. The list of values is of
+	 * type {@link Object}.
+	 *
+	 * @param theElement      The element to be accessed. Must not be null.
+	 * @param thePath         The path for the element to be accessed.
+	 * @param theCreate       When set to <code>true</code>, the terser will create a null-valued element where none exists.
+	 * @param theAddExtension When set to <code>true</code>, the terser will add a null-valued extension where one or more such extensions already exist.
+	 * @return A list of values of type {@link Object}.
+	 */
+	public List<IBase> getValues(IBase theElement, String thePath, boolean theCreate, boolean theAddExtension) {
+		Class<IBase> wantedClass = IBase.class;
+
+		return getValues(theElement, thePath, wantedClass, theCreate, theAddExtension);
+	}
+
+	/**
+	 * Returns values stored in an element identified by its path. The list of values is of
+	 * type <code>theWantedClass</code>.
+	 *
+	 * @param theElement     The element to be accessed. Must not be null.
+	 * @param thePath        The path for the element to be accessed.
+	 * @param theWantedClass The desired class to be returned in a list.
+	 * @param <T>            Type declared by <code>theWantedClass</code>
+	 * @return A list of values of type <code>theWantedClass</code>.
+	 */
+	public <T extends IBase> List<T> getValues(IBase theElement, String thePath, Class<T> theWantedClass) {
+		BaseRuntimeElementCompositeDefinition<?> def =
+				(BaseRuntimeElementCompositeDefinition<?>) myContext.getElementDefinition(theElement.getClass());
+		List<String> parts = parsePath(def, thePath);
+		return getValues(def, theElement, parts, theWantedClass);
+	}
+
+	/**
+	 * Returns values stored in an element identified by its path. The list of values is of
+	 * type <code>theWantedClass</code>.
+	 *
+	 * @param theElement     The element to be accessed. Must not be null.
+	 * @param thePath        The path for the element to be accessed.
+	 * @param theWantedClass The desired class to be returned in a list.
+	 * @param theCreate      When set to <code>true</code>, the terser will create a null-valued element where none exists.
+	 * @param <T>            Type declared by <code>theWantedClass</code>
+	 * @return A list of values of type <code>theWantedClass</code>.
+	 */
+	public <T extends IBase> List<T> getValues(
+			IBase theElement, String thePath, Class<T> theWantedClass, boolean theCreate) {
+		BaseRuntimeElementCompositeDefinition<?> def =
+				(BaseRuntimeElementCompositeDefinition<?>) myContext.getElementDefinition(theElement.getClass());
+		List<String> parts = parsePath(def, thePath);
+		return getValues(def, theElement, parts, theWantedClass, theCreate, false);
+	}
+
+	/**
+	 * Returns values stored in an element identified by its path. The list of values is of
+	 * type <code>theWantedClass</code>.
+	 *
+	 * @param theElement      The element to be accessed. Must not be null.
+	 * @param thePath         The path for the element to be accessed.
+	 * @param theWantedClass  The desired class to be returned in a list.
+	 * @param theCreate       When set to <code>true</code>, the terser will create a null-valued element where none exists.
+	 * @param theAddExtension When set to <code>true</code>, the terser will add a null-valued extension where one or more such extensions already exist.
+	 * @param <T>             Type declared by <code>theWantedClass</code>
+	 * @return A list of values of type <code>theWantedClass</code>.
+	 */
+	public <T extends IBase> List<T> getValues(
+			IBase theElement, String thePath, Class<T> theWantedClass, boolean theCreate, boolean theAddExtension) {
+		BaseRuntimeElementCompositeDefinition<?> def =
+				(BaseRuntimeElementCompositeDefinition<?>) myContext.getElementDefinition(theElement.getClass());
+		List<String> parts = parsePath(def, thePath);
+		return getValues(def, theElement, parts, theWantedClass, theCreate, theAddExtension);
+	}
+
+	private List<String> parsePath(BaseRuntimeElementCompositeDefinition<?> theElementDef, String thePath) {
+		List<String> parts = new ArrayList<>();
+
+		int currentStart = 0;
+		boolean inSingleQuote = false;
+		for (int i = 0; i < thePath.length(); i++) {
+			switch (thePath.charAt(i)) {
+				case '\'':
+					inSingleQuote = !inSingleQuote;
+					break;
+				case '.':
+					if (!inSingleQuote) {
+						parts.add(thePath.substring(currentStart, i));
+						currentStart = i + 1;
+					}
+					break;
+			}
 		}
-		return getValues(currentDef, currentObj, subList, theWantedClass);
+
+		parts.add(thePath.substring(currentStart));
+
+		String firstPart = parts.get(0);
+		if (Character.isUpperCase(firstPart.charAt(0)) && theElementDef instanceof RuntimeResourceDefinition) {
+			if (firstPart.equals(theElementDef.getName())) {
+				parts = parts.subList(1, parts.size());
+			} else {
+				parts = Collections.emptyList();
+				return parts;
+			}
+		} else if (firstPart.equals(theElementDef.getName())) {
+			parts = parts.subList(1, parts.size());
+		}
+
+		if (parts.size() < 1) {
+			throw new ConfigurationException(Msg.code(1792) + "Invalid path: " + thePath);
+		}
+		return parts;
 	}
 
 	/**
 	 * Returns <code>true</code> if <code>theSource</code> is in the compartment named <code>theCompartmentName</code>
 	 * belonging to resource <code>theTarget</code>
-	 * 
+	 *
 	 * @param theCompartmentName The name of the compartment
-	 * @param theSource The potential member of the compartment
-	 * @param theTarget The owner of the compartment. Note that both the resource type and ID must be filled in on this IIdType or the method will throw an {@link IllegalArgumentException}
+	 * @param theSource          The potential member of the compartment
+	 * @param theTarget          The owner of the compartment. Note that both the resource type and ID must be filled in on this IIdType or the method will throw an {@link IllegalArgumentException}
 	 * @return <code>true</code> if <code>theSource</code> is in the compartment
 	 * @throws IllegalArgumentException If theTarget does not contain both a resource type and ID
 	 */
-	public boolean isSourceInCompartmentForTarget(String theCompartmentName, IBaseResource theSource, IIdType theTarget) {
+	public boolean isSourceInCompartmentForTarget(
+			String theCompartmentName, IBaseResource theSource, IIdType theTarget) {
+		return isSourceInCompartmentForTarget(
+				theCompartmentName, theSource, theTarget, new CompartmentSearchParameterModifications());
+	}
+
+	@Deprecated
+	public boolean isSourceInCompartmentForTarget(
+			String theCompartmentName,
+			IBaseResource theSource,
+			IIdType theTarget,
+			@Nullable Set<String> theAdditionalCompartmentParamNames) {
+		return isSourceInCompartmentForTarget(
+				theCompartmentName,
+				theSource,
+				theTarget,
+				CompartmentSearchParameterModifications.fromAdditionalCompartmentParamNames(
+						myContext.getResourceType(theSource),
+						theAdditionalCompartmentParamNames == null ? Set.of() : theAdditionalCompartmentParamNames));
+	}
+
+	/**
+	 * Returns <code>true</code> if <code>theSource</code> is in the compartment named <code>theCompartmentName</code>
+	 * belonging to resource <code>theTarget</code>
+	 *
+	 * @param theCompartmentName                 The name of the compartment
+	 * @param theSource                          The potential member of the compartment
+	 * @param theTarget                          The owner of the compartment. Note that both the resource type and ID must be filled in on this IIdType or the method will throw an {@link IllegalArgumentException}
+	 * @param theModifications If provided, SP modifications to the compartment
+	 * @return <code>true</code> if <code>theSource</code> is in the compartment or one of the additional parameters matched.
+	 * @throws IllegalArgumentException If theTarget does not contain both a resource type and ID
+	 */
+	public boolean isSourceInCompartmentForTarget(
+			String theCompartmentName,
+			IBaseResource theSource,
+			IIdType theTarget,
+			CompartmentSearchParameterModifications theModifications) {
 		Validate.notBlank(theCompartmentName, "theCompartmentName must not be null or blank");
 		Validate.notNull(theSource, "theSource must not be null");
 		Validate.notNull(theTarget, "theTarget must not be null");
-		Validate.notBlank(defaultString(theTarget.getResourceType()), "theTarget must have a populated resource type (theTarget.getResourceType() does not return a value)");
-		Validate.notBlank(defaultString(theTarget.getIdPart()), "theTarget must have a populated ID (theTarget.getIdPart() does not return a value)");
-		
+		Validate.notBlank(
+				defaultString(theTarget.getResourceType()),
+				"theTarget must have a populated resource type (theTarget.getResourceType() does not return a value)");
+		Validate.notBlank(
+				defaultString(theTarget.getIdPart()),
+				"theTarget must have a populated ID (theTarget.getIdPart() does not return a value)");
+
 		String wantRef = theTarget.toUnqualifiedVersionless().getValue();
-		
+
 		RuntimeResourceDefinition sourceDef = myContext.getResourceDefinition(theSource);
 		if (theSource.getIdElement().hasIdPart()) {
-			if (wantRef.equals(sourceDef.getName() + '/' + theSource.getIdElement().getIdPart())) {
+			if (wantRef.equals(
+					sourceDef.getName() + '/' + theSource.getIdElement().getIdPart())) {
 				return true;
 			}
 		}
-		
-		List<RuntimeSearchParam> params = sourceDef.getSearchParamsForCompartmentName(theCompartmentName);
-		for (RuntimeSearchParam nextParam : params) {
-			for (String nextPath : nextParam.getPathsSplit()) {
-				for (IBaseReference nextValue : getValues(theSource, nextPath, IBaseReference.class)) {
-					String nextRef = nextValue.getReferenceElement().toUnqualifiedVersionless().getValue();
-					if (wantRef.equals(nextRef)) {
-						return true;
-					}
+
+		class CompartmentOwnerVisitor implements ICompartmentOwnerVisitor {
+
+			private final String myWantRef;
+
+			public boolean isFound() {
+				return myFound;
+			}
+
+			private boolean myFound;
+
+			public CompartmentOwnerVisitor(String theWantRef) {
+				myWantRef = theWantRef;
+			}
+
+			@Override
+			public boolean consume(IIdType theCompartmentOwner) {
+				if (myWantRef.equals(
+						theCompartmentOwner.toUnqualifiedVersionless().getValue())) {
+					myFound = true;
 				}
+				return !myFound;
 			}
 		}
-		
-		return false;
+
+		CompartmentOwnerVisitor consumer = new CompartmentOwnerVisitor(wantRef);
+		visitCompartmentOwnersForResource(theCompartmentName, theSource, theModifications, consumer);
+		return consumer.isFound();
 	}
 
-	private void visit(IBase theElement, BaseRuntimeChildDefinition theChildDefinition, BaseRuntimeElementDefinition<?> theDefinition, IModelVisitor2 theCallback, List<IBase> theContainingElementPath,
-			List<BaseRuntimeChildDefinition> theChildDefinitionPath, List<BaseRuntimeElementDefinition<?>> theElementDefinitionPath) {
+	public List<IIdType> getCompartmentOwnersForResource(
+			String theCompartmentName,
+			IBaseResource theSource,
+			@Nullable Set<String> theAdditionalCompartmentParamNames) {
+		return getCompartmentOwnersForResource(
+				theCompartmentName,
+				theSource,
+				CompartmentSearchParameterModifications.fromAdditionalCompartmentParamNames(
+						myContext.getResourceType(theCompartmentName),
+						theAdditionalCompartmentParamNames == null ? Set.of() : theAdditionalCompartmentParamNames));
+	}
+
+	/**
+	 * Returns the owners of the compartment in <code>theSource</code> is in the compartment named <code>theCompartmentName</code>.
+	 *
+	 * @param theCompartmentName                 The name of the compartment
+	 * @param theSource                          The potential member of the compartment
+	 * @param theModifications If provided, defines compartment modifications to be considered
+	 */
+	@Nonnull
+	public List<IIdType> getCompartmentOwnersForResource(
+			String theCompartmentName,
+			IBaseResource theSource,
+			CompartmentSearchParameterModifications theModifications) {
+		Validate.notBlank(theCompartmentName, "theCompartmentName must not be null or blank");
+		Validate.notNull(theSource, "theSource must not be null");
+
+		class CompartmentOwnerVisitor implements ICompartmentOwnerVisitor {
+
+			private final Set<String> myOwnersAdded = new HashSet<>();
+			private final List<IIdType> myOwners = new ArrayList<>(2);
+
+			public List<IIdType> getOwners() {
+				return myOwners;
+			}
+
+			@Override
+			public boolean consume(IIdType theCompartmentOwner) {
+				if (myOwnersAdded.add(theCompartmentOwner.getValue())) {
+					myOwners.add(theCompartmentOwner);
+				}
+				return true;
+			}
+		}
+
+		CompartmentOwnerVisitor consumer = new CompartmentOwnerVisitor();
+		visitCompartmentOwnersForResource(theCompartmentName, theSource, theModifications, consumer);
+		return consumer.getOwners();
+	}
+
+	public Stream<IBaseReference> getCompartmentReferencesForResource(
+			String theCompartmentName,
+			IBaseResource theSource,
+			@Nullable Set<String> theAdditionalCompartmentParamNames) {
+		return getCompartmentReferencesForResource(
+				theCompartmentName,
+				theSource,
+				CompartmentSearchParameterModifications.fromAdditionalCompartmentParamNames(
+						myContext.getResourceType(theCompartmentName),
+						theAdditionalCompartmentParamNames == null ? Set.of() : theAdditionalCompartmentParamNames));
+	}
+
+	@Nonnull
+	public Stream<IBaseReference> getCompartmentReferencesForResource(
+			String theCompartmentName,
+			IBaseResource theSource,
+			@Nullable CompartmentSearchParameterModifications theModifications) {
+		Validate.notBlank(theCompartmentName, "theCompartmentName must not be null or blank");
+		Validate.notNull(theSource, "theSource must not be null");
+		Set<String> additionalSPNames;
+		Set<String> omittedSPNames;
+		if (theModifications != null) {
+			String resourceType = myContext.getResourceType(theSource);
+			additionalSPNames = theModifications.getAdditionalSearchParamNamesForResourceType(resourceType);
+			omittedSPNames = theModifications.getOmittedSPNamesForResourceType(resourceType);
+		} else {
+			additionalSPNames = Set.of();
+			omittedSPNames = Set.of();
+		}
+
+		RuntimeResourceDefinition sourceDef = myContext.getResourceDefinition(theSource);
+		List<RuntimeSearchParam> params = sourceDef.getSearchParamsForCompartmentName(theCompartmentName).stream()
+				.filter(p -> !omittedSPNames.contains(p.getName()))
+				.collect(Collectors.toList());
+
+		additionalSPNames.stream()
+				.map(sourceDef::getSearchParam)
+				.filter(Objects::nonNull)
+				.forEach(params::add);
+
+		return params.stream()
+				.flatMap(nextParam -> nextParam.getPathsSplit().stream())
+				.filter(StringUtils::isNotBlank)
+				.flatMap(nextPath -> {
+
+					/*
+					 * DSTU3 and before just defined compartments as being (e.g.) named
+					 * Patient with a path like CarePlan.subject
+					 *
+					 * R4 uses a fancier format like CarePlan.subject.where(resolve() is Patient)
+					 *
+					 * The following Regex is a hack to make that efficient at runtime.
+					 */
+					String wantType;
+					Matcher matcher = COMPARTMENT_MATCHER_PATH.matcher(nextPath);
+					if (matcher.matches()) {
+						nextPath = matcher.group(1);
+						wantType = matcher.group(2);
+					} else {
+						wantType = null;
+					}
+
+					return getValues(theSource, nextPath, IBaseReference.class).stream()
+							.filter(nextValue -> isEmpty(wantType) || wantType.equals(getTypeFromReference(nextValue)));
+				});
+	}
+
+	private String getTypeFromReference(IBaseReference theReference) {
+
+		IIdType nextTargetId = theReference.getReferenceElement().toUnqualifiedVersionless();
+
+		if (isNotBlank(nextTargetId.getResourceType())) {
+			return nextTargetId.getResourceType();
+		} else if (theReference.getResource() != null) {
+			/*
+			 * If the reference isn't an explicit resource ID, but instead is just
+			 * a resource object, we'll use that type.
+			 */
+			return myContext.getResourceType(theReference.getResource());
+		} else {
+			return "No type on reference";
+		}
+	}
+
+	private void visitCompartmentOwnersForResource(
+			String theCompartmentName,
+			IBaseResource theSource,
+			CompartmentSearchParameterModifications theCompartmentModifications,
+			ICompartmentOwnerVisitor theConsumer) {
+
+		getCompartmentReferencesForResource(theCompartmentName, theSource, theCompartmentModifications)
+				.flatMap(nextValue -> {
+					IIdType nextTargetId = nextValue.getReferenceElement().toUnqualifiedVersionless();
+
+					/*
+					 * If the reference isn't an explicit resource ID, but instead is just
+					 * a resource object, we'll calculate its ID and treat the target
+					 * as that.
+					 */
+					if (isBlank(nextTargetId.getValue()) && nextValue.getResource() != null) {
+						IBaseResource nextTarget = nextValue.getResource();
+						nextTargetId = nextTarget.getIdElement().toUnqualifiedVersionless();
+						if (!nextTargetId.hasResourceType()) {
+							String resourceType = myContext.getResourceType(nextTarget);
+							nextTargetId.setParts(null, resourceType, nextTargetId.getIdPart(), null);
+						}
+					}
+					if (isNotBlank(nextTargetId.getValue())) {
+						return Stream.of(nextTargetId);
+					} else {
+						return Stream.empty();
+					}
+				})
+				.takeWhile(theConsumer::consume)
+				.forEach(nop());
+	}
+
+	private void visit(
+			IBase theElement,
+			BaseRuntimeChildDefinition theChildDefinition,
+			BaseRuntimeElementDefinition<?> theDefinition,
+			IModelVisitor2 theCallback,
+			List<IBase> theContainingElementPath,
+			List<BaseRuntimeChildDefinition> theChildDefinitionPath,
+			List<BaseRuntimeElementDefinition<?>> theElementDefinitionPath) {
 		if (theChildDefinition != null) {
 			theChildDefinitionPath.add(theChildDefinition);
 		}
 		theContainingElementPath.add(theElement);
 		theElementDefinitionPath.add(theDefinition);
 
-		theCallback.acceptElement(theElement, Collections.unmodifiableList(theContainingElementPath), Collections.unmodifiableList(theChildDefinitionPath),
+		boolean recurse = theCallback.acceptElement(
+				theElement,
+				Collections.unmodifiableList(theContainingElementPath),
+				Collections.unmodifiableList(theChildDefinitionPath),
 				Collections.unmodifiableList(theElementDefinitionPath));
+		if (recurse) {
 
-		/*
-		 * Visit undeclared extensions
-		 */
-		if (theElement instanceof ISupportsUndeclaredExtensions) {
-			ISupportsUndeclaredExtensions containingElement = (ISupportsUndeclaredExtensions) theElement;
-			for (ExtensionDt nextExt : containingElement.getUndeclaredExtensions()) {
-				theContainingElementPath.add(nextExt);
-				theCallback.acceptUndeclaredExtension(nextExt, theContainingElementPath, theChildDefinitionPath, theElementDefinitionPath);
-				theContainingElementPath.remove(theContainingElementPath.size() - 1);
-			}
-		}
-
-		/*
-		 * Now visit the children of the given element
-		 */
-		switch (theDefinition.getChildType()) {
-		case ID_DATATYPE:
-		case PRIMITIVE_XHTML_HL7ORG:
-		case PRIMITIVE_XHTML:
-		case PRIMITIVE_DATATYPE:
-			// These are primitive types, so we don't need to visit their children
-			break;
-		case RESOURCE:
-		case RESOURCE_BLOCK:
-		case COMPOSITE_DATATYPE: {
-			BaseRuntimeElementCompositeDefinition<?> childDef = (BaseRuntimeElementCompositeDefinition<?>) theDefinition;
-			for (BaseRuntimeChildDefinition nextChild : childDef.getChildrenAndExtension()) {
-				List<? extends IBase> values = nextChild.getAccessor().getValues(theElement);
-				if (values != null) {
-					for (IBase nextValue : values) {
-						if (nextValue == null) {
-							continue;
-						}
-						if (nextValue.isEmpty()) {
-							continue;
-						}
-						BaseRuntimeElementDefinition<?> childElementDef;
-						childElementDef = nextChild.getChildElementDefinitionByDatatype(nextValue.getClass());
-
-						if (childElementDef == null) {
-							StringBuilder b = new StringBuilder();
-							b.append("Found value of type[");
-							b.append(nextValue.getClass().getSimpleName());
-							b.append("] which is not valid for field[");
-							b.append(nextChild.getElementName());
-							b.append("] in ");
-							b.append(childDef.getName());
-							b.append(" - Valid types: ");
-							for (Iterator<String> iter = new TreeSet<String>(nextChild.getValidChildNames()).iterator(); iter.hasNext();) {
-								BaseRuntimeElementDefinition<?> childByName = nextChild.getChildByName(iter.next());
-								b.append(childByName.getImplementingClass().getSimpleName());
-								if (iter.hasNext()) {
-									b.append(", ");
-								}
-							}
-							throw new DataFormatException(b.toString());
-						}
-
-						if (nextChild instanceof RuntimeChildDirectResource) {
-							// Don't descend into embedded resources
-							theContainingElementPath.add(nextValue);
-							theChildDefinitionPath.add(nextChild);
-							theElementDefinitionPath.add(myContext.getElementDefinition(nextValue.getClass()));
-							theCallback.acceptElement(nextValue, Collections.unmodifiableList(theContainingElementPath), Collections.unmodifiableList(theChildDefinitionPath),
-									Collections.unmodifiableList(theElementDefinitionPath));
-							theChildDefinitionPath.remove(theChildDefinitionPath.size() - 1);
-							theContainingElementPath.remove(theContainingElementPath.size() - 1);
-							theElementDefinitionPath.remove(theElementDefinitionPath.size() - 1);
-						} else {
-							visit(nextValue, nextChild, childElementDef, theCallback, theContainingElementPath, theChildDefinitionPath, theElementDefinitionPath);
-						}
-					}
+			/*
+			 * Visit undeclared extensions (DSTU2 only)
+			 */
+			if (theElement instanceof ISupportsUndeclaredExtensions) {
+				ISupportsUndeclaredExtensions containingElement = (ISupportsUndeclaredExtensions) theElement;
+				for (ExtensionDt nextExt : containingElement.getUndeclaredExtensions()) {
+					theContainingElementPath.add(nextExt);
+					theCallback.acceptUndeclaredExtension(
+							nextExt, theContainingElementPath, theChildDefinitionPath, theElementDefinitionPath);
+					theContainingElementPath.remove(theContainingElementPath.size() - 1);
 				}
 			}
-			break;
-		}
-		case CONTAINED_RESOURCES: {
-			BaseContainedDt value = (BaseContainedDt) theElement;
-			for (IResource next : value.getContainedResources()) {
-				BaseRuntimeElementCompositeDefinition<?> def = myContext.getResourceDefinition(next);
-				visit(next, null, def, theCallback, theContainingElementPath, theChildDefinitionPath, theElementDefinitionPath);
+
+			/*
+			 * Now visit the children of the given element
+			 */
+			switch (theDefinition.getChildType()) {
+				case ID_DATATYPE:
+				case PRIMITIVE_XHTML_HL7ORG:
+				case PRIMITIVE_XHTML:
+				case PRIMITIVE_DATATYPE:
+				case RESOURCE:
+				case RESOURCE_BLOCK:
+				case COMPOSITE_DATATYPE: {
+					List<BaseRuntimeChildDefinition> children;
+					if (theDefinition instanceof BaseRuntimeElementCompositeDefinition<?> compositeDef) {
+						children = compositeDef.getChildrenAndExtension();
+					} else {
+						children = theDefinition.getChildren();
+					}
+					for (BaseRuntimeChildDefinition nextChild : children) {
+						List<? extends IBase> values = nextChild.getAccessor().getValues(theElement);
+						if (values != null) {
+							for (IBase nextValue : values) {
+								if (nextValue == null) {
+									continue;
+								}
+								if (nextValue.isEmpty()) {
+									continue;
+								}
+								BaseRuntimeElementDefinition<?> childElementDef;
+								Class<? extends IBase> valueType = nextValue.getClass();
+								childElementDef = nextChild.getChildElementDefinitionByDatatype(valueType);
+								while (childElementDef == null && IBase.class.isAssignableFrom(valueType)) {
+									childElementDef = nextChild.getChildElementDefinitionByDatatype(valueType);
+									valueType = (Class<? extends IBase>) valueType.getSuperclass();
+								}
+
+								Class<? extends IBase> typeClass = nextValue.getClass();
+								while (childElementDef == null && IBase.class.isAssignableFrom(typeClass)) {
+									//noinspection unchecked
+									typeClass = (Class<? extends IBase>) typeClass.getSuperclass();
+									childElementDef = nextChild.getChildElementDefinitionByDatatype(typeClass);
+								}
+
+								Validate.notNull(
+										childElementDef,
+										"Found value of type[%s] which is not valid for field[%s] in %s",
+										nextValue.getClass(),
+										nextChild.getElementName(),
+										theDefinition.getName());
+
+								visit(
+										nextValue,
+										nextChild,
+										childElementDef,
+										theCallback,
+										theContainingElementPath,
+										theChildDefinitionPath,
+										theElementDefinitionPath);
+							}
+						}
+					}
+					break;
+				}
+				case CONTAINED_RESOURCES: {
+					BaseContainedDt value = (BaseContainedDt) theElement;
+					for (IResource next : value.getContainedResources()) {
+						BaseRuntimeElementCompositeDefinition<?> def = myContext.getResourceDefinition(next);
+						visit(
+								next,
+								null,
+								def,
+								theCallback,
+								theContainingElementPath,
+								theChildDefinitionPath,
+								theElementDefinitionPath);
+					}
+					break;
+				}
+				case EXTENSION_DECLARED:
+				case UNDECL_EXT: {
+					throw new IllegalStateException(
+							Msg.code(1793) + "state should not happen: " + theDefinition.getChildType());
+				}
+				case CONTAINED_RESOURCE_LIST: {
+					if (theElement != null) {
+						BaseRuntimeElementDefinition<?> def = myContext.getElementDefinition(theElement.getClass());
+						visit(
+								theElement,
+								null,
+								def,
+								theCallback,
+								theContainingElementPath,
+								theChildDefinitionPath,
+								theElementDefinitionPath);
+					}
+					break;
+				}
 			}
-			break;
-		}
-		case EXTENSION_DECLARED:
-		case UNDECL_EXT: {
-			throw new IllegalStateException("state should not happen: " + theDefinition.getChildType());
-		}
-		case CONTAINED_RESOURCE_LIST: {
-			if (theElement != null) {
-				BaseRuntimeElementDefinition<?> def = myContext.getElementDefinition(theElement.getClass());
-				visit(theElement, null, def, theCallback, theContainingElementPath, theChildDefinitionPath, theElementDefinitionPath);
-			}
-			break;
-		}
 		}
 
 		if (theChildDefinition != null) {
@@ -437,131 +1268,794 @@ public class FhirTerser {
 
 	/**
 	 * Visit all elements in a given resource
-	 * 
+	 *
 	 * <p>
 	 * Note on scope: This method will descend into any contained resources ({@link IResource#getContained()}) as well, but will not descend into linked resources (e.g.
 	 * {@link BaseResourceReferenceDt#getResource()}) or embedded resources (e.g. Bundle.entry.resource)
 	 * </p>
-	 * 
-	 * @param theResource
-	 *           The resource to visit
-	 * @param theVisitor
-	 *           The visitor
+	 *
+	 * @param theResource The resource to visit
+	 * @param theVisitor  The visitor
 	 */
 	public void visit(IBaseResource theResource, IModelVisitor theVisitor) {
 		BaseRuntimeElementCompositeDefinition<?> def = myContext.getResourceDefinition(theResource);
-		visit(new IdentityHashMap<Object, Object>(), theResource, theResource, null, null, def, theVisitor);
+		visit(newMap(), theResource, theResource, null, null, def, theVisitor);
+	}
+
+	public Map<Object, Object> newMap() {
+		return new IdentityHashMap<>();
 	}
 
 	/**
-	 * Visit all elements in a given resource
-	 * 
-	 * THIS ALTERNATE METHOD IS STILL EXPERIMENTAL
-	 * 
+	 * Visit all elements in a given resource or element
+	 * <p>
+	 * <b>THIS ALTERNATE METHOD IS STILL EXPERIMENTAL! USE WITH CAUTION</b>
+	 * </p>
 	 * <p>
 	 * Note on scope: This method will descend into any contained resources ({@link IResource#getContained()}) as well, but will not descend into linked resources (e.g.
 	 * {@link BaseResourceReferenceDt#getResource()}) or embedded resources (e.g. Bundle.entry.resource)
 	 * </p>
-	 * 
-	 * @param theResource
-	 *           The resource to visit
-	 * @param theVisitor
-	 *           The visitor
+	 *
+	 * @param theElement The element to visit
+	 * @param theVisitor The visitor
 	 */
-	void visit(IBaseResource theResource, IModelVisitor2 theVisitor) {
-		BaseRuntimeElementCompositeDefinition<?> def = myContext.getResourceDefinition(theResource);
-		visit(theResource, null, def, theVisitor, new ArrayList<IBase>(), new ArrayList<BaseRuntimeChildDefinition>(), new ArrayList<BaseRuntimeElementDefinition<?>>());
+	@SuppressWarnings("removal")
+	public void visit(IBase theElement, IModelVisitor2 theVisitor) {
+		if (theElement instanceof IBaseExtension) {
+			// Only provided for legacy support
+			theVisitor.acceptUndeclaredExtension(
+					(IBaseExtension<?, ?>) theElement,
+					Collections.emptyList(),
+					Collections.emptyList(),
+					Collections.emptyList());
+		}
+
+		BaseRuntimeElementDefinition<?> def = myContext.getElementDefinition(theElement.getClass());
+
+		// The following method calls itself recursively to descend through and visit each child element
+		// so we call it here with empty lists that get added-to and removed-from as we walk into and out
+		// of the tree
+		visit(theElement, null, def, theVisitor, new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
 	}
 
-	private void visit(IdentityHashMap<Object, Object> theStack, IBaseResource theResource, IBase theElement, List<String> thePathToElement, BaseRuntimeChildDefinition theChildDefinition,
-			BaseRuntimeElementDefinition<?> theDefinition, IModelVisitor theCallback) {
+	private void visit(
+			Map<Object, Object> theStack,
+			IBaseResource theResource,
+			IBase theElement,
+			List<String> thePathToElement,
+			BaseRuntimeChildDefinition theChildDefinition,
+			BaseRuntimeElementDefinition<?> theDefinition,
+			IModelVisitor theCallback) {
 		List<String> pathToElement = addNameToList(thePathToElement, theChildDefinition);
 
 		if (theStack.put(theElement, theElement) != null) {
 			return;
 		}
-		
+
 		theCallback.acceptElement(theResource, theElement, pathToElement, theChildDefinition, theDefinition);
 
 		BaseRuntimeElementDefinition<?> def = theDefinition;
 		if (def.getChildType() == ChildTypeEnum.CONTAINED_RESOURCE_LIST) {
-			def = myContext.getElementDefinition(theElement.getClass());
+			Class<? extends IBase> clazz = theElement.getClass();
+			def = myContext.getElementDefinition(clazz);
+			Validate.notNull(def, "Unable to find element definition for class: %s", clazz);
 		}
-		
+
 		if (theElement instanceof IBaseReference) {
-			IBaseResource target = ((IBaseReference)theElement).getResource();
+			IBaseResource target = ((IBaseReference) theElement).getResource();
 			if (target != null) {
-				if (target.getIdElement().hasIdPart() == false || target.getIdElement().isLocal()) {
+				if (target.getIdElement().hasIdPart() == false
+						|| target.getIdElement().isLocal()) {
 					RuntimeResourceDefinition targetDef = myContext.getResourceDefinition(target);
 					visit(theStack, target, target, pathToElement, null, targetDef, theCallback);
 				}
 			}
 		}
-		
+
 		switch (def.getChildType()) {
-		case ID_DATATYPE:
-		case PRIMITIVE_XHTML_HL7ORG:
-		case PRIMITIVE_XHTML:
-		case PRIMITIVE_DATATYPE:
-			// These are primitive types
-			break;
-		case RESOURCE:
-		case RESOURCE_BLOCK:
-		case COMPOSITE_DATATYPE: {
-			BaseRuntimeElementCompositeDefinition<?> childDef = (BaseRuntimeElementCompositeDefinition<?>) def;
-			for (BaseRuntimeChildDefinition nextChild : childDef.getChildrenAndExtension()) {
-				
-				List<?> values = nextChild.getAccessor().getValues(theElement);
-				if (values != null) {
-					for (Object nextValueObject : values) {
-						IBase nextValue;
-						try {
-							nextValue = (IBase) nextValueObject;
-						} catch (ClassCastException e) {
-							String s = "Found instance of " + nextValueObject.getClass() + " - Did you set a field value to the incorrect type? Expected " + IBase.class.getName();
-							throw new ClassCastException(s);
+			case ID_DATATYPE:
+			case PRIMITIVE_XHTML_HL7ORG:
+			case PRIMITIVE_XHTML:
+			case PRIMITIVE_DATATYPE:
+				// These are primitive types
+				break;
+			case RESOURCE:
+			case RESOURCE_BLOCK:
+			case COMPOSITE_DATATYPE: {
+				BaseRuntimeElementCompositeDefinition<?> childDef = (BaseRuntimeElementCompositeDefinition<?>) def;
+				List<BaseRuntimeChildDefinition> childrenAndExtensionDefs = childDef.getChildrenAndExtension();
+				for (BaseRuntimeChildDefinition nextChild : childrenAndExtensionDefs) {
+
+					List<?> values = nextChild.getAccessor().getValues(theElement);
+
+					if (values != null) {
+						for (Object nextValueObject : values) {
+							IBase nextValue;
+							try {
+								nextValue = (IBase) nextValueObject;
+							} catch (ClassCastException e) {
+								String s = "Found instance of " + nextValueObject.getClass()
+										+ " - Did you set a field value to the incorrect type? Expected "
+										+ IBase.class.getName();
+								throw new ClassCastException(Msg.code(1794) + s);
+							}
+							if (nextValue == null) {
+								continue;
+							}
+							if (nextValue.isEmpty()) {
+								continue;
+							}
+							BaseRuntimeElementDefinition<?> childElementDef;
+							Class<? extends IBase> clazz = nextValue.getClass();
+							childElementDef = nextChild.getChildElementDefinitionByDatatype(clazz);
+
+							if (childElementDef == null) {
+								childElementDef = myContext.getElementDefinition(clazz);
+								Validate.notNull(
+										childElementDef, "Unable to find element definition for class: %s", clazz);
+							}
+
+							if (nextChild instanceof RuntimeChildDirectResource) {
+								// Don't descend into embedded resources
+								theCallback.acceptElement(theResource, nextValue, null, nextChild, childElementDef);
+							} else {
+								visit(
+										theStack,
+										theResource,
+										nextValue,
+										pathToElement,
+										nextChild,
+										childElementDef,
+										theCallback);
+							}
 						}
-						if (nextValue == null) {
+					}
+				}
+				break;
+			}
+			case CONTAINED_RESOURCES: {
+				BaseContainedDt value = (BaseContainedDt) theElement;
+				for (IResource next : value.getContainedResources()) {
+					def = myContext.getResourceDefinition(next);
+					visit(theStack, next, next, pathToElement, null, def, theCallback);
+				}
+				break;
+			}
+			case CONTAINED_RESOURCE_LIST:
+			case EXTENSION_DECLARED:
+			case UNDECL_EXT: {
+				throw new IllegalStateException(Msg.code(1795) + "state should not happen: " + def.getChildType());
+			}
+		}
+
+		theStack.remove(theElement);
+	}
+
+	/**
+	 * Returns all embedded resources that are found embedded within <code>theResource</code>.
+	 * An embedded resource is a resource that can be found as a direct child within a resource,
+	 * as opposed to being referenced by the resource.
+	 * <p>
+	 * Examples include resources found within <code>Bundle.entry.resource</code>
+	 * and <code>Parameters.parameter.resource</code>, as well as contained resources
+	 * found within <code>Resource.contained</code>
+	 * </p>
+	 *
+	 * @param theRecurse Should embedded resources be recursively scanned for further embedded
+	 *                   resources
+	 * @return A collection containing the embedded resources. Order is arbitrary.
+	 */
+	public Collection<IBaseResource> getAllEmbeddedResources(IBaseResource theResource, boolean theRecurse) {
+		Validate.notNull(theResource, "theResource must not be null");
+		ArrayList<IBaseResource> retVal = new ArrayList<>();
+
+		visit(theResource, new IModelVisitor2() {
+			@Override
+			public boolean acceptElement(
+					IBase theElement,
+					List<IBase> theContainingElementPath,
+					List<BaseRuntimeChildDefinition> theChildDefinitionPath,
+					List<BaseRuntimeElementDefinition<?>> theElementDefinitionPath) {
+				if (theElement == theResource) {
+					return true;
+				}
+				if (theElement instanceof IBaseResource) {
+					retVal.add((IBaseResource) theElement);
+					return theRecurse;
+				}
+				if (theElement instanceof IPrimitiveType<?>) {
+					// Primitive elements can't contain embedded resources
+					return false;
+				}
+				return true;
+			}
+		});
+
+		return retVal;
+	}
+
+	/**
+	 * Clear all content on an element
+	 *
+	 * @return Returns <code>true</code> if any content was actually cleared
+	 * @since 8.6.0
+	 */
+	public boolean clear(IBase theInput) {
+		ClearingModelVisitor visitor = new ClearingModelVisitor();
+		visit(theInput, visitor);
+		return visitor.myFoundContent;
+	}
+
+	/**
+	 * Clear all content on a resource.
+	 *
+	 * @return Returns <code>true</code> if any content was actually cleared
+	 * @see #clear(IBase) This method is a synonym for {@link #clear(IBase)}, provided for historical reasons.
+	 */
+	public boolean clear(IBaseResource theInput) {
+		ClearingModelVisitor visitor = new ClearingModelVisitor();
+		visit(theInput, visitor);
+		return visitor.myFoundContent;
+	}
+
+	private void containResourcesForEncoding(ContainedResources theContained, IBaseResource theResource) {
+		List<IBaseReference> allReferences = getAllPopulatedChildElementsOfType(theResource, IBaseReference.class);
+
+		// Note that we process all contained resources that have arrived here with an ID contained resources first, so
+		// that we don't accidentally auto-assign an ID
+		// which may collide with a resource we have yet to process.
+		// See: https://github.com/hapifhir/hapi-fhir/issues/6403
+		allReferences.sort(REFERENCES_WITH_IDS_FIRST);
+
+		for (IBaseReference next : allReferences) {
+			IBaseResource resource = next.getResource();
+			if (resource == null && next.getReferenceElement().isLocal()) {
+				if (theContained.hasExistingIdToContainedResource()) {
+					IBaseResource potentialTarget = theContained
+							.getExistingIdToContainedResource()
+							.remove(next.getReferenceElement().getValue());
+					if (potentialTarget != null) {
+						theContained.addContained(next.getReferenceElement(), potentialTarget);
+						containResourcesForEncoding(theContained, potentialTarget);
+					}
+				}
+			}
+		}
+
+		// Only attempt to contain resources if the parent resource supports containment.
+		// Resources like Parameters, Bundle, and Binary extend Resource directly (not DomainResource)
+		// and have no "contained" field, so containment would fail with UnsupportedOperationException.
+		boolean canContain = (theResource instanceof IResource || theResource instanceof IDomainResource);
+		if (!canContain) {
+			for (IBaseReference next : allReferences) {
+				if (next.getResource() != null) {
+					ourLog.warn(
+							"Resource type {} does not support containment. "
+									+ "Inline resource on reference will not be serialized. "
+									+ "Use Reference.setReference() instead of Reference.setResource() "
+									+ "for non-DomainResource types.",
+							theResource.fhirType());
+					break;
+				}
+			}
+		}
+		if (canContain) {
+			for (IBaseReference next : allReferences) {
+				IBaseResource resource = next.getResource();
+				if (resource != null) {
+					if (resource.getIdElement().isEmpty()
+							|| resource.getIdElement().isLocal()) {
+
+						IIdType id = theContained.addContained(resource);
+						if (id == null) {
 							continue;
 						}
-						if (nextValue.isEmpty()) {
-							continue;
-						}
-						BaseRuntimeElementDefinition<?> childElementDef;
-						childElementDef = nextChild.getChildElementDefinitionByDatatype(nextValue.getClass());
+						getContainedResourceList(theResource).add(resource);
 
-						if (childElementDef == null) {
-							childElementDef = myContext.getElementDefinition(nextValue.getClass());
+						String idString = id.getValue();
+						if (!idString.startsWith("#")) {
+							idString = "#" + idString;
 						}
 
-						if (nextChild instanceof RuntimeChildDirectResource) {
-							// Don't descend into embedded resources
-							theCallback.acceptElement(theResource, nextValue, null, nextChild, childElementDef);
-						} else {
-							visit(theStack, theResource, nextValue, pathToElement, nextChild, childElementDef, theCallback);
+						next.setReference(idString);
+						next.setResource(null);
+						if (resource.getIdElement().isLocal() && theContained.hasExistingIdToContainedResource()) {
+							theContained
+									.getExistingIdToContainedResource()
+									.remove(resource.getIdElement().getValue());
+						}
+					} else {
+						IIdType previouslyContainedResourceId = theContained.getPreviouslyContainedResourceId(resource);
+						if (previouslyContainedResourceId != null) {
+							if (theContained.getResourceId(resource) == null) {
+								theContained.addContained(previouslyContainedResourceId, resource);
+								getContainedResourceList(theResource).add(resource);
+							}
 						}
 					}
 				}
 			}
-			break;
 		}
-		case CONTAINED_RESOURCES: {
-			BaseContainedDt value = (BaseContainedDt) theElement;
-			for (IResource next : value.getContainedResources()) {
-				def = myContext.getResourceDefinition(next);
-				visit(theStack, next, next, pathToElement, null, def, theCallback);
-			}
-			break;
-		}
-		case CONTAINED_RESOURCE_LIST:
-		case EXTENSION_DECLARED:
-		case UNDECL_EXT: {
-			throw new IllegalStateException("state should not happen: " + def.getChildType());
-		}
-		}
-		
-		theStack.remove(theElement);
-		
 	}
 
+	/**
+	 * Iterate through the whole resource and identify any contained resources. Optionally this method
+	 * can also assign IDs and modify references where the resource link has been specified but not the
+	 * reference text.
+	 *
+	 * @since 5.4.0
+	 */
+	public ContainedResources containResources(
+			IBaseResource theResource, ContainedResources theParentContainedResources, boolean theStoreResults) {
+
+		if (theStoreResults) {
+			Object cachedValue = theResource.getUserData(USER_DATA_KEY_CONTAIN_RESOURCES_COMPLETED);
+			if (cachedValue != null) {
+				return (ContainedResources) cachedValue;
+			}
+		}
+
+		ContainedResources contained = new ContainedResources();
+
+		List<? extends IBaseResource> containedResources = getContainedResourceList(theResource);
+		for (IBaseResource next : containedResources) {
+			String nextId = next.getIdElement().getValue();
+			if (StringUtils.isNotBlank(nextId)) {
+				while (nextId.startsWith("#")) {
+					ourLog.warn(
+							"Found contained resource with ID starting with # character ({}). This form of ID is deprecated and will be dropped in a future release, preventing the current code from working correctly.",
+							nextId);
+					nextId = nextId.substring(1);
+				}
+				next.getIdElement().setValue(nextId);
+			}
+			contained.addContained(next);
+		}
+
+		if (myContext.getParserOptions().isAutoContainReferenceTargetsWithNoId()) {
+			if (theParentContainedResources != null) {
+				if (theParentContainedResources.hasResourceToIdValues()) {
+					contained
+							.getPreviouslyContainedResourceToIdMap()
+							.putAll(theParentContainedResources.getResourceToIdMap());
+				}
+				if (theParentContainedResources.hasPreviouslyContainedResourceToIdValues()) {
+					contained
+							.getPreviouslyContainedResourceToIdMap()
+							.putAll(theParentContainedResources.getPreviouslyContainedResourceToIdMap());
+				}
+			}
+
+			containResourcesForEncoding(contained, theResource);
+		}
+
+		if (theStoreResults) {
+			theResource.setUserData(USER_DATA_KEY_CONTAIN_RESOURCES_COMPLETED, contained);
+		}
+
+		return contained;
+	}
+
+	@SuppressWarnings("unchecked")
+	private <T extends IBaseResource> List<T> getContainedResourceList(T theResource) {
+		List<T> containedResources = Collections.emptyList();
+		if (theResource instanceof IResource) {
+			containedResources =
+					(List<T>) ((IResource) theResource).getContained().getContainedResources();
+		} else if (theResource instanceof IDomainResource) {
+			containedResources = (List<T>) ((IDomainResource) theResource).getContained();
+		}
+		return containedResources;
+	}
+
+	/**
+	 * Adds and returns a new element at the given path within the given structure. The paths used here
+	 * are <b>not FHIRPath expressions</b> but instead just simple dot-separated path expressions.
+	 * <p>
+	 * Only the last entry in the path is always created, existing repetitions of elements before
+	 * the final dot are returned if they exists (although they are created if they do not). For example,
+	 * given the path <code>Patient.name.given</code>, a new repetition of <code>given</code> is always
+	 * added to the first (index 0) repetition of the name. If an index-0 repetition of <code>name</code>
+	 * already exists, it is added to. If one does not exist, it if created and then added to.
+	 * </p>
+	 * <p>
+	 * If the last element in the path refers to a non-repeatable element that is already present and
+	 * is not empty, a {@link DataFormatException} error will be thrown.
+	 * </p>
+	 *
+	 * @param theTarget The element to add to. This will often be a {@link IBaseResource resource}
+	 *                  instance, but does not need to be.
+	 * @param thePath   The path.
+	 * @return The newly added element
+	 * @throws DataFormatException If the path is invalid or does not end with either a repeatable element, or
+	 *                             an element that is non-repeatable but not already populated.
+	 */
+	@SuppressWarnings("unchecked")
+	@Nonnull
+	public <T extends IBase> T addElement(@Nonnull IBase theTarget, @Nonnull String thePath) {
+		return (T) doAddElement(theTarget, thePath, 1).get(0);
+	}
+
+	@SuppressWarnings("unchecked")
+	private <T extends IBase> List<T> doAddElement(IBase theTarget, String thePath, int theElementsToAdd) {
+		if (theElementsToAdd == 0) {
+			return Collections.emptyList();
+		}
+
+		IBase target = theTarget;
+		BaseRuntimeElementCompositeDefinition<?> def =
+				(BaseRuntimeElementCompositeDefinition<?>) myContext.getElementDefinition(target.getClass());
+		List<String> parts = parsePath(def, thePath);
+
+		for (int i = 0, partsSize = parts.size(); ; i++) {
+			String nextPart = parts.get(i);
+			boolean lastPart = i == partsSize - 1;
+
+			BaseRuntimeChildDefinition nextChild = def.getChildByName(nextPart);
+			if (nextChild == null) {
+				throw new DataFormatException(Msg.code(1796) + "Invalid path " + thePath + ": Element of type "
+						+ def.getName() + " has no child named " + nextPart + ". Valid names: "
+						+ def.getChildrenAndExtension().stream()
+								.map(BaseRuntimeChildDefinition::getElementName)
+								.sorted()
+								.collect(Collectors.joining(", ")));
+			}
+
+			List<IBase> childValues = nextChild.getAccessor().getValues(target);
+			IBase childValue;
+			if (childValues.size() > 0 && !lastPart) {
+				childValue = childValues.get(0);
+			} else {
+
+				if (lastPart) {
+					if (!childValues.isEmpty()) {
+						if (theElementsToAdd == -1) {
+							return (List<T>) Collections.singletonList(childValues.get(0));
+						} else if (nextChild.getMax() == 1
+								&& !childValues.get(0).isEmpty()) {
+							throw new DataFormatException(
+									Msg.code(1797) + "Element at path " + thePath + " is not repeatable and not empty");
+						} else if (nextChild.getMax() == 1 && childValues.get(0).isEmpty()) {
+							return (List<T>) Collections.singletonList(childValues.get(0));
+						}
+					}
+				}
+
+				BaseRuntimeElementDefinition<?> elementDef = nextChild.getChildByName(nextPart);
+				childValue = elementDef.newInstance(nextChild.getInstanceConstructorArguments());
+				nextChild.getMutator().addValue(target, childValue);
+
+				if (lastPart) {
+					if (theElementsToAdd == 1 || theElementsToAdd == -1) {
+						return (List<T>) Collections.singletonList(childValue);
+					} else {
+						if (nextChild.getMax() == 1) {
+							throw new DataFormatException(Msg.code(1798) + "Can not add multiple values at path "
+									+ thePath + ": Element does not repeat");
+						}
+
+						List<T> values = (List<T>) Lists.newArrayList(childValue);
+						for (int j = 1; j < theElementsToAdd; j++) {
+							childValue = elementDef.newInstance(nextChild.getInstanceConstructorArguments());
+							nextChild.getMutator().addValue(target, childValue);
+							values.add((T) childValue);
+						}
+
+						return values;
+					}
+				}
+			}
+
+			target = childValue;
+
+			if (!lastPart) {
+				BaseRuntimeElementDefinition<?> nextDef = myContext.getElementDefinition(target.getClass());
+				if (!(nextDef instanceof BaseRuntimeElementCompositeDefinition)) {
+					throw new DataFormatException(Msg.code(1799) + "Invalid path " + thePath + ": Element of type "
+							+ def.getName() + " has no child named " + nextPart + " (this is a primitive type)");
+				}
+				def = (BaseRuntimeElementCompositeDefinition<?>) nextDef;
+			}
+		}
+	}
+
+	/**
+	 * Adds and returns a new element at the given path within the given structure. The paths used here
+	 * are <b>not FHIRPath expressions</b> but instead just simple dot-separated path expressions.
+	 * <p>
+	 * This method follows all of the same semantics as {@link #addElement(IBase, String)} but it
+	 * requires the path to point to an element with a primitive datatype and set the value of
+	 * the datatype to the given value.
+	 * </p>
+	 *
+	 * @param theTarget The element to add to. This will often be a {@link IBaseResource resource}
+	 *                  instance, but does not need to be.
+	 * @param thePath   The path.
+	 * @param theValue  The value to set, or <code>null</code>.
+	 * @return The newly added element
+	 * @throws DataFormatException If the path is invalid or does not end with either a repeatable element, or
+	 *                             an element that is non-repeatable but not already populated.
+	 */
+	@SuppressWarnings("unchecked")
+	@Nonnull
+	public <T extends IBase> T addElement(
+			@Nonnull IBase theTarget, @Nonnull String thePath, @Nullable String theValue) {
+		T value = (T) doAddElement(theTarget, thePath, 1).get(0);
+		if (!(value instanceof IPrimitiveType)) {
+			throw new DataFormatException(
+					Msg.code(1800) + "Element at path " + thePath + " is not a primitive datatype. Found: "
+							+ myContext.getElementDefinition(value.getClass()).getName());
+		}
+
+		((IPrimitiveType<?>) value).setValueAsString(theValue);
+
+		return value;
+	}
+
+	/**
+	 * Adds and returns a new element at the given path within the given structure. The paths used here
+	 * are <b>not FHIRPath expressions</b> but instead just simple dot-separated path expressions.
+	 * <p>
+	 * This method follows all of the same semantics as {@link #addElement(IBase, String)} but it
+	 * requires the path to point to an element with a primitive datatype and set the value of
+	 * the datatype to the given value.
+	 * </p>
+	 *
+	 * @param theTarget The element to add to. This will often be a {@link IBaseResource resource}
+	 *                  instance, but does not need to be.
+	 * @param thePath   The path.
+	 * @param theValue  The value to set, or <code>null</code>.
+	 * @return The newly added element
+	 * @throws DataFormatException If the path is invalid or does not end with either a repeatable element, or
+	 *                             an element that is non-repeatable but not already populated.
+	 */
+	@SuppressWarnings("unchecked")
+	@Nonnull
+	public <T extends IBase> T setElement(
+			@Nonnull IBase theTarget, @Nonnull String thePath, @Nullable String theValue) {
+		T value = (T) doAddElement(theTarget, thePath, -1).get(0);
+		if (!(value instanceof IPrimitiveType)) {
+			throw new DataFormatException(
+					Msg.code(1801) + "Element at path " + thePath + " is not a primitive datatype. Found: "
+							+ myContext.getElementDefinition(value.getClass()).getName());
+		}
+
+		((IPrimitiveType<?>) value).setValueAsString(theValue);
+
+		return value;
+	}
+
+	/**
+	 * This method has the same semantics as {@link #addElement(IBase, String, String)} but adds
+	 * a collection of primitives instead of a single one.
+	 *
+	 * @param theTarget The element to add to. This will often be a {@link IBaseResource resource}
+	 *                  instance, but does not need to be.
+	 * @param thePath   The path.
+	 * @param theValues The values to set, or <code>null</code>.
+	 */
+	public void addElements(IBase theTarget, String thePath, Collection<String> theValues) {
+		List<IBase> targets = doAddElement(theTarget, thePath, theValues.size());
+		Iterator<String> valuesIter = theValues.iterator();
+		for (IBase target : targets) {
+
+			if (!(target instanceof IPrimitiveType)) {
+				throw new DataFormatException(Msg.code(1802) + "Element at path " + thePath
+						+ " is not a primitive datatype. Found: "
+						+ myContext.getElementDefinition(target.getClass()).getName());
+			}
+
+			((IPrimitiveType<?>) target).setValueAsString(valuesIter.next());
+		}
+	}
+
+	/**
+	 * Checks if the field exists on the resource
+	 *
+	 * @param theFieldName   Name of the field to check
+	 * @param theResource    Resource instance to check
+	 * @return Returns true if resource definition has a child with the specified name and false otherwise
+	 */
+	public boolean fieldExists(String theFieldName, IBaseResource theResource) {
+		return myContext.getResourceDefinition(theResource).getChildByName(theFieldName) != null;
+	}
+
+	/**
+	 * Clones a resource object, copying all data elements from theSource into a new copy of the same type.
+	 * <p>
+	 * Note that:
+	 * <ul>
+	 *    <li>Only FHIR data elements are copied (i.e. user data maps are not copied)</li>
+	 *    <li>If a class extending a HAPI FHIR type (e.g. an instance of a class extending the Patient class) is supplied, an instance of the base type will be returned.</li>
+	 * </ul>
+	 *
+	 * @param theSource The source resource
+	 * @return A copy of the source resource
+	 * @since 5.6.0
+	 */
+	@SuppressWarnings("unchecked")
+	public <T extends IBaseResource> T clone(T theSource) {
+		Validate.notNull(theSource, "theSource must not be null");
+		T target = (T) myContext.getResourceDefinition(theSource).newInstance();
+		cloneInto(theSource, target, false);
+		return target;
+	}
+
+	@FunctionalInterface
+	private interface ICompartmentOwnerVisitor {
+
+		/**
+		 * @return Returns true if we should keep looking for more
+		 */
+		boolean consume(IIdType theCompartmentOwner);
+	}
+
+	public static class ContainedResources {
+		private List<IBaseResource> myResourceList;
+		private IdentityHashMap<IBaseResource, IIdType> myResourceToIdMap;
+		private IdentityHashMap<IBaseResource, IIdType> myPreviouslyContainedResourceToIdMap;
+		private Map<String, IBaseResource> myExistingIdToContainedResourceMap;
+
+		public ContainedResources() {
+			super();
+		}
+
+		public Map<String, IBaseResource> getExistingIdToContainedResource() {
+			if (myExistingIdToContainedResourceMap == null) {
+				myExistingIdToContainedResourceMap = new HashMap<>();
+			}
+			return myExistingIdToContainedResourceMap;
+		}
+
+		public boolean referenceMatchesAContainedResource(IIdType theRefId) {
+			assert theRefId.getValue().startsWith("#");
+
+			String expectedResourceId = theRefId.getValue().substring(1);
+			return this.getContainedResources().stream()
+					.anyMatch(res -> res.getIdElement().getIdPart().equals(expectedResourceId));
+		}
+
+		public IIdType addContained(IBaseResource theResource) {
+			if (this.getResourceId(theResource) != null) {
+				// Prevent infinite recursion if there are circular loops in the contained resources
+				return null;
+			}
+
+			IIdType existing = getResourceToIdMap().get(theResource);
+			if (existing != null) {
+				return existing;
+			}
+
+			IIdType newId = theResource.getIdElement();
+			if (isBlank(newId.getValue())) {
+				newId.setValue(UUID.randomUUID().toString());
+			} else if (newId.getValue().startsWith("#")) {
+				newId.setValue(newId.getValueAsString().substring(1));
+			}
+
+			getResourceToIdMap().put(theResource, newId);
+			getOrCreateResourceList().add(theResource);
+			return newId;
+		}
+
+		public void addContained(IIdType theId, IBaseResource theResource) {
+			if (!getResourceToIdMap().containsKey(theResource)) {
+				getResourceToIdMap().put(theResource, theId);
+				getOrCreateResourceList().add(theResource);
+			}
+		}
+
+		public List<IBaseResource> getContainedResources() {
+			if (getResourceToIdMap() == null) {
+				return Collections.emptyList();
+			}
+			return getOrCreateResourceList();
+		}
+
+		public IIdType getResourceId(IBaseResource theNext) {
+			if (getResourceToIdMap() == null) {
+				return null;
+			}
+
+			var idFromMap = getResourceToIdMap().get(theNext);
+			if (idFromMap != null) {
+				return idFromMap;
+			} else if (theNext.getIdElement().getIdPart() != null) {
+				return getResourceToIdMap().values().stream()
+						.filter(id -> theNext.getIdElement().getIdPart().equals(id.getIdPart()))
+						.findAny()
+						.orElse(null);
+			} else {
+				return null;
+			}
+		}
+
+		private List<IBaseResource> getOrCreateResourceList() {
+			if (myResourceList == null) {
+				myResourceList = new ArrayList<>();
+			}
+			return myResourceList;
+		}
+
+		private boolean hasResourceToIdValues() {
+			return myResourceToIdMap != null && !myResourceToIdMap.isEmpty();
+		}
+
+		private IdentityHashMap<IBaseResource, IIdType> getResourceToIdMap() {
+			if (myResourceToIdMap == null) {
+				myResourceToIdMap = new IdentityHashMap<>();
+			}
+			return myResourceToIdMap;
+		}
+
+		public boolean isEmpty() {
+			if (myResourceToIdMap == null) {
+				return true;
+			}
+			return myResourceToIdMap.isEmpty();
+		}
+
+		public boolean hasExistingIdToContainedResource() {
+			return myExistingIdToContainedResourceMap != null;
+		}
+
+		public IdentityHashMap<IBaseResource, IIdType> getPreviouslyContainedResourceToIdMap() {
+			if (myPreviouslyContainedResourceToIdMap == null) {
+				myPreviouslyContainedResourceToIdMap = new IdentityHashMap<>();
+			}
+			return myPreviouslyContainedResourceToIdMap;
+		}
+
+		public boolean hasPreviouslyContainedResourceToIdValues() {
+			return myPreviouslyContainedResourceToIdMap != null && !myPreviouslyContainedResourceToIdMap.isEmpty();
+		}
+
+		public IIdType getPreviouslyContainedResourceId(IBaseResource theResource) {
+			if (hasPreviouslyContainedResourceToIdValues()) {
+				return getPreviouslyContainedResourceToIdMap().get(theResource);
+			}
+			return null;
+		}
+	}
+
+	private static class ClearingModelVisitor implements IModelVisitor2 {
+
+		private boolean myFoundContent;
+
+		@Override
+		public boolean acceptElement(
+				IBase theElement,
+				List<IBase> theContainingElementPath,
+				List<BaseRuntimeChildDefinition> theChildDefinitionPath,
+				List<BaseRuntimeElementDefinition<?>> theElementDefinitionPath) {
+			if (theElement instanceof IPrimitiveType<?> type) {
+				if (type.getValueAsString() != null) {
+					myFoundContent = true;
+					type.setValueAsString(null);
+				}
+			}
+			return true;
+		}
+
+		@Override
+		public boolean acceptUndeclaredExtension(
+				IBaseExtension<?, ?> theNextExt,
+				List<IBase> theContainingElementPath,
+				List<BaseRuntimeChildDefinition> theChildDefinitionPath,
+				List<BaseRuntimeElementDefinition<?>> theElementDefinitionPath) {
+			if (theNextExt.getUrl() != null) {
+				theNextExt.setUrl(null);
+				myFoundContent = true;
+			}
+			if (theNextExt.getValue() != null) {
+				myFoundContent = true;
+				theNextExt.setValue(null);
+			}
+			if (!theNextExt.getExtension().isEmpty()) {
+				theNextExt.getExtension().clear();
+				myFoundContent = true;
+			}
+			return true;
+		}
+	}
 }

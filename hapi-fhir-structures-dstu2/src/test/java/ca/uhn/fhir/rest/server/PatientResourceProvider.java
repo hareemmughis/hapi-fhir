@@ -1,11 +1,8 @@
 
 package ca.uhn.fhir.rest.server;
 
-import java.util.Set;
-
 import ca.uhn.fhir.model.api.Include;
 import ca.uhn.fhir.model.api.annotation.Description;
-//
 import ca.uhn.fhir.model.dstu2.resource.Organization;
 import ca.uhn.fhir.model.dstu2.resource.Patient;
 import ca.uhn.fhir.model.dstu2.resource.Practitioner;
@@ -13,15 +10,16 @@ import ca.uhn.fhir.rest.annotation.IncludeParam;
 import ca.uhn.fhir.rest.annotation.OptionalParam;
 import ca.uhn.fhir.rest.annotation.Search;
 import ca.uhn.fhir.rest.annotation.Sort;
+import ca.uhn.fhir.rest.api.Constants;
 import ca.uhn.fhir.rest.api.SortSpec;
-// import ca.uhn.fhir.model.dstu.resource.Binary;
-// import ca.uhn.fhir.model.dstu2.resource.Bundle;
-// import ca.uhn.fhir.model.api.Bundle;
+import ca.uhn.fhir.rest.api.server.IBundleProvider;
 import ca.uhn.fhir.rest.param.DateRangeParam;
 import ca.uhn.fhir.rest.param.ReferenceAndListParam;
 import ca.uhn.fhir.rest.param.StringAndListParam;
 import ca.uhn.fhir.rest.param.TokenAndListParam;
 import ca.uhn.fhir.rest.param.UriAndListParam;
+
+import java.util.Set;
 
 public class PatientResourceProvider implements IResourceProvider
 	{
@@ -33,35 +31,31 @@ public class PatientResourceProvider implements IResourceProvider
 
 	//@formatter:off
 	@Search()
-	public ca.uhn.fhir.rest.server.IBundleProvider search(
-			javax.servlet.http.HttpServletRequest theServletRequest,
+	public IBundleProvider search(
+			jakarta.servlet.http.HttpServletRequest theServletRequest,
 	
 			@Description(shortDefinition="The resource identity")
 			@OptionalParam(name="_id")
 			StringAndListParam theId, 
 
-			@Description(shortDefinition="The resource language")
-			@OptionalParam(name="_language")
-			StringAndListParam theResourceLanguage, 
-
 			@Description(shortDefinition="Search the contents of the resource's data using a fulltext search")
-			@OptionalParam(name=ca.uhn.fhir.rest.server.Constants.PARAM_CONTENT)
+			@OptionalParam(name=Constants.PARAM_CONTENT)
 			StringAndListParam theFtContent, 
 
 			@Description(shortDefinition="Search the contents of the resource's narrative using a fulltext search")
-			@OptionalParam(name=ca.uhn.fhir.rest.server.Constants.PARAM_TEXT)
+			@OptionalParam(name=Constants.PARAM_TEXT)
 			StringAndListParam theFtText, 
 
 			@Description(shortDefinition="Search for resources which have the given tag")
-			@OptionalParam(name=ca.uhn.fhir.rest.server.Constants.PARAM_TAG)
+			@OptionalParam(name=Constants.PARAM_TAG)
 			TokenAndListParam theSearchForTag, 
 
 			@Description(shortDefinition="Search for resources which have the given security labels")
-			@OptionalParam(name=ca.uhn.fhir.rest.server.Constants.PARAM_SECURITY)
+			@OptionalParam(name=Constants.PARAM_SECURITY)
 			TokenAndListParam theSearchForSecurity, 
   
 			@Description(shortDefinition="Search for resources which have the given profile")
-			@OptionalParam(name=ca.uhn.fhir.rest.server.Constants.PARAM_PROFILE)
+			@OptionalParam(name=Constants.PARAM_PROFILE)
 			UriAndListParam theSearchForProfile, 
 
   

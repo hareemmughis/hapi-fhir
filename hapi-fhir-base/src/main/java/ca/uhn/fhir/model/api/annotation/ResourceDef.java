@@ -1,17 +1,15 @@
-package ca.uhn.fhir.model.api.annotation;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,8 +17,10 @@ package ca.uhn.fhir.model.api.annotation;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.model.api.annotation;
 
 import java.lang.annotation.ElementType;
+import java.lang.annotation.Inherited;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
@@ -28,14 +28,15 @@ import java.lang.annotation.Target;
 /**
  * Class annotation which indicates a resource definition class
  */
+@Inherited
 @Retention(RetentionPolicy.RUNTIME)
-@Target(value= {ElementType.TYPE})
+@Target(value = {ElementType.TYPE})
 public @interface ResourceDef {
 
 	/**
 	 * The name of the resource (e.g. "Patient" or "DiagnosticReport"). If you are defining your
 	 * own custom extension to a built-in FHIR resource definition type (e.g. you are extending
-	 * the built-in Patient class) you do not need to supply a value for this property, as it 
+	 * the built-in Patient class) you do not need to supply a value for this property, as it
 	 * will be inferred from the parent class.
 	 */
 	String name() default "";
@@ -49,7 +50,7 @@ public @interface ResourceDef {
 	 * your server uses, not necessarily "http://localhost:8080/fhir")
 	 */
 	String id() default "";
-	
+
 	/**
 	 * The URL indicating the profile for this resource definition. If specified, this URL will be
 	 * automatically added to the meta tag when the resource is serialized.
@@ -59,5 +60,4 @@ public @interface ResourceDef {
 	 * </p>
 	 */
 	String profile() default "";
-	
 }

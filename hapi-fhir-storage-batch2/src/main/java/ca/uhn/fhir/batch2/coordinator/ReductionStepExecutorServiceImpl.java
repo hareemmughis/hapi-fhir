@@ -1,0 +1,578 @@
+/*-
+ * #%L
+ * HAPI FHIR JPA Server - Batch2 Task Processor
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.batch2.coordinator;
+
+import ca.uhn.fhir.batch2.api.ChunkExecutionDetails;
+import ca.uhn.fhir.batch2.api.IJobCompletionHandler;
+import ca.uhn.fhir.batch2.api.IJobPersistence;
+import ca.uhn.fhir.batch2.api.IJobStepExecutionServices;
+import ca.uhn.fhir.batch2.api.IReductionStepExecutorService;
+import ca.uhn.fhir.batch2.api.IReductionStepWorker;
+import ca.uhn.fhir.batch2.api.JobCompletionDetails;
+import ca.uhn.fhir.batch2.api.ReductionStepFailureException;
+import ca.uhn.fhir.batch2.api.StepExecutionDetails;
+import ca.uhn.fhir.batch2.maintenance.WorkChunkHeartbeatService;
+import ca.uhn.fhir.batch2.model.ChunkOutcome;
+import ca.uhn.fhir.batch2.model.JobDefinitionStep;
+import ca.uhn.fhir.batch2.model.JobInstance;
+import ca.uhn.fhir.batch2.model.JobWorkCursor;
+import ca.uhn.fhir.batch2.model.StatusEnum;
+import ca.uhn.fhir.batch2.model.WorkChunk;
+import ca.uhn.fhir.batch2.model.WorkChunkStatusEnum;
+import ca.uhn.fhir.batch2.progress.JobInstanceStatusUpdater;
+import ca.uhn.fhir.batch2.util.BatchJobOpenTelemetryUtils;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.interceptor.api.IInterceptorService;
+import ca.uhn.fhir.jpa.dao.tx.IHapiTransactionService;
+import ca.uhn.fhir.jpa.model.sched.HapiJob;
+import ca.uhn.fhir.jpa.model.sched.IHasScheduledJobs;
+import ca.uhn.fhir.jpa.model.sched.ISchedulerService;
+import ca.uhn.fhir.jpa.model.sched.ScheduledJobDefinition;
+import ca.uhn.fhir.model.api.IModelJson;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.system.HapiSystemProperties;
+import ca.uhn.fhir.util.JsonUtil;
+import com.google.common.annotations.VisibleForTesting;
+import io.opentelemetry.instrumentation.annotations.WithSpan;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.lang3.time.DateUtils;
+import org.quartz.JobExecutionContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.event.ContextClosedEvent;
+import org.springframework.context.event.ContextRefreshedEvent;
+import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.concurrent.CustomizableThreadFactory;
+import org.springframework.transaction.annotation.Propagation;
+
+import java.util.Collections;
+import java.util.Date;
+import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
+
+import static ca.uhn.fhir.batch2.model.StatusEnum.COMPLETED;
+import static ca.uhn.fhir.batch2.model.StatusEnum.ERRORED;
+import static ca.uhn.fhir.batch2.model.StatusEnum.FINALIZE;
+import static ca.uhn.fhir.batch2.model.StatusEnum.IN_PROGRESS;
+import static ca.uhn.fhir.batch2.util.BatchJobOpenTelemetryUtils.JOB_STEP_EXECUTION_SPAN_NAME;
+
+public class ReductionStepExecutorServiceImpl implements IReductionStepExecutorService, IHasScheduledJobs {
+	public static final String SCHEDULED_JOB_ID = ReductionStepExecutorScheduledJob.class.getName();
+	private static final Logger ourLog = LoggerFactory.getLogger(ReductionStepExecutorServiceImpl.class);
+	private final Map<String, ReductionStepWork> myInstanceIdToReductionWork =
+			Collections.synchronizedMap(new LinkedHashMap<>());
+	private final ExecutorService myReducerExecutor;
+	private final ExecutorService myReducerChunkExecutor;
+	private final IJobPersistence myJobPersistence;
+	private final IHapiTransactionService myTransactionService;
+	private final Semaphore myCurrentlyExecuting = new Semaphore(1);
+	private final AtomicReference<String> myCurrentlyFinalizingInstanceId = new AtomicReference<>();
+	private final JobDefinitionRegistry myJobDefinitionRegistry;
+	private final JobInstanceStatusUpdater myJobInstanceStatusUpdater;
+	private final IJobStepExecutionServices myJobStepExecutionServices;
+	private final IInterceptorService myInterceptorService;
+	private Timer myHeartbeatTimer;
+	private final WorkChunkHeartbeatService myWorkChunkHeartbeatService;
+
+	/**
+	 * Constructor
+	 */
+	public ReductionStepExecutorServiceImpl(
+			IJobPersistence theJobPersistence,
+			IHapiTransactionService theTransactionService,
+			JobDefinitionRegistry theJobDefinitionRegistry,
+			IJobStepExecutionServices theJobStepExecutionServices,
+			IInterceptorService theInterceptorService,
+			WorkChunkHeartbeatService theWorkChunkHeartbeatService) {
+		myJobPersistence = theJobPersistence;
+		myTransactionService = theTransactionService;
+		myJobDefinitionRegistry = theJobDefinitionRegistry;
+		myJobStepExecutionServices = theJobStepExecutionServices;
+		myJobInstanceStatusUpdater = new JobInstanceStatusUpdater(theJobDefinitionRegistry, theInterceptorService);
+		myInterceptorService = theInterceptorService;
+		myReducerExecutor = Executors.newSingleThreadExecutor(new CustomizableThreadFactory("batch2-reducer"));
+
+		myWorkChunkHeartbeatService = theWorkChunkHeartbeatService;
+
+		// This is a single thread executor because there are no guarantees that the chunk
+		// processing is actually thread safe. Be careful if you think you want to add more
+		// threads here.
+		myReducerChunkExecutor =
+				Executors.newSingleThreadExecutor(new CustomizableThreadFactory("batch2-reducer-chunk"));
+	}
+
+	@EventListener(ContextRefreshedEvent.class)
+	public void start() {
+		if (myHeartbeatTimer == null) {
+			myHeartbeatTimer = new Timer("batch2-reducer-heartbeat");
+			long delay = DateUtils.MILLIS_PER_MINUTE;
+			if (HapiSystemProperties.isUnitTestModeEnabled()) {
+				delay = DateUtils.MILLIS_PER_SECOND;
+			}
+			myHeartbeatTimer.schedule(new HeartbeatTimerTask(), delay, delay);
+		}
+	}
+
+	private void runHeartbeat() {
+		String currentlyFinalizingInstanceId = myCurrentlyFinalizingInstanceId.get();
+		if (currentlyFinalizingInstanceId != null) {
+			// this 'heartbeat' is only for the jobinstance
+			// it sets the jobinstance updated time
+			ourLog.info("Running heartbeat for instance: {}", currentlyFinalizingInstanceId);
+			executeInTransactionWithSynchronization(() -> {
+				myJobPersistence.updateInstanceUpdateTime(currentlyFinalizingInstanceId);
+				return null;
+			});
+		}
+	}
+
+	@EventListener(ContextClosedEvent.class)
+	public void shutdown() {
+		if (myHeartbeatTimer != null) {
+			myHeartbeatTimer.cancel();
+			myHeartbeatTimer = null;
+		}
+	}
+
+	@Override
+	public void triggerReductionStep(
+			String theInstanceId, JobWorkCursor<?, ?, ?> theJobWorkCursor, @Nullable String theDriverChunkId) {
+		myInstanceIdToReductionWork.putIfAbsent(
+				theInstanceId, new ReductionStepWork(theJobWorkCursor, theDriverChunkId));
+		if (myCurrentlyExecuting.availablePermits() > 0) {
+			myReducerExecutor.submit(this::reducerPass);
+		}
+	}
+
+	@Override
+	public void reducerPass() {
+		if (!myCurrentlyExecuting.tryAcquire()) {
+			return;
+		}
+		try {
+			Set<String> failedThisPass = new HashSet<>();
+			while (true) {
+				String instanceId;
+				synchronized (myInstanceIdToReductionWork) {
+					instanceId = myInstanceIdToReductionWork.keySet().stream()
+							.filter(k -> !failedThisPass.contains(k))
+							.findFirst()
+							.orElse(null);
+				}
+				if (instanceId == null) {
+					break;
+				}
+				ReductionStepWork reductionWork = myInstanceIdToReductionWork.get(instanceId);
+				myCurrentlyFinalizingInstanceId.set(instanceId);
+
+				try (WorkChunkHeartbeatService.HeartbeatHandle handle =
+						myWorkChunkHeartbeatService.scheduleHeartbeatJob(instanceId, reductionWork.driverChunkId())) {
+					executeReductionStep(instanceId, reductionWork.jobWorkCursor());
+					myInstanceIdToReductionWork.remove(instanceId);
+				} catch (Exception e) {
+					failedThisPass.add(instanceId);
+					ourLog.error("Failed to execute reduction for instance {}", instanceId, e);
+				} finally {
+					myCurrentlyFinalizingInstanceId.set(null);
+				}
+			}
+		} catch (Exception e) {
+			ourLog.error("Failed to execute reducer pass", e);
+		} finally {
+			myCurrentlyFinalizingInstanceId.set(null);
+			myCurrentlyExecuting.release();
+		}
+		if (!myInstanceIdToReductionWork.isEmpty()) {
+			myReducerExecutor.submit(this::reducerPass);
+		}
+	}
+
+	/**
+	 * Returns {@literal true} when no reduction step is running or waiting to run. Tests use this to check that
+	 * the reducer has stopped writing before they clean up the database.
+	 */
+	@VisibleForTesting
+	public boolean isIdleForUnitTest() {
+		return myInstanceIdToReductionWork.isEmpty() && myCurrentlyExecuting.availablePermits() > 0;
+	}
+
+	@VisibleForTesting
+	@WithSpan(JOB_STEP_EXECUTION_SPAN_NAME)
+	<PT extends IModelJson, IT extends IModelJson, OT extends IModelJson>
+			ReductionStepChunkProcessingResponse executeReductionStep(
+					String theInstanceId, JobWorkCursor<PT, IT, OT> theJobWorkCursor) {
+
+		BatchJobOpenTelemetryUtils.addAttributesToCurrentSpan(
+				theJobWorkCursor.getJobDefinition().getJobDefinitionId(),
+				theJobWorkCursor.getJobDefinition().getJobDefinitionVersion(),
+				theInstanceId,
+				theJobWorkCursor.getCurrentStepId(),
+				null);
+
+		JobDefinitionStep<PT, IT, OT> step = theJobWorkCursor.getCurrentStep();
+
+		// wipmb For 6.8 - this runs four tx. That's at least 2 too many
+		// combine the fetch and the case statement.  Use optional for the boolean.
+		Optional<JobInstance> instanceOpt =
+				executeInTransactionWithSynchronization(() -> myJobPersistence.fetchInstance(theInstanceId));
+
+		if (instanceOpt.isEmpty()) {
+			ourLog.warn("Unable to execute reduction step for instance {} - Instance not found", theInstanceId);
+			return new ReductionStepChunkProcessingResponse(false);
+		}
+
+		JobInstance instance = instanceOpt.get();
+
+		boolean shouldProceed = false;
+		switch (instance.getStatus()) {
+			case IN_PROGRESS:
+			case ERRORED:
+				// this will take a write lock on the JobInstance, preventing duplicates.
+				boolean changed =
+						executeInTransactionWithSynchronization(() -> myJobPersistence.markInstanceAsStatusWhenStatusIn(
+								instance.getInstanceId(), FINALIZE, EnumSet.of(IN_PROGRESS, ERRORED)));
+				if (changed) {
+					ourLog.info(
+							"Job instance {} has been set to FINALIZE state - Beginning reducer step",
+							instance.getInstanceId());
+					shouldProceed = true;
+				}
+				break;
+			case FINALIZE:
+			case COMPLETED:
+			case FAILED:
+			case QUEUED:
+			case CANCELLED:
+				break;
+		}
+
+		if (!shouldProceed) {
+			ourLog.warn(
+					"JobInstance[{}] should not be finalized at this time. In memory status is {}. Reduction step will not rerun!"
+							+ " This could be a long running reduction job resulting in the processed msg not being acknowledged,"
+							+ " or the result of a failed process or server restarting.",
+					instance.getInstanceId(),
+					instance.getStatus());
+			return new ReductionStepChunkProcessingResponse(false);
+		}
+
+		PT parameters =
+				instance.getParameters(theJobWorkCursor.getJobDefinition().getParametersType());
+
+		IReductionStepWorker<PT, IT, OT> reductionStepWorker =
+				(IReductionStepWorker<PT, IT, OT>) step.getJobStepWorker();
+
+		// Clone the worker so that we start with no built-up state
+		reductionStepWorker = reductionStepWorker.newInstance();
+
+		instance.setStatus(FINALIZE);
+
+		boolean defaultSuccessValue = true;
+		ReductionStepChunkProcessingResponse response = new ReductionStepChunkProcessingResponse(defaultSuccessValue);
+
+		try {
+			processChunksAndCompleteJob(theJobWorkCursor, step, instance, parameters, reductionStepWorker, response);
+		} catch (Exception ex) {
+			String msg = String.format(
+					"Failed to execute reduction step for instance %s: %s", instance.getInstanceId(), ex.getMessage());
+			ourLog.error(msg, ex);
+			executeInTransactionWithSynchronization(() -> {
+				myJobPersistence.updateInstance(instance.getInstanceId(), theInstance -> {
+					theInstance.setErrorMessage(msg);
+					theInstance.setEndTime(new Date());
+					myJobInstanceStatusUpdater.updateInstanceStatus(theInstance, StatusEnum.FAILED);
+					return true;
+				});
+				return null;
+			});
+			response.setSuccessful(false);
+		}
+
+		// if no successful chunks, return false
+		if (!response.hasSuccessfulChunksIds()) {
+			response.setSuccessful(false);
+		}
+
+		return response;
+	}
+
+	private <PT extends IModelJson, IT extends IModelJson, OT extends IModelJson> void processChunksAndCompleteJob(
+			JobWorkCursor<PT, IT, OT> theJobWorkCursor,
+			JobDefinitionStep<PT, IT, OT> step,
+			JobInstance instance,
+			PT parameters,
+			IReductionStepWorker<PT, IT, OT> reductionStepWorker,
+			ReductionStepChunkProcessingResponse response) {
+		AtomicReference<String> driverWorkChunkId = new AtomicReference<>();
+		try {
+			executeInTransactionWithSynchronization(() -> {
+				try (Stream<WorkChunk> chunkIterator =
+						myJobPersistence.fetchAllWorkChunksForStepStream(instance.getInstanceId(), step.getStepId())) {
+
+					chunkIterator.forEach(chunk -> {
+						if (chunk.getStatus() == WorkChunkStatusEnum.REDUCTION_READY) {
+							// these are our reduction steps
+							executeInNoTransaction(() -> processChunk(
+									chunk, instance, parameters, reductionStepWorker, response, theJobWorkCursor));
+						} else {
+							// this is the 'drive chunk' that we put on the queue
+							driverWorkChunkId.set(chunk.getId());
+						}
+					});
+				}
+				return null;
+			});
+		} finally {
+			executeInTransactionWithSynchronization(() -> {
+				ourLog.info(
+						"Reduction step for instance[{}] produced {} successful and {} failed chunks",
+						instance.getInstanceId(),
+						response.getSuccessfulChunkIds().size(),
+						response.getFailedChunksIds().size());
+
+				ReductionStepDataSink<PT, IT, OT> dataSink = new ReductionStepDataSink<>(
+						instance.getInstanceId(),
+						theJobWorkCursor,
+						myJobPersistence,
+						myJobDefinitionRegistry,
+						myInterceptorService);
+				StepExecutionDetails<PT, IT> chunkDetails = StepExecutionDetails.createReductionStepDetails(
+						theJobWorkCursor.getJobDefinition(),
+						theJobWorkCursor.getCurrentStepId(),
+						parameters,
+						null,
+						instance,
+						myJobStepExecutionServices);
+
+				if (response.isSuccessful()) {
+					try {
+						executeInNoTransaction(() -> reductionStepWorker.run(chunkDetails, dataSink));
+						// the ReductionStepDataSink will update the job status to COMPLETED
+						// we should update instance here to keep it consistent with the newest version in persistence
+						instance.setStatus(COMPLETED);
+					} catch (ReductionStepFailureException e) {
+						response.setSuccessful(false);
+						myJobPersistence.updateInstance(instance.getInstanceId(), i -> {
+							i.setErrorMessage(e.getMessage());
+							i.setEndTime(new Date());
+							i.setStatus(StatusEnum.FAILED);
+
+							if (e.getReportMsg() != null) {
+								i.setReport(JsonUtil.serialize(e.getReportMsg()));
+							}
+
+							return true;
+						});
+					}
+				}
+
+				if (response.hasSuccessfulChunksIds()) {
+					// complete the steps without making a new work chunk
+					myJobPersistence.markWorkChunksWithStatusAndWipeData(
+							instance.getInstanceId(),
+							response.getSuccessfulChunkIds(),
+							WorkChunkStatusEnum.COMPLETED,
+							null // error message - none
+							);
+				}
+
+				if (response.hasFailedChunkIds()) {
+					// mark any failed chunks as failed for aborting
+					myJobPersistence.markWorkChunksWithStatusAndWipeData(
+							instance.getInstanceId(),
+							response.getFailedChunksIds(),
+							WorkChunkStatusEnum.FAILED,
+							"JOB ABORTED");
+				}
+
+				if (response.isSuccessful()) {
+					/**
+					 * All reduction steps are final steps.
+					 */
+					IJobCompletionHandler<PT> completionHandler =
+							theJobWorkCursor.getJobDefinition().getCompletionHandler();
+					JobCompletionDetails<PT> jcd = new JobCompletionDetails<>(parameters, instance);
+					if (completionHandler != null) {
+						completionHandler.jobComplete(jcd);
+					}
+				}
+
+				// update our driver chunk
+				if (driverWorkChunkId.get() != null) {
+					boolean succeeded = response.isSuccessful();
+					myJobPersistence.markWorkChunksWithStatusAndWipeData(
+							instance.getInstanceId(),
+							List.of(driverWorkChunkId.get()),
+							succeeded ? WorkChunkStatusEnum.COMPLETED : WorkChunkStatusEnum.FAILED,
+							succeeded ? null : "reduction failed");
+				} // else - jobs that do not have the 'driver' chunk (pre-existing ones maybe)
+
+				return null;
+			});
+		}
+	}
+
+	/**
+	 * We need to keep a long transaction here to keep our ResultSet Stream open for the duration.
+	 * But we don't want to expose this transaction to the user.  We use a new thread here so that
+	 * the individual chunks get processed in their own dedicated transactions separate from the
+	 * main chunk-loading transaction.
+	 */
+	private void executeInNoTransaction(Runnable theRunnable) {
+		Future<?> future = myReducerChunkExecutor.submit(theRunnable);
+		try {
+			future.get();
+		} catch (Exception e) {
+			if (e.getCause() instanceof RuntimeException re) {
+				throw re;
+			}
+			throw new InternalErrorException(Msg.code(2721) + e.getMessage(), e);
+		}
+	}
+
+	private <T> T executeInTransactionWithSynchronization(Callable<T> runnable) {
+		return myTransactionService
+				.withRequest(null)
+				.withPropagation(Propagation.REQUIRES_NEW)
+				.execute(runnable);
+	}
+
+	private <PT extends IModelJson, IT extends IModelJson, OT extends IModelJson> void processChunk(
+			WorkChunk theChunk,
+			JobInstance theInstance,
+			PT theParameters,
+			IReductionStepWorker<PT, IT, OT> theReductionStepWorker,
+			ReductionStepChunkProcessingResponse theResponseObject,
+			JobWorkCursor<PT, IT, OT> theJobWorkCursor) {
+
+		/*
+		 * Reduction steps are done inline and only on gated jobs.
+		 */
+		if (theChunk.getStatus() == WorkChunkStatusEnum.COMPLETED) {
+			// This should never happen since jobs with reduction are required to be gated
+			ourLog.error(
+					"Unexpected chunk {} with status {} found while reducing {}.  No chunks feeding into a reduction step should be in a state other than READY.",
+					theChunk.getId(),
+					theChunk.getStatus(),
+					theInstance);
+			return;
+		}
+
+		if (theResponseObject.hasFailedChunkIds()) {
+			// we are going to fail all future chunks now
+			theResponseObject.addFailedChunkId(theChunk);
+		} else {
+			try {
+				// feed them into our reduction worker
+				// this is the most likely area to throw,
+				// as this is where db actions and processing is likely to happen
+				IT chunkData =
+						theChunk.getData(theJobWorkCursor.getCurrentStep().getInputType());
+				ChunkExecutionDetails<PT, IT> chunkDetails = new ChunkExecutionDetails<>(
+						chunkData, theParameters, theInstance.getInstanceId(), theChunk.getId());
+
+				ChunkOutcome outcome = theReductionStepWorker.consume(chunkDetails);
+
+				switch (outcome.getStatus()) {
+					case SUCCESS:
+						theResponseObject.addSuccessfulChunkId(theChunk);
+						break;
+
+					case FAILED:
+						ourLog.error("Processing of work chunk {} resulted in aborting job.", theChunk.getId());
+
+						// fail entire job - including all future workchunks
+						theResponseObject.addFailedChunkId(theChunk);
+						theResponseObject.setSuccessful(false);
+						break;
+				}
+			} catch (Exception e) {
+				String msg = String.format(
+						"Reduction step failed to execute chunk reduction for chunk %s with exception: %s.",
+						theChunk.getId(), e.getMessage());
+				// we got a failure in a reduction
+				ourLog.error(msg, e);
+				theResponseObject.setSuccessful(false);
+
+				myJobPersistence.onWorkChunkFailed(theChunk.getId(), msg);
+			}
+		}
+	}
+
+	@Override
+	public void scheduleJobs(ISchedulerService theSchedulerService) {
+		theSchedulerService.scheduleClusteredJob(10 * DateUtils.MILLIS_PER_SECOND, buildJobDefinition());
+	}
+
+	@Nonnull
+	private ScheduledJobDefinition buildJobDefinition() {
+		ScheduledJobDefinition jobDefinition = new ScheduledJobDefinition();
+		jobDefinition.setId(SCHEDULED_JOB_ID);
+		jobDefinition.setJobClass(ReductionStepExecutorScheduledJob.class);
+		return jobDefinition;
+	}
+
+	/**
+	 * Tracks the work required to run the reduction step for a single job instance.
+	 *
+	 * @param jobWorkCursor the cursor pointing at the reduction step
+	 * @param driverChunkId the id of the 'driver' work chunk that triggered this reduction (whose heartbeat
+	 *                      must be kept alive while the reduction runs), or {@code null} when the reduction
+	 *                      is run inline without a driver chunk.
+	 */
+	private record ReductionStepWork(JobWorkCursor<?, ?, ?> jobWorkCursor, @Nullable String driverChunkId) {}
+
+	private class HeartbeatTimerTask extends TimerTask {
+		@Override
+		public void run() {
+			runHeartbeat();
+		}
+	}
+
+	/**
+	 * Scheduled job for draining the map (in case of concurrent executions)
+	 * as well as handling failed reduction runs / retries.
+	 */
+	public static class ReductionStepExecutorScheduledJob implements HapiJob {
+		@Autowired
+		private IReductionStepExecutorService myTarget;
+
+		@Override
+		public void execute(JobExecutionContext theContext) {
+			myTarget.reducerPass();
+		}
+	}
+}

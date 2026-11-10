@@ -1,34 +1,29 @@
 package ca.uhn.fhir.narrative;
 
-import static org.hamcrest.Matchers.containsString;
-import static org.junit.Assert.assertThat;
-
-import org.junit.AfterClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.model.dstu2.composite.NarrativeDt;
 import ca.uhn.fhir.model.dstu2.resource.Practitioner;
-import ca.uhn.fhir.util.TestUtil;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class CustomThymeleafNarrativeGeneratorDstu2Test {
 
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(CustomThymeleafNarrativeGeneratorDstu2Test.class);
 
-	private static FhirContext ourCtx = FhirContext.forDstu2();
+	private final FhirContext myCtx = FhirContext.forDstu2Cached();
 
-	@AfterClass
-	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+	@AfterEach
+	public void after() {
+		myCtx.setNarrativeGenerator(null);
 	}
-
 
 	@Test
 	public void testGenerator() {
 
 //		CustomThymeleafNarrativeGenerator gen = new CustomThymeleafNarrativeGenerator("file:src/test/resources/narrative/customnarrative.properties");
 		CustomThymeleafNarrativeGenerator gen = new CustomThymeleafNarrativeGenerator("classpath:narrative/customnarrative_dstu2.properties");
-		ourCtx.setNarrativeGenerator(gen);
+		myCtx.setNarrativeGenerator(gen);
 
 		Practitioner p = new Practitioner();
 		p.addIdentifier().setSystem("sys").setValue("val1");
@@ -36,13 +31,12 @@ public class CustomThymeleafNarrativeGeneratorDstu2Test {
 		p.addAddress().addLine("line1").addLine("line2");
 		p.getName().addFamily("fam1").addGiven("given");
 
-		NarrativeDt narrative = new NarrativeDt();
-		gen.generateNarrative(ourCtx, p, narrative);
+		gen.populateResourceNarrative(myCtx, p);
 
-		String actual = narrative.getDiv().getValueAsString();
+		String actual = p.getText().getDiv().getValueAsString();
 		ourLog.info(actual);
 
-		assertThat(actual, containsString("<h1>Name</h1><div class=\"nameElement\">given <b>FAM1 </b></div><h1>Address</h1><div><span>line1 </span><br/><span>line2 </span><br/></div></div>"));
+		assertThat(actual).contains("<h1>Name</h1><div class=\"nameElement\">given <b>FAM1 </b></div><h1>Address</h1><div><span>line1 </span><br/><span>line2 </span><br/></div></div>");
 
 	}
 }

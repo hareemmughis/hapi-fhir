@@ -1,0 +1,615 @@
+/*-
+ * #%L
+ * HAPI FHIR - Server Framework
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.rest.api.server.storage;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.interceptor.api.HookParams;
+import ca.uhn.fhir.interceptor.api.Pointcut;
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.rest.api.InterceptorInvocationTimingEnum;
+import ca.uhn.fhir.rest.server.exceptions.PreconditionFailedException;
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ListMultimap;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.instance.model.api.IBaseBundle;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Supplier;
+
+/**
+ * This object contains runtime information that is gathered and relevant to a single <i>database transaction</i>.
+ * This doesn't mean a FHIR transaction necessarily, but rather any operation that happens within a single DB transaction
+ * (i.e. a FHIR create, read, transaction, etc.).
+ * <p>
+ * The intent with this class is to hold things we want to pass from operation to operation within a transaction in
+ * order to avoid looking things up multiple times, etc.
+ * </p>
+ *
+ * @since 5.0.0
+ */
+public class TransactionDetails {
+
+	private static final Logger ourLog = LoggerFactory.getLogger(TransactionDetails.class);
+	public static final IResourcePersistentId NOT_FOUND = IResourcePersistentId.NOT_FOUND;
+
+	private final Date myTransactionDate;
+	private List<Runnable> myRollbackUndoActions = Collections.emptyList();
+	private Map<String, RequestPartitionId> myResolvedPartitions = Collections.emptyMap();
+	private Map<String, IResourcePersistentId> myResolvedResourceIds = Collections.emptyMap();
+	/** The reverse of myResolvedResourceIds. Safe since id:pid is 1:1. */
+	private Map<IResourcePersistentId, IIdType> myReverseResolvedResourceIds = Collections.emptyMap();
+
+	private Map<String, IResourcePersistentId> myResolvedMatchUrls = Collections.emptyMap();
+	private Map<String, Supplier<IBaseResource>> myResolvedResources = Collections.emptyMap();
+	private Map<String, Long> myExpectedVersions = Collections.emptyMap();
+	private Set<IResourcePersistentId> myDeletedResourceIds = Collections.emptySet();
+	private Set<IResourcePersistentId> myUpdatedResourceIds = Collections.emptySet();
+	private Map<String, Object> myUserData;
+	private ListMultimap<Pointcut, HookParams> myDeferredInterceptorBroadcasts;
+	private EnumSet<Pointcut> myDeferredInterceptorBroadcastPointcuts;
+	private boolean myFhirTransaction;
+	private boolean myServerConstructedBatchSubRequest;
+	private List<IIdType> myAutoCreatedPlaceholderResources = Collections.emptyList();
+	private IBaseBundle myTransactionBundle;
+
+	/**
+	 * Constructor
+	 */
+	public TransactionDetails() {
+		this(new Date(), null);
+	}
+
+	/**
+	 * Constructor
+	 */
+	public TransactionDetails(Date theTransactionDate) {
+		this(theTransactionDate, null);
+	}
+
+	/**
+	 * Constructor
+	 */
+	public TransactionDetails(IBaseBundle theTransactionBundle) {
+		this(new Date(), theTransactionBundle);
+	}
+
+	/**
+	 * Constructor
+	 */
+	public TransactionDetails(Date theTransactionDate, IBaseBundle theTransactionBundle) {
+		myTransactionDate = theTransactionDate;
+		myTransactionBundle = theTransactionBundle;
+	}
+
+	/**
+	 * Get the actions that should be executed if the transaction is rolled back
+	 *
+	 * @since 5.5.0
+	 */
+	public List<Runnable> getRollbackUndoActions() {
+		if (myRollbackUndoActions.isEmpty()) {
+			// Empty collection is immutable already
+			return myRollbackUndoActions;
+		}
+		return Collections.unmodifiableList(myRollbackUndoActions);
+	}
+
+	/**
+	 * Add an action that should be executed if the transaction is rolled back. If a rollback is triggered, the
+	 * actions will be executed in reverse order in order to undo any state changes or perform other cleanup.
+	 *
+	 * @param theRunnable The action to execute (can optionally be an instance of {@link IExceptionAwareRollbackAction})
+	 *
+	 * @since 5.5.0
+	 * @see IExceptionAwareRollbackAction
+	 */
+	public void addRollbackUndoAction(@Nonnull Runnable theRunnable) {
+		assert theRunnable != null;
+		if (myRollbackUndoActions.isEmpty()) {
+			myRollbackUndoActions = new ArrayList<>();
+		}
+		myRollbackUndoActions.add(theRunnable);
+	}
+
+	/**
+	 * Clears any previously added rollback actions
+	 *
+	 * @since 5.5.0
+	 */
+	public void clearRollbackUndoActions() {
+		if (!myRollbackUndoActions.isEmpty()) {
+			myRollbackUndoActions.clear();
+		}
+	}
+
+	/**
+	 * @since 7.6.0
+	 */
+	@SuppressWarnings("rawtypes")
+	public void addUpdatedResourceId(@Nonnull IResourcePersistentId theResourceId) {
+		Validate.notNull(theResourceId, "theResourceId must not be null");
+		if (myUpdatedResourceIds.isEmpty()) {
+			myUpdatedResourceIds = new HashSet<>();
+		}
+		myUpdatedResourceIds.add(theResourceId);
+	}
+
+	/**
+	 * @since 7.6.0
+	 */
+	@SuppressWarnings("rawtypes")
+	public void addUpdatedResourceIds(Collection<? extends IResourcePersistentId> theResourceIds) {
+		for (IResourcePersistentId id : theResourceIds) {
+			addUpdatedResourceId(id);
+		}
+	}
+
+	/**
+	 * @since 7.6.0
+	 */
+	@SuppressWarnings("rawtypes")
+	public Set<IResourcePersistentId> getUpdatedResourceIds() {
+		return myUpdatedResourceIds;
+	}
+
+	/**
+	 * @since 6.8.0
+	 */
+	@SuppressWarnings("rawtypes")
+	public void addDeletedResourceId(@Nonnull IResourcePersistentId theResourceId) {
+		Validate.notNull(theResourceId, "theResourceId must not be null");
+		if (myDeletedResourceIds.isEmpty()) {
+			myDeletedResourceIds = new HashSet<>();
+		}
+		myDeletedResourceIds.add(theResourceId);
+	}
+
+	/**
+	 * @since 6.8.0
+	 */
+	@SuppressWarnings("rawtypes")
+	public void addDeletedResourceIds(Collection<? extends IResourcePersistentId> theResourceIds) {
+		for (IResourcePersistentId<?> next : theResourceIds) {
+			addDeletedResourceId(next);
+		}
+	}
+
+	/**
+	 * @since 6.8.0
+	 */
+	@SuppressWarnings("rawtypes")
+	@Nonnull
+	public Set<IResourcePersistentId> getDeletedResourceIds() {
+		return Collections.unmodifiableSet(myDeletedResourceIds);
+	}
+
+	/**
+	 * If a resource has been resolved within the current transaction to a specific partition, we
+	 * cache it here to avoid repeated lookups.
+	 */
+	public void addResolvedPartition(String theId, RequestPartitionId thePartitionId) {
+		Validate.notBlank(theId, "theId must not be blank");
+		if (myResolvedPartitions.isEmpty()) {
+			myResolvedPartitions = new HashMap<>();
+		}
+		myResolvedPartitions.put(theId, thePartitionId);
+	}
+
+	/**
+	 * If a resource has been resolved within the current transaction to a specific partition, we
+	 * cache it here to avoid repeated lookups.
+	 */
+	public RequestPartitionId getResolvedPartition(String theId) {
+		return myResolvedPartitions.get(theId);
+	}
+
+	/**
+	 * A <b>Resolved Resource ID</b> is a mapping between a resource ID (e.g. "<code>Patient/ABC</code>" or
+	 * "<code>Observation/123</code>") and a storage ID for that resource. Resources should only be placed within
+	 * the TransactionDetails if they are known to exist and be valid targets for other resources to link to.
+	 */
+	@Nullable
+	public IResourcePersistentId getResolvedResourceId(IIdType theId) {
+		String idValue = theId.toUnqualifiedVersionless().getValue();
+		return myResolvedResourceIds.get(idValue);
+	}
+
+	/**
+	 * A <b>Resolved Resource ID</b> is a mapping between a resource ID (e.g. "<code>Patient/ABC</code>" or
+	 * "<code>Observation/123</code>") and the actual persisted/resolved resource with this ID.
+	 */
+	@Nullable
+	public IBaseResource getResolvedResource(IIdType theId) {
+		String idValue = theId.toUnqualifiedVersionless().getValue();
+		IBaseResource retVal = null;
+		Supplier<IBaseResource> supplier = myResolvedResources.get(idValue);
+		if (supplier != null) {
+			retVal = supplier.get();
+		}
+		return retVal;
+	}
+
+	/**
+	 * Was the given resource ID resolved previously in this transaction as not existing
+	 */
+	public boolean isResolvedResourceIdEmpty(IIdType theId) {
+		if (myResolvedResourceIds != null) {
+			if (myResolvedResourceIds.containsKey(theId.toVersionless().getValue())) {
+				return myResolvedResourceIds.get(theId.toVersionless().getValue()) == null;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Was the given resource ID resolved previously in this transaction
+	 */
+	public boolean hasResolvedResourceId(IIdType theId) {
+		if (myResolvedResourceIds != null) {
+			return myResolvedResourceIds.containsKey(theId.toVersionless().getValue());
+		}
+		return false;
+	}
+
+	/**
+	 * Returns true if the given ID was marked as not existing (i.e. someone called
+	 * {@link #addResolvedResourceId(IIdType, IResourcePersistentId)} with an
+	 * ID of null).
+	 *
+	 * @param theId The resource ID
+	 * @since 8.0.0
+	 */
+	public boolean hasNullResolvedResourceId(IIdType theId) {
+		if (myResolvedResourceIds != null) {
+			String key = theId.toVersionless().getValue();
+			if (myResolvedResourceIds.containsKey(key)) {
+				return myResolvedResourceIds.get(key) == null;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A <b>Resolved Resource ID</b> is a mapping between a resource ID (e.g. "<code>Patient/ABC</code>" or
+	 * "<code>Observation/123</code>") and a storage ID for that resource. Resources should only be placed within
+	 * the TransactionDetails if they are known to exist and be valid targets for other resources to link to.
+	 */
+	public void addResolvedResourceId(IIdType theResourceId, @Nullable IResourcePersistentId thePersistentId) {
+		assert theResourceId != null;
+
+		if (myResolvedResourceIds.isEmpty()) {
+			myResolvedResourceIds = new HashMap<>();
+			myReverseResolvedResourceIds = new HashMap<>();
+		}
+		String fhirId = theResourceId.toVersionless().getValue();
+		myResolvedResourceIds.put(fhirId, thePersistentId);
+		myReverseResolvedResourceIds.put(thePersistentId, theResourceId);
+	}
+
+	/**
+	 * A <b>Resolved Resource ID</b> is a mapping between a resource ID (e.g. "<code>Patient/ABC</code>" or
+	 * "<code>Observation/123</code>") and the actual persisted/resolved resource.
+	 * This version takes a {@link Supplier} which will only be fetched if the
+	 * resource is actually needed. This is good in cases where the resource is
+	 * lazy loaded.
+	 */
+	public void addResolvedResource(IIdType theResourceId, @Nonnull Supplier<IBaseResource> theResource) {
+		assert theResourceId != null;
+
+		if (myResolvedResources.isEmpty()) {
+			myResolvedResources = new HashMap<>();
+		}
+		IIdType versionless = theResourceId.toVersionless();
+		myResolvedResources.put(versionless.getValue(), theResource);
+	}
+
+	/**
+	 * A <b>Resolved Resource ID</b> is a mapping between a resource ID (e.g. "<code>Patient/ABC</code>" or
+	 * "<code>Observation/123</code>") and the actual persisted/resolved resource.
+	 */
+	public void addResolvedResource(IIdType theResourceId, @Nonnull IBaseResource theResource) {
+		addResolvedResource(theResourceId, () -> theResource);
+	}
+
+	/**
+	 * An <b>Expected Version</b> is a mapping between a resource ID (e.g. "<code>Patient/ABC</code>") and the
+	 * version that a client demanded for that resource with an <code>If-Match</code> precondition.
+	 * <p>
+	 * A FHIR transaction validates each entry in one pass and performs the real write in a later pass, and
+	 * both passes share this same object. Recording the expected version here carries the client's
+	 * precondition across that gap, so the later pass can re-check it against the version that is genuinely
+	 * current at the moment of the write. That matters because a storage interceptor firing on another entry
+	 * may itself write to this resource in between, moving the version on; without the re-check, a failing
+	 * <code>If-Match</code> would be silently ignored.
+	 * </p>
+	 *
+	 * @param theResourceId      the resource the precondition applies to
+	 * @param theExpectedVersion the version demanded by <code>If-Match</code>
+	 * @since 8.14.0
+	 */
+	public void addExpectedVersion(IIdType theResourceId, Long theExpectedVersion) {
+		assert theResourceId != null;
+
+		if (myExpectedVersions.isEmpty()) {
+			myExpectedVersions = new HashMap<>();
+		}
+		myExpectedVersions.put(theResourceId.toUnqualifiedVersionless().getValue(), theExpectedVersion);
+	}
+
+	/**
+	 * An <b>Expected Version</b> is a mapping between a resource ID (e.g. "<code>Patient/ABC</code>") and the
+	 * version that a client demanded for that resource with an <code>If-Match</code> precondition.
+	 * <p>
+	 * This is only populated within a FHIR transaction, by the pass that validates the entry but stores
+	 * nothing. The pass that performs the real write reads it back here in order to re-check the
+	 * precondition against the version that is current at that later point.
+	 * </p>
+	 *
+	 * @param theResourceId the resource to look the precondition up for
+	 * @return the version demanded by <code>If-Match</code>, or {@literal null} if the client did not send one
+	 * @since 8.14.0
+	 */
+	@Nullable
+	public Long getExpectedVersion(IIdType theResourceId) {
+		return myExpectedVersions.get(theResourceId.toUnqualifiedVersionless().getValue());
+	}
+
+	public Map<String, IResourcePersistentId> getResolvedMatchUrls() {
+		return myResolvedMatchUrls;
+	}
+
+	/**
+	 * A <b>Resolved Conditional URL</b> is a mapping between a conditional URL (e.g. "<code>Patient?identifier=foo|bar</code>" or
+	 * "<code>Observation/123</code>") and a storage ID for that resource. Resources should only be placed within
+	 * the TransactionDetails if they are known to exist and be valid targets for other resources to link to.
+	 */
+	public void addResolvedMatchUrl(
+			FhirContext theFhirContext, String theConditionalUrl, @Nonnull IResourcePersistentId<?> thePersistentId) {
+		Validate.notBlank(theConditionalUrl, "theConditionalUrl must not be blank");
+		Validate.notNull(thePersistentId, "thePersistentId must not be null");
+
+		if (myResolvedMatchUrls.isEmpty()) {
+			myResolvedMatchUrls = new HashMap<>();
+		} else if (matchUrlWithDiffIdExists(theConditionalUrl, thePersistentId)) {
+			String msg = theFhirContext
+					.getLocalizer()
+					.getMessage(TransactionDetails.class, "invalidMatchUrlMultipleMatches", theConditionalUrl);
+			throw new PreconditionFailedException(Msg.code(2207) + msg);
+		}
+		myResolvedMatchUrls.put(theConditionalUrl, thePersistentId);
+	}
+
+	/**
+	 * @see #addResolvedMatchUrl(FhirContext, String, IResourcePersistentId)
+	 * @since 6.8.0
+	 */
+	public void removeResolvedMatchUrl(String theMatchUrl) {
+		myResolvedMatchUrls.remove(theMatchUrl);
+	}
+
+	private boolean matchUrlWithDiffIdExists(String theConditionalUrl, @Nonnull IResourcePersistentId thePersistentId) {
+		if (myResolvedMatchUrls.containsKey(theConditionalUrl)
+				&& myResolvedMatchUrls.get(theConditionalUrl) != NOT_FOUND) {
+			return !myResolvedMatchUrls.get(theConditionalUrl).getId().equals(thePersistentId.getId());
+		}
+		return false;
+	}
+
+	/**
+	 * This is the wall-clock time that a given transaction started.
+	 */
+	public Date getTransactionDate() {
+		return myTransactionDate;
+	}
+
+	/**
+	 * Remove an item previously stored in user data
+	 *
+	 * @see #getUserData(String)
+	 */
+	public void clearUserData(String theKey) {
+		if (myUserData != null) {
+			myUserData.remove(theKey);
+		}
+	}
+
+	/**
+	 * Sets an arbitrary object that will last the lifetime of the current transaction
+	 *
+	 * @see #getUserData(String)
+	 */
+	public void putUserData(String theKey, Object theValue) {
+		getUserData().put(theKey, theValue);
+	}
+
+	/**
+	 * Gets the user data map, creating it if it doesn't already exist
+	 */
+	public Map<String, Object> getUserData() {
+		if (myUserData == null) {
+			myUserData = new HashMap<>();
+		}
+		return myUserData;
+	}
+
+	/**
+	 * Gets an arbitrary object that will last the lifetime of the current transaction
+	 *
+	 * @see #putUserData(String, Object)
+	 */
+	@SuppressWarnings("unchecked")
+	public <T> T getUserData(String theKey) {
+		if (myUserData != null) {
+			return (T) myUserData.get(theKey);
+		}
+		return null;
+	}
+
+	/**
+	 * Fetches the existing value in the user data map, or uses {@literal theSupplier} to create a new object and
+	 * puts that in the map, and returns it
+	 */
+	@SuppressWarnings("unchecked")
+	public <T> T getOrCreateUserData(String theKey, Supplier<T> theSupplier) {
+		T retVal = getUserData(theKey);
+		if (retVal == null) {
+			retVal = theSupplier.get();
+			putUserData(theKey, retVal);
+		}
+		return retVal;
+	}
+
+	/**
+	 * This can be used by processors for FHIR transactions to defer interceptor broadcasts on sub-requests if needed
+	 *
+	 * @since 5.2.0
+	 */
+	public void beginAcceptingDeferredInterceptorBroadcasts(Pointcut... thePointcuts) {
+		Validate.isTrue(!isAcceptingDeferredInterceptorBroadcasts());
+		myDeferredInterceptorBroadcasts = ArrayListMultimap.create();
+		myDeferredInterceptorBroadcastPointcuts = EnumSet.of(thePointcuts[0], thePointcuts);
+	}
+
+	/**
+	 * This can be used by processors for FHIR transactions to defer interceptor broadcasts on sub-requests if needed
+	 *
+	 * @since 5.2.0
+	 */
+	public boolean isAcceptingDeferredInterceptorBroadcasts() {
+		return myDeferredInterceptorBroadcasts != null;
+	}
+
+	/**
+	 * This can be used by processors for FHIR transactions to defer interceptor broadcasts on sub-requests if needed
+	 *
+	 * @since 5.2.0
+	 */
+	public boolean isAcceptingDeferredInterceptorBroadcasts(Pointcut thePointcut) {
+		return myDeferredInterceptorBroadcasts != null && myDeferredInterceptorBroadcastPointcuts.contains(thePointcut);
+	}
+
+	/**
+	 * This can be used by processors for FHIR transactions to defer interceptor broadcasts on sub-requests if needed
+	 *
+	 * @since 5.2.0
+	 */
+	public ListMultimap<Pointcut, HookParams> endAcceptingDeferredInterceptorBroadcasts() {
+		Validate.isTrue(isAcceptingDeferredInterceptorBroadcasts());
+		ListMultimap<Pointcut, HookParams> retVal = myDeferredInterceptorBroadcasts;
+		myDeferredInterceptorBroadcasts = null;
+		myDeferredInterceptorBroadcastPointcuts = null;
+		return retVal;
+	}
+
+	/**
+	 * This can be used by processors for FHIR transactions to defer interceptor broadcasts on sub-requests if needed
+	 *
+	 * @since 5.2.0
+	 */
+	public void addDeferredInterceptorBroadcast(Pointcut thePointcut, HookParams theHookParams) {
+		Validate.isTrue(isAcceptingDeferredInterceptorBroadcasts(thePointcut));
+		myDeferredInterceptorBroadcasts.put(thePointcut, theHookParams);
+	}
+
+	public InterceptorInvocationTimingEnum getInvocationTiming(Pointcut thePointcut) {
+		if (myDeferredInterceptorBroadcasts == null) {
+			return InterceptorInvocationTimingEnum.ACTIVE;
+		}
+		List<HookParams> hookParams = myDeferredInterceptorBroadcasts.get(thePointcut);
+		return hookParams == null ? InterceptorInvocationTimingEnum.ACTIVE : InterceptorInvocationTimingEnum.DEFERRED;
+	}
+
+	public void deferredBroadcastProcessingFinished() {}
+
+	public void clearResolvedItems() {
+		myResolvedResourceIds.clear();
+		myReverseResolvedResourceIds.clear();
+		myResolvedMatchUrls.clear();
+	}
+
+	public boolean hasResolvedResourceIds() {
+		return !myResolvedResourceIds.isEmpty();
+	}
+
+	public boolean isFhirTransaction() {
+		return myFhirTransaction;
+	}
+
+	public void setFhirTransaction(boolean theFhirTransaction) {
+		myFhirTransaction = theFhirTransaction;
+	}
+
+	/**
+	 * Returns {@code true} when the bundle being processed is not the client's own request, but a single-entry
+	 * transaction bundle the server constructed internally to process one entry of a client batch. Hooks that
+	 * reshape client transaction bundles should typically skip such transactions.
+	 */
+	public boolean isServerConstructedBatchSubRequest() {
+		return myServerConstructedBatchSubRequest;
+	}
+
+	public void setServerConstructedBatchSubRequest(boolean theServerConstructedBatchSubRequest) {
+		myServerConstructedBatchSubRequest = theServerConstructedBatchSubRequest;
+	}
+
+	public void addAutoCreatedPlaceholderResource(IIdType theResource) {
+		if (myAutoCreatedPlaceholderResources.isEmpty()) {
+			myAutoCreatedPlaceholderResources = new ArrayList<>();
+		}
+		myAutoCreatedPlaceholderResources.add(theResource);
+	}
+
+	@Nonnull
+	public List<IIdType> getAutoCreatedPlaceholderResourcesAndClear() {
+		List<IIdType> retVal = myAutoCreatedPlaceholderResources;
+		if (!myAutoCreatedPlaceholderResources.isEmpty()) {
+			myAutoCreatedPlaceholderResources = Collections.emptyList();
+		}
+		return retVal;
+	}
+
+	public IBaseBundle getTransactionBundle() {
+		return myTransactionBundle;
+	}
+
+	public <T extends IResourcePersistentId<?>> IIdType getReverseResolvedId(T thePid) {
+		return myReverseResolvedResourceIds.get(thePid);
+	}
+
+	public <T extends IResourcePersistentId<?>> boolean hasReverseResolvedId(T thePid) {
+		return myReverseResolvedResourceIds.containsKey(thePid);
+	}
+}

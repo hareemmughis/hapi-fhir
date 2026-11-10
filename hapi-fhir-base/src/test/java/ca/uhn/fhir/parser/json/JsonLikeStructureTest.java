@@ -1,17 +1,17 @@
 package ca.uhn.fhir.parser.json;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
+import ca.uhn.fhir.parser.json.jackson.JacksonStructure;
+import org.junit.jupiter.api.Test;
 
 import java.io.StringReader;
+import java.io.StringWriter;
 
-import org.junit.Test;
-
-import ca.uhn.fhir.context.FhirContext;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 public class JsonLikeStructureTest {
-	private static FhirContext ourCtx;
-	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(JsonLikeStructureTest.class);
+//	private static FhirContext ourCtx;
+//	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(JsonLikeStructureTest.class);
 
 	private static final String TEST_STRUCTURELOADING_DATA = 
 		"{" +
@@ -41,13 +41,13 @@ public class JsonLikeStructureTest {
 	@Test
 	public void testStructureLoading() {
 		StringReader reader = new StringReader(TEST_STRUCTURELOADING_DATA);
-		JsonLikeStructure jsonStructure = new GsonStructure();
+		JsonLikeStructure jsonStructure = new JacksonStructure();
 		jsonStructure.load(reader);
 		
-		JsonLikeObject rootObject = jsonStructure.getRootObject();
-		
+		BaseJsonLikeObject rootObject = jsonStructure.getRootObject();
+
 		assertNotNull(rootObject);
-		assertEquals(JsonLikeValue.ValueType.OBJECT, rootObject.getJsonType());
+		assertEquals(BaseJsonLikeValue.ValueType.OBJECT, rootObject.getJsonType());
 	}
 
 	private static final String TEST_JSONTYPES_DATA = 
@@ -72,24 +72,24 @@ public class JsonLikeStructureTest {
 	@Test
 	public void testJsonAndDataTypes() {
 		StringReader reader = new StringReader(TEST_JSONTYPES_DATA);
-		JsonLikeStructure jsonStructure = new GsonStructure();
+		JsonLikeStructure jsonStructure = new JacksonStructure();
 		jsonStructure.load(reader);
 		
-		JsonLikeObject rootObject = jsonStructure.getRootObject();
-		
+		BaseJsonLikeObject rootObject = jsonStructure.getRootObject();
+
 		assertNotNull(rootObject);
 		
-		JsonLikeValue value = rootObject.get("object-value");
+		BaseJsonLikeValue value = rootObject.get("object-value");
 		assertNotNull(value);
-		assertEquals(JsonLikeValue.ValueType.OBJECT, value.getJsonType());
+		assertEquals(BaseJsonLikeValue.ValueType.OBJECT, value.getJsonType());
 		assertEquals(true, value.isObject());
 		assertEquals(false, value.isArray());
 		assertEquals(false, value.isScalar());
 		assertEquals(false, value.isNull());
 
-		JsonLikeObject obj = value.getAsObject();
+		BaseJsonLikeObject obj = value.getAsObject();
 		assertNotNull(obj);
-		assertEquals(JsonLikeValue.ValueType.OBJECT, obj.getJsonType());
+		assertEquals(BaseJsonLikeValue.ValueType.OBJECT, obj.getJsonType());
 		assertEquals(true, obj.isObject());
 		assertEquals(false, obj.isArray());
 		assertEquals(false, obj.isScalar());
@@ -97,15 +97,15 @@ public class JsonLikeStructureTest {
 		
 		value = rootObject.get("array-value");
 		assertNotNull(value);
-		assertEquals(JsonLikeValue.ValueType.ARRAY, value.getJsonType());
+		assertEquals(BaseJsonLikeValue.ValueType.ARRAY, value.getJsonType());
 		assertEquals(false, value.isObject());
 		assertEquals(true, value.isArray());
 		assertEquals(false, value.isScalar());
 		assertEquals(false, value.isNull());
 
-		JsonLikeArray array = value.getAsArray();
+		BaseJsonLikeArray array = value.getAsArray();
 		assertNotNull(array);
-		assertEquals(JsonLikeValue.ValueType.ARRAY, array.getJsonType());
+		assertEquals(BaseJsonLikeValue.ValueType.ARRAY, array.getJsonType());
 		assertEquals(false, array.isObject());
 		assertEquals(true, array.isArray());
 		assertEquals(false, array.isScalar());
@@ -113,7 +113,7 @@ public class JsonLikeStructureTest {
 
 		value = rootObject.get("null-value");
 		assertNotNull(value);
-		assertEquals(JsonLikeValue.ValueType.NULL, value.getJsonType());
+		assertEquals(BaseJsonLikeValue.ValueType.NULL, value.getJsonType());
 		assertEquals(false, value.isObject());
 		assertEquals(false, value.isArray());
 		assertEquals(false, value.isScalar());
@@ -121,25 +121,52 @@ public class JsonLikeStructureTest {
 
 		value = rootObject.get("scalar-string");
 		assertNotNull(value);
-		assertEquals(JsonLikeValue.ValueType.SCALAR, value.getJsonType());
+		assertEquals(BaseJsonLikeValue.ValueType.SCALAR, value.getJsonType());
 		assertEquals(false, value.isObject());
 		assertEquals(false, value.isArray());
 		assertEquals(true, value.isScalar());
 		assertEquals(false, value.isNull());
-		assertEquals(JsonLikeValue.ScalarType.STRING, value.getDataType());
+		assertEquals(BaseJsonLikeValue.ScalarType.STRING, value.getDataType());
 		assertEquals(value.getAsString(), "A scalar string");
 
 		value = rootObject.get("scalar-number");
 		assertNotNull(value);
-		assertEquals(JsonLikeValue.ValueType.SCALAR, value.getJsonType());
-		assertEquals(JsonLikeValue.ScalarType.NUMBER, value.getDataType());
+		assertEquals(BaseJsonLikeValue.ValueType.SCALAR, value.getJsonType());
+		assertEquals(BaseJsonLikeValue.ScalarType.NUMBER, value.getDataType());
 		assertEquals(value.getAsString(), "11111");
 
 		value = rootObject.get("scalar-boolean");
 		assertNotNull(value);
-		assertEquals(JsonLikeValue.ValueType.SCALAR, value.getJsonType());
-		assertEquals(JsonLikeValue.ScalarType.BOOLEAN, value.getDataType());
+		assertEquals(BaseJsonLikeValue.ValueType.SCALAR, value.getJsonType());
+		assertEquals(BaseJsonLikeValue.ScalarType.BOOLEAN, value.getDataType());
 		assertEquals(value.getAsString(), "true");
+	}
+
+	/**
+	 * Tests the {@code JacksonWriter.setWriter(..)} override, for sequential reuse of the same
+	 * {@link JacksonStructure}, not for concurrency.
+	 */
+	@Test
+	public void testGetJsonLikeWriterUsesCurrentWriter() throws Exception {
+		JacksonStructure structure = new JacksonStructure();
+
+		StringWriter firstWriter = new StringWriter();
+		BaseJsonLikeWriter jsonWriter = structure.getJsonLikeWriter(firstWriter);
+		jsonWriter.init();
+		jsonWriter.beginObject();
+		jsonWriter.write("first", "value");
+		jsonWriter.endObject();
+		jsonWriter.close();
+		assertEquals("{\"first\":\"value\"}", firstWriter.toString());
+
+		StringWriter secondWriter = new StringWriter();
+		jsonWriter = structure.getJsonLikeWriter(secondWriter);
+		jsonWriter.init();
+		jsonWriter.beginObject();
+		jsonWriter.write("second", "value");
+		jsonWriter.endObject();
+		jsonWriter.close();
+		assertEquals("{\"second\":\"value\"}", secondWriter.toString());
 	}
 
 }

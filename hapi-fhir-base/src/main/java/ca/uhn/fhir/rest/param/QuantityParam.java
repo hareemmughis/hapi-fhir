@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.param;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
- *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,25 +17,26 @@ package ca.uhn.fhir.rest.param;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.param;
 
-import java.math.BigDecimal;
-import java.util.List;
-
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.api.IQueryParameterType;
+import ca.uhn.fhir.model.base.composite.BaseQuantityDt;
+import ca.uhn.fhir.model.primitive.DecimalDt;
+import ca.uhn.fhir.model.primitive.UriDt;
+import ca.uhn.fhir.util.CoverageIgnore;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
 import org.hl7.fhir.instance.model.api.IPrimitiveType;
 
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.model.api.IQueryParameterType;
-import ca.uhn.fhir.model.dstu.valueset.QuantityCompararatorEnum;
-import ca.uhn.fhir.model.primitive.DecimalDt;
-import ca.uhn.fhir.model.primitive.UriDt;
-import ca.uhn.fhir.util.CoverageIgnore;
+import java.math.BigDecimal;
+import java.util.List;
 
-@SuppressWarnings("deprecation")
 public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements IQueryParameterType {
 
+	private static final long serialVersionUID = 1L;
 	private BigDecimal myValue;
 	private String mySystem;
 	private String myUnits;
@@ -51,84 +50,15 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 
 	/**
 	 * Constructor
-	 * 
-	 * @param theComparator
-	 *            The comparator, or <code>null</code> for an equals comparator
-	 * @param theValue
-	 *            A quantity value
-	 * @param theSystem
-	 *            The unit system
-	 * @param theUnits
-	 *            The unit code
-	 * @deprecated Use the equivalent constructor which uses {@link ParamPrefixEnum} instead, as {@link QuantityCompararatorEnum} has been deprecated
-	 */
-	@Deprecated
-	public QuantityParam(QuantityCompararatorEnum theComparator, BigDecimal theValue, String theSystem, String theUnits) {
-		setComparator(theComparator);
-		setValue(theValue);
-		setSystem(theSystem);
-		setUnits(theUnits);
-	}
-
-	/**
-	 * Constructor
-	 * 
-	 * @param theComparator
-	 *            The comparator, or <code>null</code> for an equals comparator
-	 * @param theValue
-	 *            A quantity value
-	 * @param theSystem
-	 *            The unit system
-	 * @param theUnits
-	 *            The unit code
-	 * @deprecated Use the equivalent constructor which uses {@link ParamPrefixEnum} instead, as {@link QuantityCompararatorEnum} has been deprecated
-	 */
-	@Deprecated
-	public QuantityParam(QuantityCompararatorEnum theComparator, double theValue, String theSystem, String theUnits) {
-		setComparator(theComparator);
-		setValue(theValue);
-		setSystem(theSystem);
-		setUnits(theUnits);
-	}
-
-	/**
-	 * Constructor
-	 * 
-	 * @param theComparator
-	 *            The comparator, or <code>null</code> for an equals comparator
-	 * @param theValue
-	 *            A quantity value
-	 * @param theSystem
-	 *            The unit system
-	 * @param theUnits
-	 *            The unit code
-	 * @deprecated Use the equivalent constructor which uses {@link ParamPrefixEnum} instead, as {@link QuantityCompararatorEnum} has been deprecated
-	 */
-	@Deprecated
-	public QuantityParam(QuantityCompararatorEnum theComparator, long theValue, String theSystem, String theUnits) {
-		setComparator(theComparator);
-		setValue(theValue);
-		setSystem(theSystem);
-		setUnits(theUnits);
-	}
-	
-	
-	
-	
-	
-	
-	
-	/**
-	 * Constructor
-	 * 
+	 *
 	 * @param thePrefix
-	 *            The comparator, or <code>null</code> for an equals comparator
+	 *           The comparator, or <code>null</code> for an equals comparator
 	 * @param theValue
-	 *            A quantity value
+	 *           A quantity value
 	 * @param theSystem
-	 *            The unit system
+	 *           The unit system
 	 * @param theUnits
-	 *            The unit code
+	 *           The unit code
 	 */
 	public QuantityParam(ParamPrefixEnum thePrefix, BigDecimal theValue, String theSystem, String theUnits) {
 		setPrefix(thePrefix);
@@ -139,15 +69,15 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @param thePrefix
-	 *            The comparator, or <code>null</code> for an equals comparator
+	 *           The comparator, or <code>null</code> for an equals comparator
 	 * @param theValue
-	 *            A quantity value
+	 *           A quantity value
 	 * @param theSystem
-	 *            The unit system
+	 *           The unit system
 	 * @param theUnits
-	 *            The unit code
+	 *           The unit code
 	 */
 	public QuantityParam(ParamPrefixEnum thePrefix, double theValue, String theSystem, String theUnits) {
 		setPrefix(thePrefix);
@@ -158,15 +88,15 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @param thePrefix
-	 *            The comparator, or <code>null</code> for an equals comparator
+	 *           The comparator, or <code>null</code> for an equals comparator
 	 * @param theValue
-	 *            A quantity value
+	 *           A quantity value
 	 * @param theSystem
-	 *            The unit system
+	 *           The unit system
 	 * @param theUnits
-	 *            The unit code
+	 *           The unit code
 	 */
 	public QuantityParam(ParamPrefixEnum thePrefix, long theValue, String theSystem, String theUnits) {
 		setPrefix(thePrefix);
@@ -175,12 +105,11 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 		setUnits(theUnits);
 	}
 
-
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @param theQuantity
-	 *            A quantity value (with no system or units), such as "100.0" or "gt4"
+	 *           A quantity value (with no system or units), such as "100.0" or "gt4"
 	 */
 	public QuantityParam(String theQuantity) {
 		setValueAsQueryToken(null, null, null, theQuantity);
@@ -188,9 +117,9 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @param theQuantity
-	 *            A quantity value (with no system or units), such as <code>100</code>
+	 *           A quantity value (with no system or units), such as <code>100</code>
 	 */
 	public QuantityParam(long theQuantity) {
 		setValueAsQueryToken(null, null, null, Long.toString(theQuantity));
@@ -198,13 +127,13 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 
 	/**
 	 * Constructor
-	 * 
+	 *
 	 * @param theQuantity
-	 *            A quantity value (with no system or units), such as "100.0" or "&lt;=4"
+	 *           A quantity value (with no system or units), such as "100.0" or "&lt;=4"
 	 * @param theSystem
-	 *            The unit system
+	 *           The unit system
 	 * @param theUnits
-	 *            The unit code
+	 *           The unit code
 	 */
 	public QuantityParam(String theQuantity, String theSystem, String theUnits) {
 		setValueAsQueryToken(null, null, null, theQuantity);
@@ -214,9 +143,9 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 
 	private void clear() {
 		setPrefix(null);
-		setSystem((String)null);
+		setSystem((String) null);
 		setUnits(null);
-		setValue((BigDecimal)null);
+		setValue((BigDecimal) null);
 	}
 
 	@Override
@@ -225,10 +154,10 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 	}
 
 	@Override
-	String doGetValueAsQueryToken(FhirContext theContext) {
+	String doGetValueAsQueryToken() {
 		StringBuilder b = new StringBuilder();
 		if (getPrefix() != null) {
-			b.append(ParameterUtil.escapeWithDefault(getPrefix().getValueForContext(theContext)));
+			b.append(ParameterUtil.escapeWithDefault(getPrefix().getValue()));
 		}
 
 		b.append(ParameterUtil.escapeWithDefault(getValueAsString()));
@@ -266,7 +195,6 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 		if (parts.size() > 2 && StringUtils.isNotBlank(parts.get(2))) {
 			setUnits(parts.get(2));
 		}
-
 	}
 
 	/**
@@ -274,7 +202,7 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 	 * <p>
 	 * Note that prior to HAPI FHIR 1.5, this method returned a {@link UriDt}
 	 * </p>
-	 * 
+	 *
 	 * @since 1.5
 	 */
 	public String getSystem() {
@@ -294,47 +222,17 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 		return myUnits;
 	}
 
-	
 	/**
 	 * Returns the quantity/value, or null if none was provided
 	 * <p>
 	 * Note that prior to HAPI FHIR 1.5, this method returned a {@link DecimalDt}
 	 * </p>
-	 * 
+	 *
 	 * @since 1.5
 	 */
 	public BigDecimal getValue() {
 		return myValue;
 	}
-	
-	/**
-	 * @deprecated Use {@link #getValue()} instead
-	 */
-	@Deprecated
-	public DecimalDt getValueAsDecimalDt() {
-		return new DecimalDt(myValue);
-	}
-
-	/**
-	 * @deprecated Use {@link #getPrefix()} with the {@link ParamPrefixEnum#APPROXIMATE} constant
-	 */
-	@Deprecated
-	public boolean isApproximate() {
-		return getPrefix() == ParamPrefixEnum.APPROXIMATE;
-	}
-
-	/**
-	 * @deprecated Use {@link #setPrefix(ParamPrefixEnum)} with the {@link ParamPrefixEnum#APPROXIMATE} constant
-	 */
-	@Deprecated
-	public void setApproximate(boolean theApproximate) {
-		if (theApproximate) {
-			setPrefix(ParamPrefixEnum.APPROXIMATE);
-		} else {
-			setPrefix(null);
-		}
-	}
-
 
 	public QuantityParam setSystem(String theSystem) {
 		mySystem = theSystem;
@@ -402,4 +300,23 @@ public class QuantityParam extends BaseParamWithPrefix<QuantityParam> implements
 		return b.toString();
 	}
 
+	public static QuantityParam toQuantityParam(IQueryParameterType theParam) {
+		if (theParam instanceof BaseQuantityDt) {
+			BaseQuantityDt param = (BaseQuantityDt) theParam;
+			String systemValue = param.getSystemElement().getValueAsString();
+			String unitsValue = param.getUnitsElement().getValueAsString();
+			ParamPrefixEnum cmpValue =
+					ParamPrefixEnum.forValue(param.getComparatorElement().getValueAsString());
+			BigDecimal valueValue = param.getValueElement().getValue();
+			return new QuantityParam()
+					.setSystem(systemValue)
+					.setUnits(unitsValue)
+					.setPrefix(cmpValue)
+					.setValue(valueValue);
+		} else if (theParam instanceof QuantityParam) {
+			return (QuantityParam) theParam;
+		} else {
+			throw new IllegalArgumentException(Msg.code(1948) + "Invalid quantity type: " + theParam.getClass());
+		}
+	}
 }

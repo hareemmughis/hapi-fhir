@@ -1,0 +1,327 @@
+/*-
+ * #%L
+ * HAPI FHIR - Server Framework
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.rest.api.server.bulk;
+
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import ca.uhn.fhir.model.api.BaseBatchJobParameters;
+import ca.uhn.fhir.rest.server.util.JsonDateDeserializer;
+import ca.uhn.fhir.rest.server.util.JsonDateSerializer;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import tools.jackson.databind.annotation.JsonDeserialize;
+import tools.jackson.databind.annotation.JsonSerialize;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.List;
+import java.util.Optional;
+
+public class BulkExportJobParameters extends BaseBatchJobParameters {
+
+	/**
+	 * List of resource types to export.
+	 */
+	@JsonProperty("resourceTypes")
+	private List<String> myResourceTypes;
+
+	/**
+	 * The start date from when we should start doing the export.
+	 */
+	@JsonSerialize(using = JsonDateSerializer.class)
+	@JsonDeserialize(using = JsonDateDeserializer.class)
+	@JsonProperty("since")
+	private Date mySince;
+
+	/**
+	 * The end date to which we should stop doing the export.
+	 */
+	@JsonSerialize(using = JsonDateSerializer.class)
+	@JsonDeserialize(using = JsonDateDeserializer.class)
+	@JsonProperty("until")
+	private Date myUntil;
+
+	@JsonProperty("exportId")
+	private String myExportId;
+
+	/**
+	 * Filters are used to narrow down the resources to export.
+	 * Eg:
+	 * Patient/123?group=a
+	 * "group=a" is a filter
+	 */
+	@JsonProperty("filters")
+	private List<String> myFilters;
+
+	/**
+	 * URLs to be applied by the inMemoryMatcher after the SQL select
+	 */
+	@JsonProperty("postFetchFilterUrls")
+	private List<String> myPostFetchFilterUrls;
+
+	/**
+	 * Output format.
+	 * Currently unsupported (all outputs are ndjson)
+	 */
+	@JsonProperty("outputFormat")
+	private String myOutputFormat;
+
+	/**
+	 * Export style - Patient, Group or Everything
+	 */
+	@JsonProperty("exportStyle")
+	private ExportStyle myExportStyle;
+
+	/**
+	 * Patient id(s)
+	 */
+	@JsonProperty("patientIds")
+	private List<String> myPatientIds = new ArrayList<>();
+
+	/**
+	 * The request which originated the request.
+	 */
+	@JsonProperty("originalRequestUrl")
+	private String myOriginalRequestUrl;
+
+	/**
+	 * The group id
+	 */
+	@JsonProperty("groupId")
+	private String myGroupId;
+
+	/**
+	 * For group and patient instance exports;
+	 * whether or not to expand mdm
+	 */
+	@JsonProperty("expandMdm")
+	private Boolean myExpandMdm;
+
+	@JsonProperty("partitionId")
+	private RequestPartitionId myPartitionIdForSecurity;
+
+	@JsonProperty("binarySecurityContextIdentifierSystem")
+	private String myBinarySecurityContextIdentifierSystem;
+
+	@JsonProperty("binarySecurityContextIdentifierValue")
+	private String myBinarySecurityContextIdentifierValue;
+
+	@JsonProperty("includeHistory")
+	private boolean myIncludeHistory;
+
+	public String getExportIdentifier() {
+		return myExportId;
+	}
+
+	public void setExportIdentifier(String theExportId) {
+		myExportId = theExportId;
+	}
+
+	public List<String> getResourceTypes() {
+		if (myResourceTypes == null) {
+			myResourceTypes = new ArrayList<>();
+		}
+		return myResourceTypes;
+	}
+
+	public void setResourceTypes(Collection<String> theResourceTypes) {
+		getResourceTypes().clear();
+		if (theResourceTypes != null) {
+			getResourceTypes().addAll(theResourceTypes);
+		}
+	}
+
+	public Date getSince() {
+		return mySince;
+	}
+
+	public void setSince(Date theSince) {
+		mySince = theSince;
+	}
+
+	public Date getUntil() {
+		return myUntil;
+	}
+
+	public void setUntil(Date theUntil) {
+		myUntil = theUntil;
+	}
+
+	public List<String> getFilters() {
+		if (myFilters == null) {
+			myFilters = new ArrayList<>();
+		}
+		return myFilters;
+	}
+
+	public void setFilters(Collection<String> theFilters) {
+		getFilters().clear();
+		if (theFilters != null) {
+			getFilters().addAll(theFilters);
+		}
+	}
+
+	public List<String> getPostFetchFilterUrls() {
+		if (myPostFetchFilterUrls == null) {
+			myPostFetchFilterUrls = new ArrayList<>();
+		}
+		return myPostFetchFilterUrls;
+	}
+
+	public void setPostFetchFilterUrls(Collection<String> thePostFetchFilterUrls) {
+		getPostFetchFilterUrls().clear();
+		if (thePostFetchFilterUrls != null) {
+			getPostFetchFilterUrls().addAll(thePostFetchFilterUrls);
+		}
+	}
+
+	public String getOutputFormat() {
+		return myOutputFormat;
+	}
+
+	public void setOutputFormat(String theOutputFormat) {
+		myOutputFormat = theOutputFormat;
+	}
+
+	public ExportStyle getExportStyle() {
+		return myExportStyle;
+	}
+
+	public void setExportStyle(ExportStyle theExportStyle) {
+		myExportStyle = theExportStyle;
+	}
+
+	public List<String> getPatientIds() {
+		if (myPatientIds == null) {
+			myPatientIds = new ArrayList<>();
+		}
+		return myPatientIds;
+	}
+
+	public void setPatientIds(Collection<String> thePatientIds) {
+		getPatientIds().clear();
+		if (thePatientIds != null) {
+			getPatientIds().addAll(thePatientIds);
+		}
+	}
+
+	public String getGroupId() {
+		return myGroupId;
+	}
+
+	public void setGroupId(String theGroupId) {
+		myGroupId = theGroupId;
+	}
+
+	public boolean isExpandMdm() {
+		return Boolean.TRUE.equals(myExpandMdm);
+	}
+
+	/**
+	 * Checks if the _mdm parameter was explicitly omitted from the request Parameters
+	 * @return an {@link Optional} containing the status if present,
+	 *         otherwise an empty {@link Optional}
+	 */
+	public Optional<Boolean> getExpandMdm() {
+		return Optional.ofNullable(myExpandMdm);
+	}
+
+	public void setExpandMdm(Boolean theExpandMdm) {
+		myExpandMdm = theExpandMdm;
+	}
+
+	public String getOriginalRequestUrl() {
+		return myOriginalRequestUrl;
+	}
+
+	public void setOriginalRequestUrl(String theOriginalRequestUrl) {
+		this.myOriginalRequestUrl = theOriginalRequestUrl;
+	}
+
+	/**
+	 * The partition ID associated with the initial job initiation. This partition ID is only used for
+	 * security checks to ensure that the calling user has appropriate permissions to access the data. As of
+	 * version 3 of the Bulk Export Batch2 job, we no longer use this element at runtime while actually
+	 * running the export and building the results - the job
+	 * calculates the partition(s) used for those activities whenever it needs to.
+	 */
+	public RequestPartitionId getPartitionIdForSecurity() {
+		return myPartitionIdForSecurity;
+	}
+
+	/**
+	 * The partition ID associated with the initial job initiation. This partition ID is only used for
+	 * security checks to ensure that the calling user has appropriate permissions to access the data. As of
+	 * version 3 of the Bulk Export Batch2 job, we no longer use this element at runtime while actually
+	 * running the export and building the results - the job
+	 * calculates the partition(s) used for those activities whenever it needs to.
+	 */
+	public void setPartitionIdForSecurity(RequestPartitionId thePartitionIdForSecurity) {
+		myPartitionIdForSecurity = thePartitionIdForSecurity;
+	}
+
+	public boolean isIncludeHistory() {
+		return myIncludeHistory;
+	}
+
+	/**
+	 * Sets a value to place in the generated Binary resource's
+	 * Binary.securityContext.identifier
+	 */
+	public void setBinarySecurityContextIdentifierSystem(String theBinarySecurityContextIdentifierSystem) {
+		myBinarySecurityContextIdentifierSystem = theBinarySecurityContextIdentifierSystem;
+	}
+
+	/**
+	 * Sets a value to place in the generated Binary resource's
+	 * Binary.securityContext.identifier
+	 */
+	public String getBinarySecurityContextIdentifierSystem() {
+		return myBinarySecurityContextIdentifierSystem;
+	}
+
+	/**
+	 * Sets a value to place in the generated Binary resource's
+	 * Binary.securityContext.identifier
+	 */
+	public void setBinarySecurityContextIdentifierValue(String theBinarySecurityContextIdentifierValue) {
+		myBinarySecurityContextIdentifierValue = theBinarySecurityContextIdentifierValue;
+	}
+
+	/**
+	 * Sets a value to place in the generated Binary resource's
+	 * Binary.securityContext.identifier
+	 */
+	public String getBinarySecurityContextIdentifierValue() {
+		return myBinarySecurityContextIdentifierValue;
+	}
+
+	/**
+	 * Indicates if all history must be exported for exported resources
+	 */
+	public void setIncludeHistory(boolean theIncludeHistory) {
+		myIncludeHistory = theIncludeHistory;
+	}
+
+	public enum ExportStyle {
+		PATIENT,
+		GROUP,
+		SYSTEM
+	}
+}

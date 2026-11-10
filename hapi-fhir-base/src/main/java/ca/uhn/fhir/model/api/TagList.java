@@ -1,17 +1,15 @@
-package ca.uhn.fhir.model.api;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,6 +17,11 @@ package ca.uhn.fhir.model.api;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.model.api;
+
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.util.CoverageIgnore;
+import org.hl7.fhir.instance.model.api.IBase;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -28,14 +31,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-import org.hl7.fhir.instance.model.api.IBase;
-
-import ca.uhn.fhir.util.CoverageIgnore;
-
 /**
  * A collection of tags present on a single resource. TagList is backed by a {@link LinkedHashSet}, so the order of
  * added tags will be consistent, but duplicates will not be preserved.
- * 
+ *
  * <p>
  * <b>Thread safety:</b> This class is not thread safe
  * </p>
@@ -102,11 +101,11 @@ public class TagList implements Set<Tag>, Serializable, IBase {
 
 	/**
 	 * Add a new tag instance
-	 * 
+	 *
 	 * @param theScheme
-	 *           The tag scheme
+	 *           The tag scheme (the system)
 	 * @param theTerm
-	 *           The tag term
+	 *           The tag term (the code)
 	 * @return Returns the newly created tag instance. Note that the tag is added to the list by this method, so you
 	 *         generally do not need to interact directly with the added tag.
 	 */
@@ -119,7 +118,7 @@ public class TagList implements Set<Tag>, Serializable, IBase {
 
 	/**
 	 * Add a new tag instance
-	 * 
+	 *
 	 * @param theScheme
 	 *           The tag scheme
 	 * @param theTerm
@@ -154,18 +153,13 @@ public class TagList implements Set<Tag>, Serializable, IBase {
 
 	@Override
 	public boolean equals(Object obj) {
-		if (this == obj)
-			return true;
-		if (obj == null)
-			return false;
-		if (getClass() != obj.getClass())
-			return false;
+		if (this == obj) return true;
+		if (obj == null) return false;
+		if (getClass() != obj.getClass()) return false;
 		TagList other = (TagList) obj;
 		if (myTagSet == null) {
-			if (other.myTagSet != null)
-				return false;
-		} else if (!myTagSet.equals(other.myTagSet))
-			return false;
+			if (other.myTagSet != null) return false;
+		} else if (!myTagSet.equals(other.myTagSet)) return false;
 		return true;
 	}
 
@@ -270,7 +264,7 @@ public class TagList implements Set<Tag>, Serializable, IBase {
 	@Override
 	@CoverageIgnore
 	public List<String> getFormatCommentsPre() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(1895));
 	}
 
 	/**
@@ -279,7 +273,16 @@ public class TagList implements Set<Tag>, Serializable, IBase {
 	@Override
 	@CoverageIgnore
 	public List<String> getFormatCommentsPost() {
-		throw new UnsupportedOperationException();
+		throw new UnsupportedOperationException(Msg.code(1896));
 	}
 
+	@Override
+	public Object getUserData(String theName) {
+		throw new UnsupportedOperationException(Msg.code(1897));
+	}
+
+	@Override
+	public void setUserData(String theName, Object theValue) {
+		throw new UnsupportedOperationException(Msg.code(1898));
+	}
 }

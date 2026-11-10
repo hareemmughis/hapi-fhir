@@ -1,17 +1,15 @@
-package ca.uhn.fhir.rest.param;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
- *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,127 +17,56 @@ package ca.uhn.fhir.rest.param;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.rest.param;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-
+import ca.uhn.fhir.context.ConfigurationException;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.model.api.IQueryParameterOr;
+import ca.uhn.fhir.model.api.IQueryParameterType;
+import ca.uhn.fhir.model.api.TemporalPrecisionEnum;
+import ca.uhn.fhir.model.primitive.IdDt;
 import ca.uhn.fhir.model.primitive.IntegerDt;
+import ca.uhn.fhir.rest.annotation.IdParam;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.QualifiedParamList;
+import ca.uhn.fhir.util.ReflectionUtil;
 import ca.uhn.fhir.util.UrlUtil;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+
+import java.io.Serial;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
 
 public class ParameterUtil {
 
-	private static final Set<Class<?>> BINDABLE_INTEGER_TYPES;
-
-	static {
-		HashSet<Class<?>> intTypes = new HashSet<Class<?>>();
-		intTypes.add(IntegerDt.class);
-		intTypes.add(Integer.class);
-		BINDABLE_INTEGER_TYPES = Collections.unmodifiableSet(intTypes);
-
-	}
-
-	// public static Integer findSinceParameterIndex(Method theMethod) {
-	// return findParamIndex(theMethod, Since.class);
-	// }
-
-	public static int nonEscapedIndexOf(String theString, char theCharacter) {
-		for (int i = 0; i < theString.length(); i++) {
-			if (theString.charAt(i) == theCharacter) {
-				if (i == 0 || theString.charAt(i - 1) != '\\') {
-					return i;
-				}
-			}
+	@SuppressWarnings("unchecked")
+	public static <T extends IIdType> T convertIdToType(IIdType value, Class<T> theIdParamType) {
+		if (value != null && !theIdParamType.isAssignableFrom(value.getClass())) {
+			IIdType newValue = ReflectionUtil.newInstance(theIdParamType);
+			newValue.setValue(value.getValue());
+			value = newValue;
 		}
-		return -1;
-	}
-
-
-	public static Object fromInteger(Class<?> theType, IntegerDt theArgument) {
-		if (theType.equals(IntegerDt.class)) {
-			if (theArgument == null) {
-				return null;
-			}
-			return theArgument;
-		}
-		if (theType.equals(Integer.class)) {
-			if (theArgument == null) {
-				return null;
-			}
-			return theArgument.getValue();
-		}
-		throw new IllegalArgumentException("Invalid Integer type:" + theType);
-	}
-
-	public static Set<Class<?>> getBindableIntegerTypes() {
-		return BINDABLE_INTEGER_TYPES;
-	}
-
-
-	public static IntegerDt toInteger(Object theArgument) {
-		if (theArgument instanceof IntegerDt) {
-			return (IntegerDt) theArgument;
-		}
-		if (theArgument instanceof Integer) {
-			return new IntegerDt((Integer) theArgument);
-		}
-		return null;
-	}
-
-	static List<String> splitParameterString(String theInput, boolean theUnescapeComponents) {
-		return splitParameterString(theInput, ',', theUnescapeComponents);
-	}
-
-	static List<String> splitParameterString(String theInput, char theDelimiter, boolean theUnescapeComponents) {
-		ArrayList<String> retVal = new ArrayList<String>();
-		if (theInput != null) {
-			StringBuilder b = new StringBuilder();
-			for (int i = 0; i < theInput.length(); i++) {
-				char next = theInput.charAt(i);
-				if (next == theDelimiter) {
-					if (i == 0) {
-						b.append(next);
-					} else {
-						char prevChar = theInput.charAt(i - 1);
-						if (prevChar == '\\') {
-							b.append(next);
-						} else {
-							if (b.length() > 0) {
-								retVal.add(b.toString());
-								b.setLength(0);
-							}
-						}
-					}
-				} else {
-					b.append(next);
-				}
-			}
-			if (b.length() > 0) {
-				retVal.add(b.toString());
-			}
-		}
-
-		if (theUnescapeComponents) {
-			for (int i = 0; i < retVal.size(); i++) {
-				retVal.set(i, unescape(retVal.get(i)));
-			}
-		}
-
-		return retVal;
+		return (T) value;
 	}
 
 	/**
-	 * Escapes a string according to the rules for parameter escaping specified in the <a href="http://www.hl7.org/implement/standards/fhir/search.html#escaping">FHIR Specification Escaping
-	 * Section</a>
+	 * Removes :modifiers and .chains from URL parameter names
 	 */
-	public static String escapeWithDefault(Object theValue) {
-		if (theValue == null) {
-			return "";
-		} else {
-			return escape(theValue.toString());
+	public static String stripModifierPart(String theParam) {
+		for (int i = 0; i < theParam.length(); i++) {
+			char nextChar = theParam.charAt(i);
+			if (nextChar == ':' || nextChar == '.') {
+				return theParam.substring(0, i);
+			}
 		}
+		return theParam;
 	}
 
 	/**
@@ -155,14 +82,14 @@ public class ParameterUtil {
 		for (int i = 0; i < theValue.length(); i++) {
 			char next = theValue.charAt(i);
 			switch (next) {
-			case '$':
-			case ',':
-			case '|':
-			case '\\':
-				b.append('\\');
-				break;
-			default:
-				break;
+				case '$':
+				case ',':
+				case '|':
+				case '\\':
+					b.append('\\');
+					break;
+				default:
+					break;
 			}
 			b.append(next);
 		}
@@ -174,13 +101,187 @@ public class ParameterUtil {
 	 * Escapes a string according to the rules for parameter escaping specified in the <a href="http://www.hl7.org/implement/standards/fhir/search.html#escaping">FHIR Specification Escaping
 	 * Section</a>
 	 */
-	public static String escapeAndUrlEncode(String theValue) {
+	public static String escapeWithDefault(Object theValue) {
 		if (theValue == null) {
+			return "";
+		}
+		return escape(theValue.toString());
+	}
+
+	/**
+	 * Applies {@link #escapeWithDefault(Object)} followed by {@link UrlUtil#escapeUrlParam(String)}
+	 */
+	public static String escapeAndUrlEncode(String theInput) {
+		return UrlUtil.escapeUrlParam(escapeWithDefault(theInput));
+	}
+
+	public static Integer findIdParameterIndex(Method theMethod, FhirContext theContext) {
+		Integer index = findParamAnnotationIndex(theMethod, IdParam.class);
+		if (index != null) {
+			Class<?> paramType = theMethod.getParameterTypes()[index];
+			if (IIdType.class.equals(paramType)) {
+				return index;
+			}
+			boolean isRi = theContext.getVersion().getVersion().isRi();
+			boolean usesHapiId = IdDt.class.equals(paramType);
+			if (isRi == usesHapiId) {
+				throw new ConfigurationException(Msg.code(1936)
+						+ "Method uses the wrong Id datatype (IdDt / IdType) for the given context FHIR version: "
+						+ theMethod);
+			}
+		}
+		return index;
+	}
+
+	// public static Integer findSinceParameterIndex(Method theMethod) {
+	// return findParamIndex(theMethod, Since.class);
+	// }
+
+	public static Integer findParamAnnotationIndex(Method theMethod, Class<?> toFind) {
+		int paramIndex = 0;
+		for (Annotation[] annotations : theMethod.getParameterAnnotations()) {
+			for (Annotation nextAnnotation : annotations) {
+				Class<? extends Annotation> class1 = nextAnnotation.annotationType();
+				if (toFind.isAssignableFrom(class1)) {
+					return paramIndex;
+				}
+			}
+			paramIndex++;
+		}
+		return null;
+	}
+
+	public static Object fromInteger(Class<?> theType, IntegerDt theArgument) {
+		if (theArgument == null) {
 			return null;
 		}
-		
-		String escaped = escape(theValue);
-		return UrlUtil.escape(escaped);
+		if (theType.equals(Integer.class)) {
+			return theArgument.getValue();
+		}
+		IPrimitiveType<?> retVal = (IPrimitiveType<?>) ReflectionUtil.newInstance(theType);
+		retVal.setValueAsString(theArgument.getValueAsString());
+		return retVal;
+	}
+
+	public static boolean isBindableIntegerType(Class<?> theClass) {
+		return Integer.class.isAssignableFrom(theClass) || IPrimitiveType.class.isAssignableFrom(theClass);
+	}
+
+	public static String escapeAndJoinOrList(Collection<String> theValues) {
+		return theValues.stream().map(ParameterUtil::escape).collect(Collectors.joining(","));
+	}
+
+	public static int nonEscapedIndexOf(String theString, char theCharacter) {
+		for (int i = 0; i < theString.length(); i++) {
+			if (theString.charAt(i) == theCharacter) {
+				if (i == 0 || theString.charAt(i - 1) != '\\') {
+					return i;
+				}
+			}
+		}
+		return -1;
+	}
+
+	public static String parseETagValue(String value) {
+		String eTagVersion;
+		value = value.trim();
+		if (value.length() > 1) {
+			if (value.charAt(value.length() - 1) == '"') {
+				if (value.charAt(0) == '"') {
+					eTagVersion = value.substring(1, value.length() - 1);
+				} else if (value.length() > 3
+						&& value.charAt(0) == 'W'
+						&& value.charAt(1) == '/'
+						&& value.charAt(2) == '"') {
+					eTagVersion = value.substring(3, value.length() - 1);
+				} else {
+					eTagVersion = value;
+				}
+			} else {
+				eTagVersion = value;
+			}
+		} else {
+			eTagVersion = value;
+		}
+		return eTagVersion;
+	}
+
+	public static IQueryParameterOr<?> singleton(final IQueryParameterType theParam, final String theParamName) {
+		return new IQueryParameterOr<>() {
+
+			@Serial
+			private static final long serialVersionUID = 1L;
+
+			@Override
+			public List<IQueryParameterType> getValuesAsQueryTokens() {
+				return Collections.singletonList(theParam);
+			}
+
+			@Override
+			public void setValuesAsQueryTokens(
+					FhirContext theContext, String theParamName, QualifiedParamList theParameters) {
+				if (theParameters.isEmpty()) {
+					return;
+				}
+				if (theParameters.size() > 1) {
+					throw new IllegalArgumentException(Msg.code(1937) + "Type "
+							+ theParam.getClass().getCanonicalName() + " does not support multiple values");
+				}
+				theParam.setValueAsQueryToken(
+						theContext, theParamName, theParameters.getQualifier(), theParameters.get(0));
+			}
+		};
+	}
+
+	static List<String> splitParameterString(String theInput, char theDelimiter, boolean theUnescapeComponents) {
+		ArrayList<String> retVal = new ArrayList<>();
+		if (theInput != null) {
+			StringBuilder b = new StringBuilder();
+			for (int i = 0; i < theInput.length(); i++) {
+				char next = theInput.charAt(i);
+				if (next == theDelimiter) {
+					if (i == 0) {
+						b.append(next);
+					} else {
+						char prevChar = theInput.charAt(i - 1);
+						if (prevChar == '\\') {
+							b.append(next);
+						} else {
+							if (b.length() > 0) {
+								retVal.add(b.toString());
+							} else {
+								retVal.add(null);
+							}
+							b.setLength(0);
+						}
+					}
+				} else {
+					b.append(next);
+				}
+			}
+			if (b.length() > 0) {
+				retVal.add(b.toString());
+			}
+		}
+
+		if (theUnescapeComponents) {
+			retVal.replaceAll(ParameterUtil::unescape);
+		}
+
+		return retVal;
+	}
+
+	public static IntegerDt toInteger(Object theArgument) {
+		if (theArgument instanceof IntegerDt) {
+			return (IntegerDt) theArgument;
+		}
+		if (theArgument instanceof Integer) {
+			return new IntegerDt((Integer) theArgument);
+		}
+		if (theArgument instanceof IPrimitiveType<?> pt) {
+			return new IntegerDt(pt.getValueAsString());
+		}
+		return null;
 	}
 
 	/**
@@ -189,7 +290,7 @@ public class ParameterUtil {
 	 */
 	public static String unescape(String theValue) {
 		if (theValue == null) {
-			return theValue;
+			return null;
 		}
 		if (theValue.indexOf('\\') == -1) {
 			return theValue;
@@ -203,14 +304,17 @@ public class ParameterUtil {
 				if (i == theValue.length() - 1) {
 					b.append(next);
 				} else {
-					switch (theValue.charAt(i + 1)) {
-					case '$':
-					case ',':
-					case '|':
-					case '\\':
-						continue;
-					default:
-						b.append(next);
+					char nextPlusOne = theValue.charAt(i + 1);
+					switch (nextPlusOne) {
+						case '$':
+						case ',':
+						case '|':
+						case '\\':
+							b.append(nextPlusOne);
+							i++;
+							break;
+						default:
+							b.append(next);
 					}
 				}
 			} else {
@@ -221,4 +325,53 @@ public class ParameterUtil {
 		return b.toString();
 	}
 
+	/**
+	 * Returns true if the value is :iterate or :recurse (the former name of :iterate) for an _include parameter
+	 */
+	public static boolean isIncludeIterate(String theQualifier) {
+		return Constants.PARAM_INCLUDE_QUALIFIER_RECURSE.equals(theQualifier)
+				|| Constants.PARAM_INCLUDE_QUALIFIER_ITERATE.equals(theQualifier);
+	}
+
+	/**
+	 * Given a list of query parameters, returns {@literal true} if all parameters in the list
+	 * return {@literal true} from {@link IQueryParameterType#isEmpty()}, or if the list
+	 * does not contain any elements.
+	 *
+	 * @since 8.4.0
+	 */
+	public static boolean areAllParametersEmpty(List<? extends IQueryParameterType> theList) {
+		for (IQueryParameterType next : theList) {
+			if (!next.isEmpty()) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	public static boolean isTimeAllZeros(final DateParam theDateParam) {
+		if (theDateParam == null || theDateParam.isEmpty()) {
+			return false;
+		}
+
+		if (theDateParam.getPrecision().ordinal() <= TemporalPrecisionEnum.DAY.ordinal()) {
+			return true;
+		}
+
+		return (zeroIfNull(theDateParam.getHour()) == 0
+				&& zeroIfNull(theDateParam.getMinute()) == 0
+				&& zeroIfNull(theDateParam.getSecond()) == 0
+				&& zeroIfNull(theDateParam.getMillis()) == 0);
+	}
+
+	public static DateParam coerceToDateParam(IQueryParameterType theParameter) {
+		if (theParameter instanceof DateParam dateParam) {
+			return dateParam;
+		}
+		return new DateParam(theParameter.getValueAsQueryToken());
+	}
+
+	private static int zeroIfNull(final Integer theInteger) {
+		return theInteger != null ? theInteger : 0;
+	}
 }

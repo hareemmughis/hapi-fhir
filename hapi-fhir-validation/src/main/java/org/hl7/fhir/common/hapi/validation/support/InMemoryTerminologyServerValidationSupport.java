@@ -1,0 +1,1554 @@
+package org.hl7.fhir.common.hapi.validation.support;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.FhirVersionEnum;
+import ca.uhn.fhir.context.support.ConceptValidationOptions;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.LookupCodeRequest;
+import ca.uhn.fhir.context.support.ValidateCodeRequest;
+import ca.uhn.fhir.context.support.ValidationSupportContext;
+import ca.uhn.fhir.context.support.ValueSetExpansionOptions;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.util.FhirVersionIndependentConcept;
+import ca.uhn.fhir.util.HapiExtensions;
+import ca.uhn.fhir.util.UrlUtil;
+import ca.uhn.hapi.converters.canonical.VersionCanonicalizer;
+import com.google.common.annotations.VisibleForTesting;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.dstu2.model.ValueSet;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r5.model.CanonicalType;
+import org.hl7.fhir.r5.model.CodeSystem;
+import org.hl7.fhir.r5.model.Enumerations;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static org.apache.commons.lang3.StringUtils.contains;
+import static org.apache.commons.lang3.StringUtils.defaultString;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.apache.commons.lang3.StringUtils.substringAfter;
+import static org.apache.commons.lang3.StringUtils.substringBefore;
+import static org.hl7.fhir.common.hapi.validation.support.CommonCodeSystemsTerminologyService.getFhirVersionEnum;
+
+/**
+ * This class is a basic in-memory terminology service, designed to expand ValueSets and validate codes
+ * completely in-memory. It is suitable for runtime validation purposes where no dedicated terminology
+ * service exists (either an internal one such as the HAPI FHIR JPA terminology service, or an
+ * external term service API)
+ */
+@SuppressWarnings("EnhancedSwitchMigration")
+public class InMemoryTerminologyServerValidationSupport extends BaseTerminologyServerValidationSupport {
+	private static final String OUR_PIPE_CHARACTER = "|";
+	private VersionCanonicalizer myVersionCanonicalizer;
+	private BooleanSupplier myUseCurrentVersionForUnknownCodeSystemVersion = () -> false;
+
+	/**
+	 * Constructor
+	 *
+	 * @param theCtx A FhirContext for the FHIR version being validated
+	 */
+	public InMemoryTerminologyServerValidationSupport(FhirContext theCtx) {
+		super(theCtx);
+		myVersionCanonicalizer = new VersionCanonicalizer(theCtx);
+	}
+
+	/**
+	 * Whether a ValueSet include or exclude that names a CodeSystem version the server does not have is applied to the
+	 * current version of that CodeSystem instead, with a warning naming both versions. When {@literal false}, or when
+	 * the server has the CodeSystem in no version, the include or exclude cannot be used: {@code $expand} fails and the
+	 * code is not accepted, naming the {@literal url|version} that could not be found. Defaults to {@literal false}.
+	 *
+	 * @since 9.0.0
+	 */
+	// Created by Claude Opus 5.5
+	public boolean isUseCurrentVersionForUnknownCodeSystemVersion() {
+		return myUseCurrentVersionForUnknownCodeSystemVersion.getAsBoolean();
+	}
+
+	/**
+	 * Sets whether a ValueSet include or exclude that names a CodeSystem version the server does not have is applied
+	 * to the current version of that CodeSystem instead, see {@link #isUseCurrentVersionForUnknownCodeSystemVersion()}.
+	 *
+	 * @since 9.0.0
+	 */
+	// Created by Claude Opus 5.5
+	public void setUseCurrentVersionForUnknownCodeSystemVersion(
+			boolean theUseCurrentVersionForUnknownCodeSystemVersion) {
+		setUseCurrentVersionForUnknownCodeSystemVersion(() -> theUseCurrentVersionForUnknownCodeSystemVersion);
+	}
+
+	/**
+	 * Sets where {@link #isUseCurrentVersionForUnknownCodeSystemVersion()} is read from. The supplier is asked each
+	 * time the setting is needed, so a change to the settings it reads is used without configuring this module again.
+	 * Results a {@link ValidationSupportChain} has cached are kept until they expire.
+	 *
+	 * @param theUseCurrentVersionForUnknownCodeSystemVersion supplies the setting
+	 * @since 9.0.0
+	 */
+	// Created by Claude Opus 5.5
+	public void setUseCurrentVersionForUnknownCodeSystemVersion(
+			@Nonnull BooleanSupplier theUseCurrentVersionForUnknownCodeSystemVersion) {
+		Validate.notNull(
+				theUseCurrentVersionForUnknownCodeSystemVersion,
+				"theUseCurrentVersionForUnknownCodeSystemVersion must not be null");
+		myUseCurrentVersionForUnknownCodeSystemVersion = theUseCurrentVersionForUnknownCodeSystemVersion;
+	}
+
+	@VisibleForTesting
+	public void setVersionCanonicalizer(VersionCanonicalizer theVersionCanonicalizer) {
+		myVersionCanonicalizer = theVersionCanonicalizer;
+	}
+
+	@Override
+	public String getName() {
+		return myCtx.getVersion().getVersion() + " In-Memory Validation Support";
+	}
+
+	@Override
+	public ValueSetExpansionOutcome expandValueSet(
+			ValidationSupportContext theValidationSupportContext,
+			ValueSetExpansionOptions theExpansionOptions,
+			@Nonnull IBaseResource theValueSetToExpand) {
+		boolean failOnMissingCodeSystem =
+				theExpansionOptions == null || theExpansionOptions.isFailOnMissingCodeSystem();
+		return expandValueSet(theValidationSupportContext, theValueSetToExpand, null, null, failOnMissingCodeSystem);
+	}
+
+	private ValueSetExpansionOutcome expandValueSet(
+			ValidationSupportContext theValidationSupportContext,
+			IBaseResource theValueSetToExpand,
+			String theWantSystemAndVersion,
+			String theWantCode,
+			boolean theFailOnMissingCodeSystem) {
+		InMemoryExpansionResult expansionResult;
+		try {
+			expansionResult = expandValueSetToCanonical(
+					theValidationSupportContext,
+					theValueSetToExpand,
+					theWantSystemAndVersion,
+					theWantCode,
+					theFailOnMissingCodeSystem);
+		} catch (ExpansionCouldNotBeCompletedInternallyException e) {
+			return new ValueSetExpansionOutcome(e.getMessage(), false);
+		}
+		org.hl7.fhir.r5.model.ValueSet expansionR5 = expansionResult.getValueSet();
+		if (expansionR5 == null) {
+			return null;
+		}
+		for (String next : expansionResult.getWarnings(getFhirContext())) {
+			expansionR5
+					.getMeta()
+					.addExtension(
+							HapiExtensions.EXT_VALUESET_EXPANSION_MESSAGE, new org.hl7.fhir.r5.model.StringType(next));
+		}
+
+		IBaseResource expansion = myVersionCanonicalizer.valueSetFromValidatorCanonical(expansionR5);
+		return new ValueSetExpansionOutcome(expansion);
+	}
+
+	private InMemoryExpansionResult expandValueSetToCanonical(
+			ValidationSupportContext theValidationSupportContext,
+			IBaseResource theValueSetToExpand,
+			@Nullable String theWantSystemUrlAndVersion,
+			@Nullable String theWantCode,
+			boolean theFailOnMissingCodeSystem)
+			throws ExpansionCouldNotBeCompletedInternallyException {
+		org.hl7.fhir.r5.model.ValueSet input = myVersionCanonicalizer.valueSetToValidatorCanonical(theValueSetToExpand);
+		return expandValueSetR5(
+				theValidationSupportContext,
+				input,
+				theWantSystemUrlAndVersion,
+				theWantCode,
+				theFailOnMissingCodeSystem);
+	}
+
+	@Override
+	public CodeValidationResult validateCodeInValueSet(
+			ValidationSupportContext theValidationSupportContext,
+			ConceptValidationOptions theOptions,
+			String theCodeSystemUrlAndVersion,
+			String theCode,
+			String theDisplay,
+			@Nonnull IBaseResource theValueSet) {
+		InMemoryExpansionResult expansion;
+		String vsUrl = UrlUtil.getCanonicalUrl(getFhirContext(), theValueSet).url();
+		try {
+			expansion = expandValueSetToCanonical(
+					theValidationSupportContext, theValueSet, theCodeSystemUrlAndVersion, theCode, true);
+		} catch (ExpansionCouldNotBeCompletedInternallyException e) {
+			CodeValidationResult codeValidationResult = new CodeValidationResult();
+			codeValidationResult.setSeverity(IssueSeverity.ERROR);
+
+			String msg = "Failed to expand ValueSet '" + vsUrl + "' (in-memory). Could not validate code "
+					+ theCodeSystemUrlAndVersion + "#" + theCode;
+			if (e.getMessage() != null) {
+				msg += ". Error was: " + e.getMessage();
+			}
+
+			codeValidationResult.setMessage(msg);
+			codeValidationResult.addIssue(e.getCodeValidationIssue());
+			if (e.getUnknownSystem() != null) {
+				codeValidationResult.addUnknownSystem(e.getUnknownSystem());
+			}
+			return codeValidationResult;
+		}
+
+		if (expansion == null || expansion.getValueSet() == null) {
+			return null;
+		}
+
+		if (expansion.getValueSet().getExpansion().getContains().isEmpty()) {
+			IssueSeverity severity = IssueSeverity.ERROR;
+			String message = "Unknown code '"
+					+ getFormattedCodeSystemAndCodeForMessage(theCodeSystemUrlAndVersion, theCode)
+					+ "'"
+					+ createInMemoryExpansionMessageSuffix(vsUrl)
+					+ (expansion.getMessages().isEmpty() ? "" : " Expansion result: " + expansion.getMessages());
+			CodeValidationIssueCoding issueCoding = CodeValidationIssueCoding.NOT_IN_VS;
+			CodeValidationIssueCode notFound = CodeValidationIssueCode.NOT_FOUND;
+			CodeValidationResult notFoundResult = new CodeValidationResult()
+					.setSeverity(severity)
+					.setMessage(message)
+					.setSourceDetails(null)
+					.addIssue(new CodeValidationIssue(message, severity, notFound, issueCoding));
+			return addExpansionWarnings(notFoundResult, expansion.getWarnings(getFhirContext()));
+		}
+
+		CodeValidationResult retVal = validateCodeInExpandedValueSet(
+				theValidationSupportContext,
+				theOptions,
+				expansion.toCurrentCanonical(theCodeSystemUrlAndVersion),
+				theCode,
+				theDisplay,
+				expansion.getValueSet(),
+				vsUrl);
+		return addExpansionWarnings(retVal, expansion.getWarnings(getFhirContext()));
+	}
+
+	// Created by Claude Opus 5
+	@Override
+	@Nullable
+	public CodeValidationResult validateCode(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nonnull ConceptValidationOptions theOptions,
+			@Nonnull ValidateCodeRequest theRequest) {
+		String codeSystem = theRequest.getCodeSystem();
+		String codeSystemVersion = theRequest.getCodeSystemVersion();
+		String code = theRequest.getCode();
+		String valueSetUrl = theRequest.getValueSetUrl();
+		// expandValueSet and validateCodeInExpandedValueSet identify the code system by its "system|version"
+		// canonical rather than as a system and a version
+		String codeSystemUrlAndVersion = UrlUtil.toCanonicalUrl(codeSystem, codeSystemVersion);
+
+		IBaseResource vs;
+		if (isNotBlank(valueSetUrl)) {
+			vs = theValidationSupportContext.getRootValidationSupport().fetchValueSet(valueSetUrl);
+			if (vs == null) {
+				return null;
+			}
+		} else {
+			switch (myCtx.getVersion().getVersion()) {
+				case DSTU2:
+				case DSTU2_HL7ORG:
+					// A DSTU2 compose include has no version element
+					vs = new org.hl7.fhir.dstu2.model.ValueSet()
+							.setCompose(new org.hl7.fhir.dstu2.model.ValueSet.ValueSetComposeComponent()
+									.addInclude(new org.hl7.fhir.dstu2.model.ValueSet.ConceptSetComponent()
+											.setSystem(codeSystemUrlAndVersion)));
+					break;
+				case DSTU3:
+					vs = new org.hl7.fhir.dstu3.model.ValueSet()
+							.setCompose(new org.hl7.fhir.dstu3.model.ValueSet.ValueSetComposeComponent()
+									.addInclude(new org.hl7.fhir.dstu3.model.ValueSet.ConceptSetComponent()
+											.setSystem(codeSystem)
+											.setVersion(codeSystemVersion)));
+					break;
+				case R4:
+					vs = new org.hl7.fhir.r4.model.ValueSet()
+							.setCompose(new org.hl7.fhir.r4.model.ValueSet.ValueSetComposeComponent()
+									.addInclude(new org.hl7.fhir.r4.model.ValueSet.ConceptSetComponent()
+											.setSystem(codeSystem)
+											.setVersion(codeSystemVersion)));
+					break;
+				case R4B:
+					vs = new org.hl7.fhir.r4b.model.ValueSet()
+							.setCompose(new org.hl7.fhir.r4b.model.ValueSet.ValueSetComposeComponent()
+									.addInclude(new org.hl7.fhir.r4b.model.ValueSet.ConceptSetComponent()
+											.setSystem(codeSystem)
+											.setVersion(codeSystemVersion)));
+					break;
+				case R5:
+					vs = new org.hl7.fhir.r5.model.ValueSet()
+							.setCompose(new org.hl7.fhir.r5.model.ValueSet.ValueSetComposeComponent()
+									.addInclude(new org.hl7.fhir.r5.model.ValueSet.ConceptSetComponent()
+											.setSystem(codeSystem)
+											.setVersion(codeSystemVersion)));
+					break;
+				case DSTU2_1:
+				default:
+					throw new IllegalArgumentException(Msg.code(699) + "Can not handle version: "
+							+ myCtx.getVersion().getVersion());
+			}
+		}
+
+		InMemoryExpansionResult expansionResult;
+		try {
+			expansionResult =
+					expandValueSetToCanonical(theValidationSupportContext, vs, codeSystemUrlAndVersion, code, true);
+		} catch (ExpansionCouldNotBeCompletedInternallyException e) {
+			CodeValidationResult result =
+					new CodeValidationResult().setSeverity(IssueSeverity.ERROR).setMessage(e.getMessage());
+			if (e.getUnknownSystem() != null) {
+				result.addUnknownSystem(e.getUnknownSystem());
+			}
+			return result;
+		}
+		org.hl7.fhir.r5.model.ValueSet expansionR5 = expansionResult.getValueSet();
+		if (expansionR5 == null) {
+			return null;
+		}
+
+		IBaseResource expansion = myVersionCanonicalizer.valueSetFromValidatorCanonical(expansionR5);
+		CodeValidationResult retVal = validateCodeInExpandedValueSet(
+				theValidationSupportContext,
+				theOptions,
+				expansionResult.toCurrentCanonical(codeSystemUrlAndVersion),
+				code,
+				theRequest.getDisplay(),
+				expansion,
+				valueSetUrl);
+		return addExpansionWarnings(retVal, expansionResult.getWarnings(getFhirContext()));
+	}
+
+	/**
+	 * Adds the expansion's warnings to the message of the result, so a rejection names the version the code was
+	 * checked against. An accepted code's severity is raised to warning.
+	 */
+	// Created by Claude Opus 5.5
+	@Nullable
+	private static CodeValidationResult addExpansionWarnings(
+			@Nullable CodeValidationResult theResult, @Nonnull List<String> theWarnings) {
+		if (theResult == null || theWarnings.isEmpty()) {
+			return theResult;
+		}
+		String warnings = String.join(" ", theWarnings);
+		theResult.setMessage(isBlank(theResult.getMessage()) ? warnings : theResult.getMessage() + " " + warnings);
+		if (theResult.isOk()
+				&& (theResult.getSeverity() == null
+						|| theResult.getSeverity().ordinal() > IssueSeverity.WARNING.ordinal())) {
+			theResult.setSeverity(IssueSeverity.WARNING);
+		}
+		return theResult;
+	}
+
+	@Override
+	@Nullable
+	public CodeValidationResult validateCode(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nonnull ConceptValidationOptions theOptions,
+			String theCodeSystem,
+			String theCode,
+			String theDisplay,
+			String theValueSetUrl) {
+		// On this signature a code system can only name a version by carrying it packed as "system|version"
+		UrlUtil.CanonicalUrlParts codeSystem = UrlUtil.parseCanonicalUrl(theCodeSystem);
+		return validateCode(
+				theValidationSupportContext,
+				theOptions,
+				new ValidateCodeRequest(
+						codeSystem.url(), codeSystem.versionId().orElse(null), theCode, theDisplay, theValueSetUrl));
+	}
+
+	private CodeValidationResult validateCodeInExpandedValueSet(
+			ValidationSupportContext theValidationSupportContext,
+			ConceptValidationOptions theOptions,
+			String theCodeSystemUrlAndVersionToValidate,
+			String theCodeToValidate,
+			String theDisplayToValidate,
+			IBaseResource theExpansion,
+			String theValueSetUrl) {
+		assert theExpansion != null;
+
+		final CodeValidationResult codeValidationResult;
+
+		UrlUtil.CanonicalUrlParts codeSystemToValidate =
+				UrlUtil.parseCanonicalUrl(theCodeSystemUrlAndVersionToValidate);
+		String codeSystemUrlToValidate = codeSystemToValidate.url();
+		String codeSystemVersionToValidate = codeSystemToValidate.versionId().orElse(null);
+
+		boolean caseSensitive = true;
+		IBaseResource codeSystemToValidateResource = null;
+		if (!theOptions.isInferSystem() && isNotBlank(codeSystemUrlToValidate)) {
+			codeSystemToValidateResource = theValidationSupportContext
+					.getRootValidationSupport()
+					.fetchCodeSystem(codeSystemUrlToValidate, codeSystemVersionToValidate);
+		}
+
+		List<FhirVersionIndependentConcept> codes = new ArrayList<>();
+		switch (getFhirVersionEnum(
+				theValidationSupportContext.getRootValidationSupport().getFhirContext(), theExpansion)) {
+			case DSTU2: {
+				ca.uhn.fhir.model.dstu2.resource.ValueSet expansionVs =
+						(ca.uhn.fhir.model.dstu2.resource.ValueSet) theExpansion;
+				List<ca.uhn.fhir.model.dstu2.resource.ValueSet.ExpansionContains> contains =
+						expansionVs.getExpansion().getContains();
+				flattenAndConvertCodesDstu2(contains, codes);
+				break;
+			}
+			case DSTU2_HL7ORG: {
+				ValueSet expansionVs = (ValueSet) theExpansion;
+				List<ValueSet.ValueSetExpansionContainsComponent> contains =
+						expansionVs.getExpansion().getContains();
+				flattenAndConvertCodesDstu2Hl7Org(contains, codes);
+				break;
+			}
+			case DSTU3: {
+				org.hl7.fhir.dstu3.model.ValueSet expansionVs = (org.hl7.fhir.dstu3.model.ValueSet) theExpansion;
+				List<org.hl7.fhir.dstu3.model.ValueSet.ValueSetExpansionContainsComponent> contains =
+						expansionVs.getExpansion().getContains();
+				flattenAndConvertCodesDstu3(contains, codes);
+				break;
+			}
+			case R4: {
+				org.hl7.fhir.r4.model.ValueSet expansionVs = (org.hl7.fhir.r4.model.ValueSet) theExpansion;
+				List<org.hl7.fhir.r4.model.ValueSet.ValueSetExpansionContainsComponent> contains =
+						expansionVs.getExpansion().getContains();
+				flattenAndConvertCodesR4(contains, codes);
+				break;
+			}
+			case R4B: {
+				org.hl7.fhir.r4b.model.ValueSet expansionVs = (org.hl7.fhir.r4b.model.ValueSet) theExpansion;
+				List<org.hl7.fhir.r4b.model.ValueSet.ValueSetExpansionContainsComponent> contains =
+						expansionVs.getExpansion().getContains();
+				flattenAndConvertCodesR4B(contains, codes);
+				break;
+			}
+			case R5: {
+				org.hl7.fhir.r5.model.ValueSet expansionVs = (org.hl7.fhir.r5.model.ValueSet) theExpansion;
+				List<org.hl7.fhir.r5.model.ValueSet.ValueSetExpansionContainsComponent> contains =
+						expansionVs.getExpansion().getContains();
+				flattenAndConvertCodesR5(contains, codes);
+				break;
+			}
+			case DSTU2_1:
+			default:
+				throw new IllegalArgumentException(Msg.code(700) + "Can not handle version: "
+						+ myCtx.getVersion().getVersion());
+		}
+
+		String codeSystemResourceName = null;
+		String codeSystemResourceVersion = null;
+		String codeSystemResourceContentMode = null;
+		if (codeSystemToValidateResource != null) {
+			switch (getFhirVersionEnum(
+					theValidationSupportContext.getRootValidationSupport().getFhirContext(),
+					codeSystemToValidateResource)) {
+				case DSTU2:
+				case DSTU2_HL7ORG: {
+					caseSensitive = true;
+					break;
+				}
+				case DSTU3: {
+					org.hl7.fhir.dstu3.model.CodeSystem systemDstu3 =
+							(org.hl7.fhir.dstu3.model.CodeSystem) codeSystemToValidateResource;
+					caseSensitive = systemDstu3.getCaseSensitive();
+					codeSystemResourceName = systemDstu3.getName();
+					codeSystemResourceVersion = systemDstu3.getVersion();
+					codeSystemResourceContentMode =
+							systemDstu3.getContentElement().getValueAsString();
+					break;
+				}
+				case R4: {
+					org.hl7.fhir.r4.model.CodeSystem systemR4 =
+							(org.hl7.fhir.r4.model.CodeSystem) codeSystemToValidateResource;
+					caseSensitive = systemR4.getCaseSensitive();
+					codeSystemResourceName = systemR4.getName();
+					codeSystemResourceVersion = systemR4.getVersion();
+					codeSystemResourceContentMode = systemR4.getContentElement().getValueAsString();
+					break;
+				}
+				case R4B: {
+					org.hl7.fhir.r4b.model.CodeSystem systemR4B =
+							(org.hl7.fhir.r4b.model.CodeSystem) codeSystemToValidateResource;
+					caseSensitive = systemR4B.getCaseSensitive();
+					codeSystemResourceName = systemR4B.getName();
+					codeSystemResourceVersion = systemR4B.getVersion();
+					codeSystemResourceContentMode =
+							systemR4B.getContentElement().getValueAsString();
+					break;
+				}
+				case R5: {
+					CodeSystem systemR5 = (CodeSystem) codeSystemToValidateResource;
+					caseSensitive = systemR5.getCaseSensitive();
+					codeSystemResourceName = systemR5.getName();
+					codeSystemResourceVersion = systemR5.getVersion();
+					codeSystemResourceContentMode = systemR5.getContentElement().getValueAsString();
+					break;
+				}
+				case DSTU2_1:
+				default:
+					throw new IllegalArgumentException(Msg.code(701) + "Can not handle version: "
+							+ myCtx.getVersion().getVersion());
+			}
+		}
+
+		CodeValidationResult valueSetResult = findCodeInExpansion(
+				theCodeToValidate,
+				theDisplayToValidate,
+				theValueSetUrl,
+				codeSystemUrlToValidate,
+				codeSystemVersionToValidate,
+				codeSystemResourceName,
+				codeSystemResourceVersion,
+				codes,
+				theOptions,
+				caseSensitive);
+		if (valueSetResult != null) {
+			codeValidationResult = valueSetResult;
+		} else {
+			IValidationSupport.IssueSeverity severity;
+			String message;
+			CodeValidationIssueCode issueCode = CodeValidationIssueCode.CODE_INVALID;
+			CodeValidationIssueCoding issueCoding = CodeValidationIssueCoding.INVALID_CODE;
+			if ("fragment".equals(codeSystemResourceContentMode)) {
+				severity = IValidationSupport.IssueSeverity.WARNING;
+				message = "Unknown code in fragment CodeSystem '"
+						+ getFormattedCodeSystemAndCodeForMessage(
+								theCodeSystemUrlAndVersionToValidate, theCodeToValidate)
+						+ "'";
+			} else {
+				severity = IValidationSupport.IssueSeverity.ERROR;
+				message = "Unknown code '"
+						+ getFormattedCodeSystemAndCodeForMessage(
+								theCodeSystemUrlAndVersionToValidate, theCodeToValidate)
+						+ "'";
+			}
+			if (isNotBlank(theValueSetUrl)) {
+				message += createInMemoryExpansionMessageSuffix(theValueSetUrl);
+				issueCoding = CodeValidationIssueCoding.NOT_IN_VS;
+			}
+
+			String sourceDetails = "In-memory expansion containing " + codes.size() + " codes";
+			if (!codes.isEmpty() && codes.size() < 10) {
+				sourceDetails += ": "
+						+ codes.stream()
+								.map(t -> t.getSystem() + "#" + t.getCode())
+								.collect(Collectors.joining(", "));
+			}
+
+			codeValidationResult = new CodeValidationResult()
+					.setSeverity(severity)
+					.setMessage(message)
+					.setSourceDetails(sourceDetails)
+					.addIssue(new CodeValidationIssue(message, severity, issueCode, issueCoding));
+		}
+
+		return codeValidationResult;
+	}
+
+	@Nonnull
+	private static String createInMemoryExpansionMessageSuffix(String theValueSetUrl) {
+		return " for in-memory expansion of ValueSet '" + theValueSetUrl + "'";
+	}
+
+	private static String getFormattedCodeSystemAndCodeForMessage(
+			String theCodeSystemUrlAndVersionToValidate, String theCodeToValidate) {
+		return (isNotBlank(theCodeSystemUrlAndVersionToValidate) ? theCodeSystemUrlAndVersionToValidate + "#" : "")
+				+ theCodeToValidate;
+	}
+
+	private CodeValidationResult findCodeInExpansion(
+			String theCodeToValidate,
+			String theDisplayToValidate,
+			String theValueSetUrl,
+			String codeSystemUrlToValidate,
+			String codeSystemVersionToValidate,
+			String codeSystemResourceName,
+			String codeSystemResourceVersion,
+			List<FhirVersionIndependentConcept> expansionCodes,
+			ConceptValidationOptions theOptions,
+			boolean caseSensitive) {
+		for (FhirVersionIndependentConcept nextExpansionCode : expansionCodes) {
+
+			boolean codeMatches;
+			if (caseSensitive) {
+				codeMatches = defaultString(theCodeToValidate).equals(nextExpansionCode.getCode());
+			} else {
+				codeMatches = defaultString(theCodeToValidate).equalsIgnoreCase(nextExpansionCode.getCode());
+			}
+			if (codeMatches) {
+				if (theOptions.isInferSystem()
+						|| (nextExpansionCode.getSystem().equals(codeSystemUrlToValidate)
+								&& (codeSystemVersionToValidate == null
+										|| codeSystemVersionToValidate.equals(nextExpansionCode.getSystemVersion())))) {
+					String csVersion = codeSystemResourceVersion;
+					if (isNotBlank(nextExpansionCode.getSystemVersion())) {
+						csVersion = nextExpansionCode.getSystemVersion();
+					}
+					if (!theOptions.isValidateDisplay()
+							|| (isBlank(nextExpansionCode.getDisplay())
+									|| isBlank(theDisplayToValidate)
+									|| nextExpansionCode.getDisplay().equals(theDisplayToValidate))) {
+						CodeValidationResult codeValidationResult = new CodeValidationResult()
+								.setCode(theCodeToValidate)
+								.setDisplay(nextExpansionCode.getDisplay())
+								.setCodeSystemName(codeSystemResourceName)
+								.setCodeSystemVersion(csVersion);
+						if (isNotBlank(theValueSetUrl)) {
+							populateSourceDetailsForInMemoryExpansion(theValueSetUrl, codeValidationResult);
+						}
+						return codeValidationResult;
+					} else {
+						String messageAppend = "";
+						if (isNotBlank(theValueSetUrl)) {
+							messageAppend = createInMemoryExpansionMessageSuffix(theValueSetUrl);
+						}
+						CodeValidationResult codeValidationResult = createResultForDisplayMismatch(
+								myCtx,
+								theCodeToValidate,
+								theDisplayToValidate,
+								nextExpansionCode.getDisplay(),
+								codeSystemUrlToValidate,
+								csVersion,
+								messageAppend,
+								getIssueSeverityForCodeDisplayMismatch());
+						if (isNotBlank(theValueSetUrl)) {
+							populateSourceDetailsForInMemoryExpansion(theValueSetUrl, codeValidationResult);
+						}
+						return codeValidationResult;
+					}
+				}
+			}
+		}
+		return null;
+	}
+
+	@Override
+	public LookupCodeResult lookupCode(
+			ValidationSupportContext theValidationSupportContext, @Nonnull LookupCodeRequest theLookupCodeRequest) {
+		final String code = theLookupCodeRequest.getCode();
+		final String system = theLookupCodeRequest.getSystem();
+		// The version is named on the request where the caller could name it, and otherwise can only have
+		// arrived packed into the system as "url|version"
+		UrlUtil.CanonicalUrlParts codeSystem = UrlUtil.parseCanonicalUrl(system, theLookupCodeRequest.getVersion());
+		String codeSystemVersion = codeSystem.versionId().orElse(null);
+		CodeValidationResult codeValidationResult = validateCode(
+				theValidationSupportContext,
+				new ConceptValidationOptions(),
+				new ValidateCodeRequest(
+						codeSystem.url(), codeSystemVersion, code, theLookupCodeRequest.getDisplayLanguage(), null));
+		if (codeValidationResult == null) {
+			return null;
+		}
+		return codeValidationResult.asLookupCodeResult(system, code);
+	}
+
+	@Override
+	public boolean isCodeSystemSupported(ValidationSupportContext theValidationSupportContext, String theSystem) {
+		// On this signature a code system can only name a version by carrying it packed as "system|version"
+		UrlUtil.CanonicalUrlParts codeSystem = UrlUtil.parseCanonicalUrl(theSystem);
+		return isCodeSystemSupported(
+				theValidationSupportContext,
+				codeSystem.url(),
+				codeSystem.versionId().orElse(null));
+	}
+
+	/**
+	 * {@inheritDoc}
+	 * <p>
+	 * Answers only for the version named: the code system is fetched through the chain at that version.
+	 * </p>
+	 */
+	// Created by Claude Opus 5
+	@Override
+	public boolean isCodeSystemSupported(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nullable String theSystem,
+			@Nullable String theVersion) {
+		UrlUtil.CanonicalUrlParts codeSystem = UrlUtil.parseCanonicalUrl(theSystem, theVersion);
+		if (codeSystem.url() == null) {
+			return false;
+		}
+
+		IBaseResource cs = theValidationSupportContext
+				.getRootValidationSupport()
+				.fetchCodeSystem(codeSystem.url(), codeSystem.versionId().orElse(null));
+
+		if (!myCtx.getVersion().getVersion().isEqualOrNewerThan(FhirVersionEnum.DSTU2_1)) {
+			return cs != null;
+		}
+
+		if (cs != null) {
+			// content is 1..1 in the spec but optional in a stored resource, and an absent one is not
+			// "not-present"
+			String content = getFhirContext().newTerser().getSinglePrimitiveValueOrNull(cs, "content");
+			return !"not-present".equals(content);
+		}
+
+		return false;
+	}
+
+	@Override
+	public boolean isValueSetSupported(ValidationSupportContext theValidationSupportContext, String theValueSetUrl) {
+		// On this signature a ValueSet can only name a version by carrying it packed as "url|version"
+		UrlUtil.CanonicalUrlParts valueSet = UrlUtil.parseCanonicalUrl(theValueSetUrl);
+		return isValueSetSupported(
+				theValidationSupportContext,
+				valueSet.url(),
+				valueSet.versionId().orElse(null));
+	}
+
+	/**
+	 * {@inheritDoc}
+	 * <p>
+	 * Answers only for the version named: the ValueSet is fetched through the chain at that version.
+	 * </p>
+	 */
+	// Created by Claude Opus 5.5
+	@Override
+	public boolean isValueSetSupported(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nullable String theValueSetUrl,
+			@Nullable String theVersion) {
+		UrlUtil.CanonicalUrlParts valueSet = UrlUtil.parseCanonicalUrl(theValueSetUrl, theVersion);
+		if (valueSet.url() == null) {
+			return false;
+		}
+
+		IBaseResource vs = theValidationSupportContext
+				.getRootValidationSupport()
+				.fetchValueSet(valueSet.url(), valueSet.versionId().orElse(null));
+		return vs != null;
+	}
+
+	private void addCodesDstu2Hl7Org(
+			List<ValueSet.ConceptDefinitionComponent> theSourceList,
+			List<CodeSystem.ConceptDefinitionComponent> theTargetList) {
+		for (ValueSet.ConceptDefinitionComponent nextSource : theSourceList) {
+			CodeSystem.ConceptDefinitionComponent targetConcept = new CodeSystem.ConceptDefinitionComponent()
+					.setCode(nextSource.getCode())
+					.setDisplay(nextSource.getDisplay());
+			theTargetList.add(targetConcept);
+			addCodesDstu2Hl7Org(nextSource.getConcept(), targetConcept.getConcept());
+		}
+	}
+
+	private void addCodesDstu2(
+			List<ca.uhn.fhir.model.dstu2.resource.ValueSet.CodeSystemConcept> theSourceList,
+			List<CodeSystem.ConceptDefinitionComponent> theTargetList) {
+		for (ca.uhn.fhir.model.dstu2.resource.ValueSet.CodeSystemConcept nextSource : theSourceList) {
+			CodeSystem.ConceptDefinitionComponent targetConcept = new CodeSystem.ConceptDefinitionComponent()
+					.setCode(nextSource.getCode())
+					.setDisplay(nextSource.getDisplay());
+			theTargetList.add(targetConcept);
+			addCodesDstu2(nextSource.getConcept(), targetConcept.getConcept());
+		}
+	}
+
+	@Nullable
+	private InMemoryExpansionResult expandValueSetR5(
+			ValidationSupportContext theValidationSupportContext,
+			org.hl7.fhir.r5.model.ValueSet theInput,
+			@Nullable String theWantSystemUrlAndVersion,
+			@Nullable String theWantCode,
+			boolean theFailOnMissingCodeSystem)
+			throws ExpansionCouldNotBeCompletedInternallyException {
+
+		InMemoryExpansionResult retVal = new InMemoryExpansionResult();
+		Set<FhirVersionIndependentConcept> concepts = new HashSet<>();
+
+		expandValueSetR5IncludeOrExcludes(
+				theValidationSupportContext,
+				concepts,
+				theInput.getCompose().getInclude(),
+				true,
+				theWantSystemUrlAndVersion,
+				theWantCode,
+				theFailOnMissingCodeSystem,
+				retVal);
+		expandValueSetR5IncludeOrExcludes(
+				theValidationSupportContext,
+				concepts,
+				theInput.getCompose().getExclude(),
+				false,
+				theWantSystemUrlAndVersion,
+				theWantCode,
+				theFailOnMissingCodeSystem,
+				retVal);
+
+		org.hl7.fhir.r5.model.ValueSet vs = new org.hl7.fhir.r5.model.ValueSet();
+		retVal.setValueSet(vs);
+		for (FhirVersionIndependentConcept next : concepts) {
+			org.hl7.fhir.r5.model.ValueSet.ValueSetExpansionContainsComponent contains =
+					vs.getExpansion().addContains();
+			contains.setSystem(next.getSystem());
+			contains.setCode(next.getCode());
+			contains.setDisplay(next.getDisplay());
+			contains.setVersion(next.getSystemVersion());
+		}
+
+		return retVal;
+	}
+
+	/**
+	 * Use with caution - this is not a stable API
+	 *
+	 * @since 5.6.0
+	 */
+	public void expandValueSetIncludeOrExclude(
+			ValidationSupportContext theValidationSupportContext,
+			Consumer<FhirVersionIndependentConcept> theConsumer,
+			org.hl7.fhir.r5.model.ValueSet.ConceptSetComponent theIncludeOrExclude)
+			throws ExpansionCouldNotBeCompletedInternallyException {
+		expandValueSetIncludeOrExclude(theValidationSupportContext, theConsumer, theIncludeOrExclude, true);
+	}
+
+	/**
+	 * Use with caution - this is not a stable API
+	 *
+	 * @param theFailOnMissingCodeSystem When {@literal false}, an include or exclude that enumerates its codes in a
+	 *                                   code system no module understands contributes those codes as listed,
+	 *                                   instead of failing the expansion
+	 * @throws ExpansionCouldNotBeCompletedInternallyException if the code system cannot be resolved and the
+	 *                                                         include or exclude cannot be expanded without it
+	 */
+	// Created by Claude Opus 5.5
+	public void expandValueSetIncludeOrExclude(
+			@Nonnull ValidationSupportContext theValidationSupportContext,
+			@Nonnull Consumer<FhirVersionIndependentConcept> theConsumer,
+			@Nonnull org.hl7.fhir.r5.model.ValueSet.ConceptSetComponent theIncludeOrExclude,
+			boolean theFailOnMissingCodeSystem)
+			throws ExpansionCouldNotBeCompletedInternallyException {
+		expandValueSetR5IncludeOrExclude(
+				theValidationSupportContext,
+				theConsumer,
+				null,
+				null,
+				theFailOnMissingCodeSystem,
+				theIncludeOrExclude,
+				new InMemoryExpansionResult());
+	}
+
+	private void expandValueSetR5IncludeOrExcludes(
+			ValidationSupportContext theValidationSupportContext,
+			Set<FhirVersionIndependentConcept> theConcepts,
+			List<org.hl7.fhir.r5.model.ValueSet.ConceptSetComponent> theComposeList,
+			boolean theComposeListIsInclude,
+			@Nullable String theWantSystemUrlAndVersion,
+			@Nullable String theWantCode,
+			boolean theFailOnMissingCodeSystem,
+			InMemoryExpansionResult theResponseBuilder)
+			throws ExpansionCouldNotBeCompletedInternallyException {
+		Consumer<FhirVersionIndependentConcept> consumer = c -> {
+			if (theComposeListIsInclude) {
+				theConcepts.add(c);
+			} else {
+				theConcepts.remove(c);
+			}
+		};
+		expandValueSetR5IncludeOrExcludes(
+				theComposeListIsInclude,
+				theValidationSupportContext,
+				consumer,
+				theComposeList,
+				theWantSystemUrlAndVersion,
+				theWantCode,
+				theFailOnMissingCodeSystem,
+				theResponseBuilder);
+	}
+
+	private void expandValueSetR5IncludeOrExcludes(
+			boolean theComposeListIsInclude,
+			ValidationSupportContext theValidationSupportContext,
+			Consumer<FhirVersionIndependentConcept> theConsumer,
+			List<org.hl7.fhir.r5.model.ValueSet.ConceptSetComponent> theComposeList,
+			@Nullable String theWantSystemUrlAndVersion,
+			@Nullable String theWantCode,
+			boolean theFailOnMissingCodeSystem,
+			InMemoryExpansionResult theResponseBuilder)
+			throws ExpansionCouldNotBeCompletedInternallyException {
+		ExpansionCouldNotBeCompletedInternallyException caughtException = null;
+		if (theComposeList.isEmpty()) {
+			if (theComposeListIsInclude) {
+				theResponseBuilder.addMessage("Empty compose list for includes");
+			}
+			return;
+		}
+		for (org.hl7.fhir.r5.model.ValueSet.ConceptSetComponent nextInclude : theComposeList) {
+			try {
+				boolean outcome = expandValueSetR5IncludeOrExclude(
+						theValidationSupportContext,
+						theConsumer,
+						theWantSystemUrlAndVersion,
+						theWantCode,
+						theFailOnMissingCodeSystem,
+						nextInclude,
+						theResponseBuilder);
+				if (isNotBlank(theWantCode)) {
+					if (outcome) {
+						return;
+					}
+				}
+			} catch (ExpansionCouldNotBeCompletedInternallyException e) {
+				if (isBlank(theWantCode)) {
+					throw e;
+				} else {
+					caughtException = e;
+				}
+			}
+		}
+		if (caughtException != null) {
+			throw caughtException;
+		}
+	}
+
+	/**
+	 * Returns <code>true</code> if at least one code was added
+	 */
+	private boolean expandValueSetR5IncludeOrExclude(
+			ValidationSupportContext theValidationSupportContext,
+			Consumer<FhirVersionIndependentConcept> theConsumer,
+			@Nullable String theWantSystemUrlAndVersion,
+			@Nullable String theWantCode,
+			boolean theFailOnMissingCodeSystem,
+			org.hl7.fhir.r5.model.ValueSet.ConceptSetComponent theInclude,
+			InMemoryExpansionResult theResponseBuilder)
+			throws ExpansionCouldNotBeCompletedInternallyException {
+
+		String wantSystemUrl = null;
+		String wantSystemVersion = null;
+
+		if (theWantSystemUrlAndVersion != null) {
+			int versionIndex = theWantSystemUrlAndVersion.indexOf(OUR_PIPE_CHARACTER);
+			if (versionIndex > -1) {
+				wantSystemUrl = theWantSystemUrlAndVersion.substring(0, versionIndex);
+				wantSystemVersion = theWantSystemUrlAndVersion.substring(versionIndex + 1);
+			} else {
+				wantSystemUrl = theWantSystemUrlAndVersion;
+			}
+		}
+
+		String includeOrExcludeConceptSystemUrl = theInclude.getSystem();
+		String includeOrExcludeConceptSystemVersion = theInclude.getVersion();
+
+		Function<IBaseResource, CodeSystem> codeSystemConverter = newCodeSystemConverter();
+		Function<String, org.hl7.fhir.r5.model.ValueSet> valueSetLoader =
+				newValueSetLoader(theValidationSupportContext);
+
+		List<FhirVersionIndependentConcept> nextCodeList = new ArrayList<>();
+		CodeSystem includeOrExcludeSystemResource = null;
+
+		if (isNotBlank(includeOrExcludeConceptSystemUrl)) {
+
+			includeOrExcludeConceptSystemVersion = optionallyPopulateVersionFromUrl(
+					includeOrExcludeConceptSystemUrl, includeOrExcludeConceptSystemVersion);
+			includeOrExcludeConceptSystemUrl = substringBefore(includeOrExcludeConceptSystemUrl, OUR_PIPE_CHARACTER);
+
+			if (wantSystemUrl != null && !wantSystemUrl.equals(includeOrExcludeConceptSystemUrl)) {
+				return false;
+			}
+
+			if (wantSystemVersion != null && !wantSystemVersion.equals(includeOrExcludeConceptSystemVersion)) {
+				return false;
+			}
+
+			// A Coding is matched to the version the include names, before that version is replaced
+			if (isUseCurrentVersionForUnknownCodeSystemVersion()) {
+				includeOrExcludeConceptSystemVersion = useCurrentVersionIfCodeSystemVersionUnknown(
+						theValidationSupportContext,
+						includeOrExcludeConceptSystemUrl,
+						includeOrExcludeConceptSystemVersion,
+						theResponseBuilder);
+			}
+
+			String loadedCodeSystemUrl =
+					UrlUtil.toCanonicalUrl(includeOrExcludeConceptSystemUrl, includeOrExcludeConceptSystemVersion);
+
+			includeOrExcludeSystemResource = codeSystemConverter.apply(theValidationSupportContext
+					.getRootValidationSupport()
+					.fetchCodeSystem(includeOrExcludeConceptSystemUrl, includeOrExcludeConceptSystemVersion));
+
+			boolean isIncludeWithDeclaredConcepts = !theInclude.getConcept().isEmpty();
+
+			final Set<String> wantCodes;
+			if (isIncludeWithDeclaredConcepts) {
+				wantCodes = theInclude.getConcept().stream()
+						.map(org.hl7.fhir.r5.model.ValueSet.ConceptReferenceComponent::getCode)
+						.collect(Collectors.toSet());
+			} else {
+				wantCodes = null;
+			}
+
+			boolean ableToHandleCode = false;
+			String failureMessage = null;
+
+			boolean isIncludeCodeSystemIgnored = includeOrExcludeSystemResource != null
+					&& includeOrExcludeSystemResource.getContent() == Enumerations.CodeSystemContentMode.NOTPRESENT;
+
+			boolean isIncludeFromSystem = isNotBlank(theInclude.getSystem())
+					&& theInclude.getValueSet().isEmpty();
+			boolean isIncludeWithFilter = !theInclude.getFilter().isEmpty();
+
+			// A module can support the code system without providing its CodeSystem resource, which filters need
+			// Created by Claude Opus 5.5
+			boolean isIncludeCodeSystemSupportedWithoutResource = includeOrExcludeSystemResource == null
+					&& isIncludeWithFilter
+					&& isCodeSystemSupportedByChain(
+							theValidationSupportContext,
+							includeOrExcludeConceptSystemUrl,
+							includeOrExcludeConceptSystemVersion);
+
+			// if we can’t load the CS and we’re configured to ignore it...
+			if ((isIncludeCodeSystemIgnored || isIncludeCodeSystemSupportedWithoutResource) && isIncludeWithFilter) {
+				// We can’t apply any structural (ISA/DESCENDENT-OF/etc..) filters if the CS is absent → fail
+				String msg = "Unable to expand ValueSet: cannot apply filters '" + theInclude.getFilter()
+						+ "' because CodeSystem '" + theInclude.getSystem()
+						+ (isIncludeCodeSystemIgnored ? "' is ignored/not-present" : "' is not available");
+
+				throw new ExpansionCouldNotBeCompletedInternallyException(
+						Msg.code(2646) + msg,
+						new CodeValidationIssue(
+								msg,
+								IssueSeverity.ERROR,
+								CodeValidationIssueCode.NOT_FOUND,
+								CodeValidationIssueCoding.NOT_FOUND));
+			}
+
+			if (includeOrExcludeSystemResource == null || isIncludeCodeSystemIgnored) {
+
+				boolean isListedCodesTakenAsListed = isIncludeCodeSystemIgnored || !theFailOnMissingCodeSystem;
+
+				if (theWantCode != null) {
+					// The support check and the lookup both name the version the include asks for, so a code is not
+					// accepted from a version other than the one the include is applied to
+					// Created by Claude Opus 5
+					if (isCodeSystemSupportedByChain(
+							theValidationSupportContext,
+							includeOrExcludeConceptSystemUrl,
+							includeOrExcludeConceptSystemVersion)) {
+						LookupCodeResult lookup = theValidationSupportContext
+								.getRootValidationSupport()
+								.lookupCode(
+										theValidationSupportContext,
+										new LookupCodeRequest(includeOrExcludeConceptSystemUrl, theWantCode)
+												.setVersion(includeOrExcludeConceptSystemVersion));
+						if (lookup != null) {
+							ableToHandleCode = true;
+							if (lookup.isFound()) {
+								CodeSystem.ConceptDefinitionComponent conceptDefinition =
+										new CodeSystem.ConceptDefinitionComponent()
+												.addConcept()
+												.setCode(theWantCode)
+												.setDisplay(lookup.getCodeDisplay());
+								List<CodeSystem.ConceptDefinitionComponent> codesList =
+										Collections.singletonList(conceptDefinition);
+								addCodes(
+										includeOrExcludeConceptSystemUrl,
+										includeOrExcludeConceptSystemVersion,
+										codesList,
+										nextCodeList,
+										wantCodes);
+							}
+						}
+					} else if (isIncludeWithDeclaredConcepts && !wantCodes.contains(theWantCode)) {
+						// The include lists its codes and this is not one of them, so it can't hold the code
+						// whatever the code system contains
+						ableToHandleCode = true;
+					} else {
+
+						/*
+						 * No module understands the code system at the version the include names. Listing the code in
+						 * the include does not change that, so the code cannot be validated (R5 ValueSet/$expand: a
+						 * server that "has the wrong version" SHALL return an error). A CodeSystem stored as
+						 * not-present still lets its enumerated codes through.
+						 */
+						if (Objects.equals(theInclude.getSystem(), theWantSystemUrlAndVersion)) {
+							Optional<org.hl7.fhir.r5.model.ValueSet.ConceptReferenceComponent>
+									matchingEnumeratedConcept = theInclude.getConcept().stream()
+											.filter(t -> Objects.equals(t.getCode(), theWantCode))
+											.findFirst();
+
+							// If the ValueSet.compose.include has no individual concepts in it, and
+							// we can't find the actual referenced CodeSystem, we have no choice
+							// but to fail
+							if (isIncludeWithDeclaredConcepts && isListedCodesTakenAsListed) {
+								ableToHandleCode = true;
+							} else {
+								failureMessage = getFailureMessageForMissingOrUnusableCodeSystem(
+										includeOrExcludeSystemResource, loadedCodeSystemUrl);
+							}
+
+							if (matchingEnumeratedConcept.isPresent()) {
+								CodeSystem.ConceptDefinitionComponent conceptDefinition =
+										new CodeSystem.ConceptDefinitionComponent()
+												.addConcept()
+												.setCode(theWantCode)
+												.setDisplay(matchingEnumeratedConcept
+														.get()
+														.getDisplay());
+								List<CodeSystem.ConceptDefinitionComponent> codesList =
+										Collections.singletonList(conceptDefinition);
+								addCodes(
+										includeOrExcludeConceptSystemUrl,
+										includeOrExcludeConceptSystemVersion,
+										codesList,
+										nextCodeList,
+										wantCodes);
+							}
+						}
+					}
+				} else {
+					if (isIncludeFromSystem && !isIncludeWithFilter) {
+						// Listed codes are taken as listed only where a module supports the code system, the
+						// CodeSystem is not-present, or the caller asked not to fail on a missing one
+						if (isIncludeWithDeclaredConcepts
+								&& (isListedCodesTakenAsListed
+										|| isCodeSystemSupportedByChain(
+												theValidationSupportContext,
+												includeOrExcludeConceptSystemUrl,
+												includeOrExcludeConceptSystemVersion))) {
+							theInclude.getConcept().stream()
+									.map(t -> new FhirVersionIndependentConcept(
+											theInclude.getSystem(),
+											t.getCode(),
+											t.getDisplay(),
+											theInclude.getVersion()))
+									.forEach(nextCodeList::add);
+							ableToHandleCode = true;
+						} else if (isIncludeCodeSystemIgnored) {
+							// A not-present CodeSystem holds no concepts, so an expansion takes none from it
+							ableToHandleCode = true;
+						}
+					}
+
+					if (!ableToHandleCode) {
+						failureMessage = getFailureMessageForMissingOrUnusableCodeSystem(
+								includeOrExcludeSystemResource, loadedCodeSystemUrl);
+					}
+				}
+
+			} else {
+				ableToHandleCode = true;
+			}
+
+			if (!ableToHandleCode) {
+				if (failureMessage == null) {
+					if (includeOrExcludeSystemResource == null) {
+						failureMessage = getFailureMessageForMissingOrUnusableCodeSystem(
+								includeOrExcludeSystemResource, loadedCodeSystemUrl);
+					} else {
+						failureMessage = "Unable to expand value set";
+					}
+				}
+
+				String unknownSystem = isCodeSystemUnresolved(
+								theValidationSupportContext,
+								includeOrExcludeSystemResource,
+								includeOrExcludeConceptSystemUrl,
+								includeOrExcludeConceptSystemVersion)
+						? loadedCodeSystemUrl
+						: null;
+				throw new ExpansionCouldNotBeCompletedInternallyException(
+						Msg.code(702) + failureMessage,
+						new CodeValidationIssue(
+								failureMessage,
+								IssueSeverity.ERROR,
+								CodeValidationIssueCode.NOT_FOUND,
+								CodeValidationIssueCoding.NOT_FOUND),
+						unknownSystem);
+			}
+
+			if (includeOrExcludeSystemResource != null
+					&& includeOrExcludeSystemResource.getContent() != Enumerations.CodeSystemContentMode.NOTPRESENT) {
+				addCodes(
+						includeOrExcludeConceptSystemUrl,
+						includeOrExcludeConceptSystemVersion,
+						includeOrExcludeSystemResource.getConcept(),
+						nextCodeList,
+						wantCodes);
+			}
+		}
+
+		for (CanonicalType nextValueSetInclude : theInclude.getValueSet()) {
+			org.hl7.fhir.r5.model.ValueSet vs = valueSetLoader.apply(nextValueSetInclude.getValueAsString());
+			if (vs != null) {
+				InMemoryExpansionResult subExpansionResult = expandValueSetR5(
+						theValidationSupportContext,
+						vs,
+						theWantSystemUrlAndVersion,
+						theWantCode,
+						theFailOnMissingCodeSystem);
+				theResponseBuilder.addReplacementsOf(subExpansionResult);
+				org.hl7.fhir.r5.model.ValueSet subExpansion = subExpansionResult.getValueSet();
+				if (subExpansion == null) {
+					String theMessage = "Failed to expand ValueSet: " + nextValueSetInclude.getValueAsString();
+					throw new ExpansionCouldNotBeCompletedInternallyException(
+							Msg.code(703) + theMessage,
+							new CodeValidationIssue(
+									theMessage,
+									IssueSeverity.ERROR,
+									CodeValidationIssueCode.INVALID,
+									CodeValidationIssueCoding.VS_INVALID));
+				}
+				for (org.hl7.fhir.r5.model.ValueSet.ValueSetExpansionContainsComponent next :
+						subExpansion.getExpansion().getContains()) {
+					nextCodeList.add(new FhirVersionIndependentConcept(
+							next.getSystem(), next.getCode(), next.getDisplay(), next.getVersion()));
+				}
+			}
+		}
+
+		boolean retVal = false;
+		ValueSetExpansionFilterContext valueSetExpansionFilterContext =
+				new ValueSetExpansionFilterContext(includeOrExcludeSystemResource, theInclude.getFilter());
+
+		try {
+			for (FhirVersionIndependentConcept next : nextCodeList) {
+				if (includeOrExcludeSystemResource != null && theWantCode != null) {
+					boolean matches = includeOrExcludeSystemResource.getCaseSensitive()
+							? theWantCode.equals(next.getCode())
+							: theWantCode.equalsIgnoreCase(next.getCode());
+
+					if (!matches) {
+						continue;
+					}
+				}
+
+				if (!valueSetExpansionFilterContext.isFiltered(next)) {
+					theConsumer.accept(next);
+					retVal = true;
+				}
+			}
+		} catch (ValueSetExpansionFilterContext.UndeterminedFilterException e) {
+			// The filter could not be evaluated for this concept, so membership was neither established nor
+			// refuted. Report that as 'not-found' mirroring the case above (Msg.code(2646)).
+			throw new ExpansionCouldNotBeCompletedInternallyException(
+					Msg.code(3049) + e.getMessage(),
+					new CodeValidationIssue(
+							e.getMessage(),
+							IssueSeverity.ERROR,
+							CodeValidationIssueCode.NOT_FOUND,
+							CodeValidationIssueCoding.NOT_FOUND));
+		} catch (ValueSetExpansionFilterContext.UnsupportedFilterException e) {
+			// The in-memory engine cannot evaluate this filter. Surface it as an expansion failure rather
+			// than silently returning an incomplete/empty expansion, so the caller can report an error or
+			// delegate to another terminology service in the chain. The message already carries the
+			// originating Msg.code from ValueSetExpansionFilterContext.
+			throw new ExpansionCouldNotBeCompletedInternallyException(
+					Msg.code(3007) + e.getMessage(),
+					new CodeValidationIssue(
+							e.getMessage(),
+							IssueSeverity.ERROR,
+							CodeValidationIssueCode.INVALID,
+							CodeValidationIssueCoding.VS_INVALID));
+		}
+
+		return retVal;
+	}
+
+	private Function<String, org.hl7.fhir.r5.model.ValueSet> newValueSetLoader(
+			ValidationSupportContext theValidationSupportContext) {
+		return t -> {
+			IBaseResource valueSet =
+					theValidationSupportContext.getRootValidationSupport().fetchValueSet(t);
+			return myVersionCanonicalizer.valueSetToValidatorCanonical(valueSet);
+		};
+	}
+
+	// Created by Claude Opus 5
+	private Function<IBaseResource, CodeSystem> newCodeSystemConverter() {
+		FhirVersionEnum version = myCtx.getVersion().getVersion();
+		if (FhirVersionEnum.DSTU2.equals(version) || FhirVersionEnum.DSTU2_HL7ORG.equals(version)) {
+			return codeSystem -> {
+				CodeSystem retVal = null;
+				if (codeSystem != null) {
+					retVal = new CodeSystem();
+					if (codeSystem instanceof ca.uhn.fhir.model.dstu2.resource.ValueSet codeSystemCasted) {
+						retVal.setUrl(codeSystemCasted.getUrl());
+						addCodesDstu2(codeSystemCasted.getCodeSystem().getConcept(), retVal.getConcept());
+					} else {
+						org.hl7.fhir.dstu2.model.ValueSet codeSystemCasted =
+								(org.hl7.fhir.dstu2.model.ValueSet) codeSystem;
+						retVal.setUrl(codeSystemCasted.getUrl());
+						addCodesDstu2Hl7Org(codeSystemCasted.getCodeSystem().getConcept(), retVal.getConcept());
+					}
+				}
+				return retVal;
+			};
+		} else {
+			return codeSystem -> myVersionCanonicalizer.codeSystemToValidatorCanonical(codeSystem);
+		}
+	}
+
+	// Created by Claude Opus 5.5
+	private static boolean isCodeSystemSupportedByChain(
+			ValidationSupportContext theValidationSupportContext,
+			String theCodeSystemUrl,
+			@Nullable String theCodeSystemVersion) {
+		return theValidationSupportContext
+				.getRootValidationSupport()
+				.isCodeSystemSupported(theValidationSupportContext, theCodeSystemUrl, theCodeSystemVersion);
+	}
+
+	/**
+	 * Returns the version an include or exclude is applied to: the one it names, or, when no module supports that
+	 * version but one supports the code system with no version named, the version the server uses then. A
+	 * replacement is recorded as a warning on {@literal theResponseBuilder}.
+	 */
+	// Created by Claude Opus 5.5
+	@Nullable
+	private String useCurrentVersionIfCodeSystemVersionUnknown(
+			ValidationSupportContext theValidationSupportContext,
+			String theCodeSystemUrl,
+			@Nullable String theCodeSystemVersion,
+			InMemoryExpansionResult theResponseBuilder) {
+		if (isBlank(theCodeSystemVersion)
+				|| isCodeSystemSupportedByChain(theValidationSupportContext, theCodeSystemUrl, theCodeSystemVersion)
+				|| !isCodeSystemSupportedByChain(theValidationSupportContext, theCodeSystemUrl, null)) {
+			return theCodeSystemVersion;
+		}
+
+		CodeSystem current = newCodeSystemConverter()
+				.apply(theValidationSupportContext.getRootValidationSupport().fetchCodeSystem(theCodeSystemUrl));
+		String currentVersion = current != null ? current.getVersion() : null;
+		theResponseBuilder.addCodeSystemVersionReplacement(
+				new CodeSystemVersionReplacement(theCodeSystemUrl, theCodeSystemVersion, currentVersion));
+		return currentVersion;
+	}
+
+	/**
+	 * Whether no module can provide the code system's concepts at the version given: none supports it, or its
+	 * CodeSystem is not-present.
+	 */
+	// Created by Claude Opus 5.5
+	private static boolean isCodeSystemUnresolved(
+			ValidationSupportContext theValidationSupportContext,
+			@Nullable CodeSystem theCodeSystem,
+			String theCodeSystemUrl,
+			String theCodeSystemVersion) {
+		if (theCodeSystem != null) {
+			return theCodeSystem.getContent() == Enumerations.CodeSystemContentMode.NOTPRESENT;
+		}
+		return !isCodeSystemSupportedByChain(theValidationSupportContext, theCodeSystemUrl, theCodeSystemVersion);
+	}
+
+	private String getFailureMessageForMissingOrUnusableCodeSystem(
+			CodeSystem includeOrExcludeSystemResource, String loadedCodeSystemUrl) {
+		String failureMessage;
+		if (includeOrExcludeSystemResource == null) {
+			failureMessage = "Unable to expand ValueSet because CodeSystem could not be found: " + loadedCodeSystemUrl;
+		} else {
+			assert includeOrExcludeSystemResource.getContent() == Enumerations.CodeSystemContentMode.NOTPRESENT;
+			failureMessage =
+					"Unable to expand ValueSet because CodeSystem has CodeSystem.content=not-present but contents were not found: "
+							+ loadedCodeSystemUrl;
+		}
+		return failureMessage;
+	}
+
+	private void addCodes(
+			String theCodeSystemUrl,
+			String theCodeSystemVersion,
+			List<CodeSystem.ConceptDefinitionComponent> theSource,
+			List<FhirVersionIndependentConcept> theTarget,
+			Set<String> theCodeFilter) {
+		for (CodeSystem.ConceptDefinitionComponent next : theSource) {
+			if (isNotBlank(next.getCode())) {
+				if (theCodeFilter == null || theCodeFilter.contains(next.getCode())) {
+					theTarget.add(new FhirVersionIndependentConcept(
+							theCodeSystemUrl, next.getCode(), next.getDisplay(), theCodeSystemVersion));
+				}
+			}
+			addCodes(theCodeSystemUrl, theCodeSystemVersion, next.getConcept(), theTarget, theCodeFilter);
+		}
+	}
+
+	private String optionallyPopulateVersionFromUrl(String theSystemUrl, String theVersion) {
+		if (contains(theSystemUrl, OUR_PIPE_CHARACTER) && isBlank(theVersion)) {
+			theVersion = substringAfter(theSystemUrl, OUR_PIPE_CHARACTER);
+		}
+		return theVersion;
+	}
+
+	private static void populateSourceDetailsForInMemoryExpansion(
+			String theValueSetUrl, CodeValidationResult codeValidationResult) {
+		codeValidationResult.setSourceDetails(
+				"Code was validated against in-memory expansion of ValueSet: " + theValueSetUrl);
+	}
+
+	public static CodeValidationResult createResultForDisplayMismatch(
+			FhirContext theFhirContext,
+			String theCode,
+			String theDisplay,
+			String theExpectedDisplay,
+			String theCodeSystem,
+			String theCodeSystemVersion,
+			IssueSeverity theIssueSeverityForCodeDisplayMismatch) {
+		return createResultForDisplayMismatch(
+				theFhirContext,
+				theCode,
+				theDisplay,
+				theExpectedDisplay,
+				theCodeSystem,
+				theCodeSystemVersion,
+				"",
+				theIssueSeverityForCodeDisplayMismatch);
+	}
+
+	private static CodeValidationResult createResultForDisplayMismatch(
+			FhirContext theFhirContext,
+			String theCode,
+			String theDisplay,
+			String theExpectedDisplay,
+			String theCodeSystem,
+			String theCodeSystemVersion,
+			String theMessageAppend,
+			IssueSeverity theIssueSeverityForCodeDisplayMismatch) {
+
+		String message;
+		IssueSeverity issueSeverity = theIssueSeverityForCodeDisplayMismatch;
+		if (issueSeverity == IssueSeverity.INFORMATION) {
+			message = null;
+			issueSeverity = null;
+		} else {
+			message = theFhirContext
+							.getLocalizer()
+							.getMessage(
+									InMemoryTerminologyServerValidationSupport.class,
+									"displayMismatch",
+									theDisplay,
+									theExpectedDisplay,
+									theCodeSystem,
+									theCode)
+					+ theMessageAppend;
+		}
+		CodeValidationResult codeValidationResult = new CodeValidationResult()
+				.setSeverity(issueSeverity)
+				.setMessage(message)
+				.setCode(theCode)
+				.setCodeSystemVersion(theCodeSystemVersion)
+				.setDisplay(theExpectedDisplay);
+		if (issueSeverity != null) {
+			codeValidationResult.setIssues(Collections.singletonList(new CodeValidationIssue(
+					message,
+					theIssueSeverityForCodeDisplayMismatch,
+					CodeValidationIssueCode.INVALID,
+					CodeValidationIssueCoding.INVALID_DISPLAY)));
+		}
+
+		return codeValidationResult;
+	}
+
+	private static void flattenAndConvertCodesDstu2(
+			List<ca.uhn.fhir.model.dstu2.resource.ValueSet.ExpansionContains> theInput,
+			List<FhirVersionIndependentConcept> theFhirVersionIndependentConcepts) {
+		for (ca.uhn.fhir.model.dstu2.resource.ValueSet.ExpansionContains next : theInput) {
+			theFhirVersionIndependentConcepts.add(
+					new FhirVersionIndependentConcept(next.getSystem(), next.getCode(), next.getDisplay()));
+			flattenAndConvertCodesDstu2(next.getContains(), theFhirVersionIndependentConcepts);
+		}
+	}
+
+	private static void flattenAndConvertCodesDstu2Hl7Org(
+			List<org.hl7.fhir.dstu2.model.ValueSet.ValueSetExpansionContainsComponent> theInput,
+			List<FhirVersionIndependentConcept> theFhirVersionIndependentConcepts) {
+		for (org.hl7.fhir.dstu2.model.ValueSet.ValueSetExpansionContainsComponent next : theInput) {
+			theFhirVersionIndependentConcepts.add(
+					new FhirVersionIndependentConcept(next.getSystem(), next.getCode(), next.getDisplay()));
+			flattenAndConvertCodesDstu2Hl7Org(next.getContains(), theFhirVersionIndependentConcepts);
+		}
+	}
+
+	private static void flattenAndConvertCodesDstu3(
+			List<org.hl7.fhir.dstu3.model.ValueSet.ValueSetExpansionContainsComponent> theInput,
+			List<FhirVersionIndependentConcept> theFhirVersionIndependentConcepts) {
+		for (org.hl7.fhir.dstu3.model.ValueSet.ValueSetExpansionContainsComponent next : theInput) {
+			theFhirVersionIndependentConcepts.add(new FhirVersionIndependentConcept(
+					next.getSystem(), next.getCode(), next.getDisplay(), next.getVersion()));
+			flattenAndConvertCodesDstu3(next.getContains(), theFhirVersionIndependentConcepts);
+		}
+	}
+
+	private static void flattenAndConvertCodesR4(
+			List<org.hl7.fhir.r4.model.ValueSet.ValueSetExpansionContainsComponent> theInput,
+			List<FhirVersionIndependentConcept> theFhirVersionIndependentConcepts) {
+		for (org.hl7.fhir.r4.model.ValueSet.ValueSetExpansionContainsComponent next : theInput) {
+			theFhirVersionIndependentConcepts.add(new FhirVersionIndependentConcept(
+					next.getSystem(), next.getCode(), next.getDisplay(), next.getVersion()));
+			flattenAndConvertCodesR4(next.getContains(), theFhirVersionIndependentConcepts);
+		}
+	}
+
+	private static void flattenAndConvertCodesR4B(
+			List<org.hl7.fhir.r4b.model.ValueSet.ValueSetExpansionContainsComponent> theInput,
+			List<FhirVersionIndependentConcept> theFhirVersionIndependentConcepts) {
+		for (org.hl7.fhir.r4b.model.ValueSet.ValueSetExpansionContainsComponent next : theInput) {
+			theFhirVersionIndependentConcepts.add(new FhirVersionIndependentConcept(
+					next.getSystem(), next.getCode(), next.getDisplay(), next.getVersion()));
+			flattenAndConvertCodesR4B(next.getContains(), theFhirVersionIndependentConcepts);
+		}
+	}
+
+	private static void flattenAndConvertCodesR5(
+			List<org.hl7.fhir.r5.model.ValueSet.ValueSetExpansionContainsComponent> theInput,
+			List<FhirVersionIndependentConcept> theFhirVersionIndependentConcepts) {
+		for (org.hl7.fhir.r5.model.ValueSet.ValueSetExpansionContainsComponent next : theInput) {
+			theFhirVersionIndependentConcepts.add(new FhirVersionIndependentConcept(
+					next.getSystem(), next.getCode(), next.getDisplay(), next.getVersion()));
+			flattenAndConvertCodesR5(next.getContains(), theFhirVersionIndependentConcepts);
+		}
+	}
+
+	public static class ExpansionCouldNotBeCompletedInternallyException extends Exception {
+
+		private static final long serialVersionUID = -2226561628771483085L;
+		private final CodeValidationIssue myCodeValidationIssue;
+		private final String myUnknownSystem;
+
+		public ExpansionCouldNotBeCompletedInternallyException(
+				String theMessage, CodeValidationIssue theCodeValidationIssue) {
+			this(theMessage, theCodeValidationIssue, null);
+		}
+
+		/**
+		 * @param theUnknownSystem the canonical ({@literal system|version} when a version was asked for) of the code
+		 *                         system no module understands, when that is why the expansion failed
+		 */
+		// Created by Claude Opus 5.5
+		public ExpansionCouldNotBeCompletedInternallyException(
+				@Nonnull String theMessage,
+				@Nonnull CodeValidationIssue theCodeValidationIssue,
+				@Nullable String theUnknownSystem) {
+			super(theMessage);
+			myCodeValidationIssue = theCodeValidationIssue;
+			myUnknownSystem = theUnknownSystem;
+		}
+
+		public CodeValidationIssue getCodeValidationIssue() {
+			return myCodeValidationIssue;
+		}
+
+		/**
+		 * @return the canonical of the code system no module understands, when that is why the expansion failed,
+		 * otherwise {@literal null}
+		 */
+		// Created by Claude Opus 5.5
+		@Nullable
+		public String getUnknownSystem() {
+			return myUnknownSystem;
+		}
+	}
+}

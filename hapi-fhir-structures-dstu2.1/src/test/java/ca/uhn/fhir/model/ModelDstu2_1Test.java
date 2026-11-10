@@ -1,15 +1,11 @@
 package ca.uhn.fhir.model;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-
-import java.text.SimpleDateFormat;
-import java.util.Arrays;
-import java.util.Date;
-import java.util.List;
-
-import org.hl7.fhir.dstu2016may.model.Appointment;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.util.TestUtil;
 import org.hl7.fhir.dstu2016may.model.CodeableConcept;
 import org.hl7.fhir.dstu2016may.model.Element;
 import org.hl7.fhir.dstu2016may.model.Enumerations;
@@ -18,15 +14,16 @@ import org.hl7.fhir.dstu2016may.model.Patient;
 import org.hl7.fhir.dstu2016may.model.Practitioner;
 import org.hl7.fhir.dstu2016may.model.Practitioner.PractitionerPractitionerRoleComponent;
 import org.hl7.fhir.instance.model.api.IBaseElement;
-import org.junit.AfterClass;
-import org.junit.Ignore;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 
-import ca.uhn.fhir.context.BaseRuntimeDeclaredChildDefinition;
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.context.RuntimeResourceDefinition;
-import ca.uhn.fhir.util.FhirTerser;
-import ca.uhn.fhir.util.TestUtil;
+import java.text.SimpleDateFormat;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class ModelDstu2_1Test {
 
@@ -49,9 +46,9 @@ public class ModelDstu2_1Test {
 		assertEquals(CodeableConcept.class, roleField.getClass());
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void afterClassClearContext() {
-		TestUtil.clearAllStaticFieldsForUnitTest();
+		TestUtil.randomizeLocaleAndTimezone();
 	}
 
 
@@ -70,7 +67,7 @@ public class ModelDstu2_1Test {
 		try {
 			ourCtx.newXmlParser().encodeResourceToString(p);
 		} catch (ClassCastException e) {
-			assertEquals("Found instance of class java.lang.String - Did you set a field value to the incorrect type? Expected org.hl7.fhir.instance.model.api.IBase", e.getMessage());
+			assertEquals(Msg.code(1794) + "Found instance of class java.lang.String - Did you set a field value to the incorrect type? Expected org.hl7.fhir.instance.model.api.IBase", e.getMessage());
 		}
 	}
 	
@@ -82,7 +79,7 @@ public class ModelDstu2_1Test {
 	 * See #325
 	 */
 	@Test
-	@Ignore
+	@Disabled
 	public void testEqualsDeep() throws Exception {
 		
 		SimpleDateFormat dateFormat = new SimpleDateFormat("yyyyMMdd");

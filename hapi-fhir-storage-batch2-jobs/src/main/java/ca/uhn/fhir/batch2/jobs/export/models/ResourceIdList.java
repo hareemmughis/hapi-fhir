@@ -1,0 +1,73 @@
+/*-
+ * #%L
+ * HAPI-FHIR Storage Batch2 Jobs
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.batch2.jobs.export.models;
+
+import ca.uhn.fhir.batch2.jobs.chunk.TypedPidJson;
+import ca.uhn.fhir.interceptor.model.RequestPartitionId;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+import java.util.List;
+
+public class ResourceIdList extends BulkExportJobBase {
+
+	/**
+	 * List of Id objects for serialization
+	 */
+	@JsonProperty("ids")
+	private List<TypedPidJson> myBatchResourceIds;
+
+	@JsonProperty("partitionId")
+	private RequestPartitionId myPartitionId;
+
+	@JsonProperty("resourceType")
+	private String myResourceType;
+
+	/**
+	 * @deprecated Partition IDs are stored in the individual {@link TypedPidJson}
+	 */
+	@Deprecated
+	public RequestPartitionId getPartitionId() {
+		return myPartitionId;
+	}
+
+	/**
+	 * @deprecated Partition IDs are stored in the individual {@link TypedPidJson}
+	 */
+	@Deprecated
+	public void setPartitionId(RequestPartitionId thePartitionId) {
+		myPartitionId = thePartitionId;
+	}
+
+	public List<TypedPidJson> getIds() {
+		return myBatchResourceIds;
+	}
+
+	public void setIds(List<TypedPidJson> theBatchResourceIds) {
+		myBatchResourceIds = theBatchResourceIds;
+	}
+
+	public String getResourceType() {
+		return myResourceType;
+	}
+
+	public void setResourceType(String theResourceType) {
+		myResourceType = theResourceType;
+	}
+}

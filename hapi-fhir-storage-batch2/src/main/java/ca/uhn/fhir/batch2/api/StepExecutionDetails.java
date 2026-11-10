@@ -1,0 +1,193 @@
+/*-
+ * #%L
+ * HAPI FHIR JPA Server - Batch2 Task Processor
+ * %%
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
+ * %%
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * #L%
+ */
+package ca.uhn.fhir.batch2.api;
+
+import ca.uhn.fhir.batch2.model.JobDefinition;
+import ca.uhn.fhir.batch2.model.JobInstance;
+import ca.uhn.fhir.batch2.model.WorkChunk;
+import ca.uhn.fhir.model.api.IModelJson;
+import ca.uhn.fhir.rest.api.server.SystemRequestDetails;
+import com.google.common.annotations.Beta;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.lang3.Validate;
+
+import static ca.uhn.fhir.batch2.util.Batch2Utils.REDUCTION_STEP_CHUNK_ID_PLACEHOLDER;
+
+public class StepExecutionDetails<PT extends IModelJson, IT extends IModelJson> {
+
+	private final PT myParameters;
+	private final IT myData;
+	private final IJobInstance myInstance;
+	private final WorkChunk myChunk;
+	private final IJobStepExecutionServices myJobStepExecutionServices;
+	private final String myCurrentStepId;
+	private final String myNextStepId;
+	private final JobDefinition<PT> myJobDefinition;
+
+	/**
+	 * Create and returns a step execution details for a reduction job
+	 */
+	public static <P1 extends IModelJson, I1 extends IModelJson>
+			StepExecutionDetails<P1, I1> createReductionStepDetails(
+					JobDefinition<P1> theJobDefinition,
+					String theStepId,
+					P1 theParameters,
+					I1 theIntermediateParams,
+					JobInstance theInstance,
+					IJobStepExecutionServices theJobStepExecutionServices) {
+		WorkChunk reductionChunk = new WorkChunk().setId(REDUCTION_STEP_CHUNK_ID_PLACEHOLDER);
+
+		return new StepExecutionDetails<>(
+				theParameters,
+				theIntermediateParams,
+				theInstance,
+				reductionChunk,
+				theJobStepExecutionServices,
+				theJobDefinition,
+				theStepId,
+				null);
+	}
+
+	/**
+	 * @deprecated Use the other constructor
+	 */
+	@Deprecated(since = "8.12.0", forRemoval = true)
+	public StepExecutionDetails(
+			@Nonnull PT theParameters,
+			@Nullable IT theData,
+			@Nonnull JobInstance theInstance,
+			@Nonnull WorkChunk theChunk,
+			@Nonnull IJobStepExecutionServices theJobStepExecutionServices) {
+		this(theParameters, theData, theInstance, theChunk, theJobStepExecutionServices, null, null, null);
+	}
+
+	/**
+	 * Constructor
+	 */
+	public StepExecutionDetails(
+			@Nonnull PT theParameters,
+			@Nullable IT theData,
+			@Nonnull JobInstance theInstance,
+			@Nonnull WorkChunk theChunk,
+			@Nonnull IJobStepExecutionServices theJobStepExecutionServices,
+			JobDefinition<PT> theJobDefinition,
+			String theCurrentStepId,
+			String theNextStepId) {
+		Validate.notNull(theParameters, "theParameters must not be null");
+		myParameters = theParameters;
+		myData = theData;
+		// Make a copy so the step worker can't change the one passed in
+		myInstance = new JobInstance(theInstance);
+		myChunk = theChunk;
+		myJobStepExecutionServices = theJobStepExecutionServices;
+		myJobDefinition = theJobDefinition;
+		myCurrentStepId = theCurrentStepId;
+		myNextStepId = theNextStepId;
+	}
+
+	/**
+	 * Returns the job definition associated with this step execution
+	 *
+	 * @since 8.12.0
+	 */
+	public JobDefinition<PT> getJobDefinition() {
+		return myJobDefinition;
+	}
+
+	/**
+	 * Returns the data associated with this step execution.
+	 * This method should never be called during the first step of a job,
+	 * or in a reduction step, and will never return <code>null</code> during
+	 * any other steps.
+	 *
+	 * @throws NullPointerException If this method is called during the first step of a job
+	 */
+	@Nonnull
+	public IT getData() {
+		Validate.notNull(myData, "Data is currently null");
+		return myData;
+	}
+
+	/**
+	 * Returns the parameters associated with this job instance. Note that parameters
+	 * are set when the job instance is created and can not be modified after that.
+	 */
+	@Nonnull
+	public PT getParameters() {
+		return myParameters;
+	}
+
+	/**
+	 * Returns the job instance ID being executed
+	 */
+	@Nonnull
+	public IJobInstance getInstance() {
+		return myInstance;
+	}
+
+	/**
+	 * Returns the work chunk ID being executed
+	 */
+	@Nonnull
+	public String getChunkId() {
+		return myChunk.getId();
+	}
+
+	@Nonnull
+	public WorkChunk getWorkChunk() {
+		return myChunk;
+	}
+
+	/**
+	 * Returns true if there's a workchunk to store data to.
+	 * If false, failures and data storage go straight to the jobinstance instead
+	 * @return - true if there's a workchunk in the db to store to.
+	 * 			false if the output goes to the jobinstance instead
+	 */
+	public boolean hasAssociatedWorkChunk() {
+		return myChunk != null && !myChunk.isReductionWorkChunk();
+	}
+
+	/**
+	 * Returns a new {@link SystemRequestDetails} object pre-populated with the user data from the job instance.
+	 * <b>This is an experimental internal API, use with caution</b>
+	 *
+	 * @since 8.8.0
+	 */
+	@Beta
+	public SystemRequestDetails newSystemRequestDetails() {
+		return myJobStepExecutionServices.newRequestDetails(myInstance);
+	}
+
+	/**
+	 * @since 8.12.0
+	 */
+	public String getCurrentStepId() {
+		return myCurrentStepId;
+	}
+
+	/**
+	 * @since 8.12.0
+	 */
+	public String getNextStepId() {
+		return myNextStepId;
+	}
+}

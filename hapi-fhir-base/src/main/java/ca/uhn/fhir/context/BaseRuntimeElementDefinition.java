@@ -1,17 +1,15 @@
-package ca.uhn.fhir.context;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,27 +17,39 @@ package ca.uhn.fhir.context;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.context;
+
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.util.UrlUtil;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Validate;
+import org.hl7.fhir.instance.model.api.IBase;
 
 import java.lang.reflect.Constructor;
-import java.util.*;
-
-import org.apache.commons.lang3.StringUtils;
-import org.hl7.fhir.instance.model.api.IBase;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public abstract class BaseRuntimeElementDefinition<T extends IBase> {
 
 	private static final Class<Void> VOID_CLASS = Void.class;
-	
-	private Map<Class<?>, Constructor<T>> myConstructors = Collections.synchronizedMap(new HashMap<Class<?>, Constructor<T>>());
-	private List<RuntimeChildDeclaredExtensionDefinition> myExtensions = new ArrayList<RuntimeChildDeclaredExtensionDefinition>();
-	private List<RuntimeChildDeclaredExtensionDefinition> myExtensionsModifier = new ArrayList<RuntimeChildDeclaredExtensionDefinition>();
-	private List<RuntimeChildDeclaredExtensionDefinition> myExtensionsNonModifier = new ArrayList<RuntimeChildDeclaredExtensionDefinition>();
 	private final Class<? extends T> myImplementingClass;
 	private final String myName;
 	private final boolean myStandardType;
-	private Map<String, RuntimeChildDeclaredExtensionDefinition> myUrlToExtension = new HashMap<String, RuntimeChildDeclaredExtensionDefinition>();
+	private final Map<Class<?>, Constructor<T>> myConstructors = new ConcurrentHashMap<>();
+	private List<RuntimeChildDeclaredExtensionDefinition> myExtensions = new ArrayList<>();
+	private List<RuntimeChildDeclaredExtensionDefinition> myExtensionsModifier = new ArrayList<>();
+	private List<RuntimeChildDeclaredExtensionDefinition> myExtensionsNonModifier = new ArrayList<>();
+	private Map<String, RuntimeChildDeclaredExtensionDefinition> myUrlToExtension = new HashMap<>();
+	private BaseRuntimeElementDefinition<?> myRootParentDefinition;
 
-	public BaseRuntimeElementDefinition(String theName, Class<? extends T> theImplementingClass, boolean theStandardType) {
+	public BaseRuntimeElementDefinition(
+			String theName, Class<? extends T> theImplementingClass, boolean theStandardType) {
 		assert StringUtils.isNotBlank(theName);
 		assert theImplementingClass != null;
 
@@ -48,61 +58,73 @@ public abstract class BaseRuntimeElementDefinition<T extends IBase> {
 		if (name.endsWith("Dt")) {
 			name = name.substring(0, name.length() - 2);
 		}
-		
-		
+
 		myName = name;
 		myStandardType = theStandardType;
 		myImplementingClass = theImplementingClass;
 	}
 
-	public void addExtension(RuntimeChildDeclaredExtensionDefinition theExtension) {
-		if (theExtension == null) {
-			throw new NullPointerException();
-		}
+	public void addExtension(@Nonnull RuntimeChildDeclaredExtensionDefinition theExtension) {
+		Validate.notNull(theExtension, "theExtension must not be null");
 		myExtensions.add(theExtension);
 	}
 
 	public abstract ChildTypeEnum getChildType();
 
+	public List<BaseRuntimeChildDefinition> getChildren() {
+		return Collections.emptyList();
+	}
+
 	@SuppressWarnings("unchecked")
-	private Constructor<T> getConstructor(Object theArgument) {
-		
-		Class<? extends Object> argumentType;
+	private Constructor<T> getConstructor(@Nullable Object theArgument) {
+
+		Class<?> argumentType;
 		if (theArgument == null) {
 			argumentType = VOID_CLASS;
 		} else {
 			argumentType = theArgument.getClass();
 		}
-		
-		Constructor<T> retVal = myConstructors.get(argumentType);
-		if (retVal == null) {
+
+		Constructor<T> retVal = myConstructors.computeIfAbsent(argumentType, type -> {
 			for (Constructor<?> next : getImplementingClass().getConstructors()) {
-				if (argumentType == VOID_CLASS) {
+				if (type == VOID_CLASS) {
 					if (next.getParameterTypes().length == 0) {
-						retVal = (Constructor<T>) next;
-						break;
+						return (Constructor<T>) next;
 					}
-				} else if (next.getParameterTypes().length == 1) {
-					if (next.getParameterTypes()[0].isAssignableFrom(argumentType)) {
-						retVal = (Constructor<T>) next;
-						break;
-					}
+				} else if (next.getParameterTypes().length == 1 && next.getParameterTypes()[0].isAssignableFrom(type)) {
+					return (Constructor<T>) next;
 				}
 			}
-			if (retVal == null) {
-				throw new ConfigurationException("Class " + getImplementingClass() + " has no constructor with a single argument of type " + argumentType);
-			}
-			myConstructors.put(argumentType, retVal);
+			return null;
+		});
+
+		if (retVal == null) {
+			throw new ConfigurationException(Msg.code(1695) + "Class " + getImplementingClass()
+					+ " has no constructor with a single argument of type " + argumentType);
 		}
+
 		return retVal;
 	}
 
 	/**
 	 * @return Returns null if none
 	 */
-	public RuntimeChildDeclaredExtensionDefinition getDeclaredExtension(String theExtensionUrl) {
+	public RuntimeChildDeclaredExtensionDefinition getDeclaredExtension(
+			String theExtensionUrl, final String serverBaseUrl) {
 		validateSealed();
-		return myUrlToExtension.get(theExtensionUrl);
+		RuntimeChildDeclaredExtensionDefinition definition = myUrlToExtension.get(theExtensionUrl);
+		if (definition == null && StringUtils.isNotBlank(serverBaseUrl)) {
+			for (final Map.Entry<String, RuntimeChildDeclaredExtensionDefinition> entry : myUrlToExtension.entrySet()) {
+				final String key = (!UrlUtil.isValid(entry.getKey()) && StringUtils.isNotBlank(serverBaseUrl))
+						? serverBaseUrl + entry.getKey()
+						: entry.getKey();
+				if (key.equals(theExtensionUrl)) {
+					definition = entry.getValue();
+					break;
+				}
+			}
+		}
+		return definition;
 	}
 
 	public List<RuntimeChildDeclaredExtensionDefinition> getExtensions() {
@@ -126,7 +148,7 @@ public abstract class BaseRuntimeElementDefinition<T extends IBase> {
 
 	/**
 	 * @return Returns the runtime name for this resource (i.e. the name that
-	 *         will be used in encoded messages)
+	 * will be used in encoded messages)
 	 */
 	public String getName() {
 		return myName;
@@ -141,28 +163,40 @@ public abstract class BaseRuntimeElementDefinition<T extends IBase> {
 		return myStandardType;
 	}
 
+	@Nonnull
 	public T newInstance() {
 		return newInstance(null);
 	}
 
+	@Nonnull
 	public T newInstance(Object theArgument) {
 		try {
 			if (theArgument == null) {
-				return getConstructor(null).newInstance(null);
-			} else {
-				return getConstructor(theArgument).newInstance(theArgument);
+				return getConstructor(null).newInstance();
 			}
+			return getConstructor(theArgument).newInstance(theArgument);
+
 		} catch (Exception e) {
-			throw new ConfigurationException("Failed to instantiate type:" + getImplementingClass().getName(), e);
+			throw new ConfigurationException(
+					Msg.code(1696) + "Failed to instantiate type:"
+							+ getImplementingClass().getName(),
+					e);
 		}
+	}
+
+	public BaseRuntimeElementDefinition<?> getRootParentDefinition() {
+		return myRootParentDefinition;
 	}
 
 	/**
 	 * Invoked prior to use to perform any initialization and make object
 	 * mutable.
+	 *
 	 * @param theContext TODO
 	 */
-	void sealAndInitialize(FhirContext theContext, Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
+	void sealAndInitialize(
+			FhirContext theContext,
+			Map<Class<? extends IBase>, BaseRuntimeElementDefinition<?>> theClassToElementDefinitions) {
 		for (BaseRuntimeChildDefinition next : myExtensions) {
 			next.sealAndInitialize(theContext, theClassToElementDefinitions);
 		}
@@ -170,57 +204,71 @@ public abstract class BaseRuntimeElementDefinition<T extends IBase> {
 		for (RuntimeChildDeclaredExtensionDefinition next : myExtensions) {
 			String extUrl = next.getExtensionUrl();
 			if (myUrlToExtension.containsKey(extUrl)) {
-				throw new ConfigurationException("Duplicate extension URL[" + extUrl + "] in Element[" + getName() + "]");
-			} else {
-				myUrlToExtension.put(extUrl, next);
+				throw new ConfigurationException(
+						Msg.code(1697) + "Duplicate extension URL[" + extUrl + "] in Element[" + getName() + "]");
 			}
+			myUrlToExtension.put(extUrl, next);
 			if (next.isModifier()) {
 				myExtensionsModifier.add(next);
 			} else {
 				myExtensionsNonModifier.add(next);
 			}
-
 		}
 
 		myExtensions = Collections.unmodifiableList(myExtensions);
+
+		Class parent = myImplementingClass;
+		do {
+			BaseRuntimeElementDefinition<?> parentDefinition = theClassToElementDefinitions.get(parent);
+			if (parentDefinition != null) {
+				myRootParentDefinition = parentDefinition;
+			}
+			parent = parent.getSuperclass();
+		} while (!parent.equals(Object.class));
 	}
 
 	@Override
 	public String toString() {
-		return getClass().getSimpleName()+"[" + getName() + ", " + getImplementingClass().getSimpleName() + "]";
+		return getClass().getSimpleName() + "[" + getName() + ", "
+				+ getImplementingClass().getSimpleName() + "]";
 	}
 
 	protected void validateSealed() {
-		/* 
+		/*
 		 * this does nothing, but BaseRuntimeElementCompositeDefinition
 		 * overrides this method to provide functionality because that class
-		 * defers the dealing process
+		 * defers the sealing process
 		 */
-		
+	}
+
+	public BaseRuntimeChildDefinition getChildByName(String theChildName) {
+		return null;
 	}
 
 	public enum ChildTypeEnum {
-		COMPOSITE_DATATYPE, /**
+		COMPOSITE_DATATYPE,
+		/**
 		 * HL7.org structure style.
 		 */
-		CONTAINED_RESOURCE_LIST, /**
+		CONTAINED_RESOURCE_LIST,
+		/**
 		 * HAPI structure style.
 		 */
-		CONTAINED_RESOURCES, EXTENSION_DECLARED, 
-		ID_DATATYPE, 
-		PRIMITIVE_DATATYPE, /**
+		CONTAINED_RESOURCES,
+		EXTENSION_DECLARED,
+		ID_DATATYPE,
+		PRIMITIVE_DATATYPE,
+		/**
 		 * HAPI style.
 		 */
-		PRIMITIVE_XHTML, 
+		PRIMITIVE_XHTML,
 		/**
 		 * HL7.org style.
 		 */
-		PRIMITIVE_XHTML_HL7ORG, 
-		RESOURCE, 
-		RESOURCE_BLOCK, 
-		
-		UNDECL_EXT, 
-		
-	}
+		PRIMITIVE_XHTML_HL7ORG,
+		RESOURCE,
+		RESOURCE_BLOCK,
 
+		UNDECL_EXT,
+	}
 }

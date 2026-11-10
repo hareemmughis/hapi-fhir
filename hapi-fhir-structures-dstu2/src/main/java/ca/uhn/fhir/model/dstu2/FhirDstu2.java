@@ -1,17 +1,15 @@
-package ca.uhn.fhir.model.dstu2;
-
 /*
  * #%L
  * HAPI FHIR Structures - DSTU2 (FHIR v1.0.0)
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,21 +17,14 @@ package ca.uhn.fhir.model.dstu2;
  * limitations under the License.
  * #L%
  */
-
-import java.io.InputStream;
-import java.util.Date;
-
-import org.apache.commons.lang3.StringUtils;
-import org.hl7.fhir.instance.model.api.IBaseResource;
-import org.hl7.fhir.instance.model.api.IIdType;
-import org.hl7.fhir.instance.model.api.IPrimitiveType;
+package ca.uhn.fhir.model.dstu2;
 
 import ca.uhn.fhir.context.ConfigurationException;
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.context.FhirVersionEnum;
 import ca.uhn.fhir.context.RuntimeResourceDefinition;
-import ca.uhn.fhir.context.support.IContextValidationSupport;
-import ca.uhn.fhir.fluentpath.IFluentPath;
+import ca.uhn.fhir.fhirpath.IFhirPath;
+import ca.uhn.fhir.i18n.Msg;
 import ca.uhn.fhir.model.api.IFhirVersion;
 import ca.uhn.fhir.model.api.IResource;
 import ca.uhn.fhir.model.api.ResourceMetadataKeyEnum;
@@ -45,35 +36,24 @@ import ca.uhn.fhir.model.dstu2.composite.ContainedDt;
 import ca.uhn.fhir.model.dstu2.composite.ResourceReferenceDt;
 import ca.uhn.fhir.model.dstu2.resource.StructureDefinition;
 import ca.uhn.fhir.model.primitive.IdDt;
-import ca.uhn.fhir.rest.server.IResourceProvider;
-import ca.uhn.fhir.rest.server.IVersionSpecificBundleFactory;
-import ca.uhn.fhir.rest.server.RestfulServer;
+import ca.uhn.fhir.rest.api.IVersionSpecificBundleFactory;
 import ca.uhn.fhir.rest.server.provider.dstu2.Dstu2BundleFactory;
-import ca.uhn.fhir.rest.server.provider.dstu2.ServerConformanceProvider;
-import ca.uhn.fhir.rest.server.provider.dstu2.ServerProfileProvider;
+import ca.uhn.fhir.util.ReflectionUtil;
+import org.apache.commons.lang3.StringUtils;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.instance.model.api.IPrimitiveType;
+
+import java.io.InputStream;
+import java.util.Date;
 
 public class FhirDstu2 implements IFhirVersion {
 
 	private String myId;
 
 	@Override
-	public IFluentPath createFluentPathExecutor(FhirContext theFhirContext) {
-		throw new UnsupportedOperationException("FluentPath is not supported in DSTU2 contexts");
-	}
-
-	@Override
-	public ServerConformanceProvider createServerConformanceProvider(RestfulServer theServer) {
-		return new ServerConformanceProvider(theServer);
-	}
-
-	@Override
-	public IResourceProvider createServerProfilesProvider(RestfulServer theRestfulServer) {
-		return new ServerProfileProvider(theRestfulServer);
-	}
-
-	@Override
-	public IContextValidationSupport<?, ?, ?, ?, ?, ?> createValidationSupport() {
-		throw new UnsupportedOperationException("Validation support is not supported in DSTU2 contexts");
+	public IFhirPath createFhirPathExecutor(FhirContext theFhirContext) {
+		throw new UnsupportedOperationException(Msg.code(578) + "FluentPath is not supported in DSTU2 contexts");
 	}
 
 	@Override
@@ -103,7 +83,8 @@ public class FhirDstu2 implements IFhirVersion {
 			str = FhirDstu2.class.getResourceAsStream("ca/uhn/fhir/model/dstu2/fhirversion.properties");
 		}
 		if (str == null) {
-			throw new ConfigurationException("Can not find model property file on classpath: " + "/ca/uhn/fhir/model/dstu2/fhirversion.properties");
+			throw new ConfigurationException(Msg.code(579) + "Can not find model property file on classpath: "
+					+ "/ca/uhn/fhir/model/dstu2/fhirversion.properties");
 		}
 		return str;
 	}
@@ -143,5 +124,8 @@ public class FhirDstu2 implements IFhirVersion {
 		return new IdDt();
 	}
 
-
+	@Override
+	public Object getServerVersion() {
+		return ReflectionUtil.newInstanceOfFhirServerType("ca.uhn.fhir.model.dstu2.FhirServerDstu2");
+	}
 }

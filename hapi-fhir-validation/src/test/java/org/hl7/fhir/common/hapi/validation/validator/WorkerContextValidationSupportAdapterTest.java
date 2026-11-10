@@ -1,0 +1,524 @@
+package org.hl7.fhir.common.hapi.validation.validator;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.context.support.DefaultProfileValidationSupport;
+import ca.uhn.fhir.context.support.IValidationSupport;
+import ca.uhn.fhir.context.support.IValidationSupport.CodeValidationIssue;
+import ca.uhn.fhir.context.support.IValidationSupport.CodeValidationIssueCode;
+import ca.uhn.fhir.context.support.IValidationSupport.CodeValidationIssueCoding;
+import ca.uhn.fhir.context.support.IValidationSupport.CodeValidationResult;
+import ca.uhn.fhir.context.support.IValidationSupport.IssueSeverity;
+import ca.uhn.fhir.context.support.ValidateCodeRequest;
+import ca.uhn.fhir.context.support.ValidationSupportContext;
+import ca.uhn.fhir.fhirpath.BaseValidationTestWithInlineMocks;
+import org.hl7.fhir.r4.model.CodeSystem;
+import org.hl7.fhir.r4.model.Enumerations;
+import org.hl7.fhir.r4.model.StructureDefinition;
+import org.hl7.fhir.r5.model.Coding;
+import org.hl7.fhir.r5.model.OperationOutcome;
+import org.hl7.fhir.r5.model.PackageInformation;
+import org.hl7.fhir.r5.model.Resource;
+import org.hl7.fhir.r5.model.ValueSet;
+import org.hl7.fhir.r5.terminologies.utilities.ValidationResult;
+import org.hl7.fhir.utilities.validation.ValidationOptions;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinTask;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+public class WorkerContextValidationSupportAdapterTest extends BaseValidationTestWithInlineMocks {
+
+	private static final byte[] EXPECTED_BINARY_CONTENT_1 = "dummyBinaryContent1".getBytes();
+	private static final byte[] EXPECTED_BINARY_CONTENT_2 = "dummyBinaryContent2".getBytes();
+	private static final String EXPECTED_BINARY_KEY_1 = "dummyBinaryKey1";
+	private static final String EXPECTED_BINARY_KEY_2 = "dummyBinaryKey2";
+	private static final String NON_EXISTENT_BINARY_KEY = "nonExistentBinaryKey";
+
+	private static final FhirContext ourCtx = FhirContext.forR4Cached();
+	private IValidationSupport myValidationSupport;
+	private ValidationSupportContext myValidationSupportContext;
+	private WorkerContextValidationSupportAdapter myWorkerContextWrapper;
+
+	public void setupValidationForBinary() {
+		myValidationSupport = mockValidationSupportWithTwoBinaries();
+		myValidationSupportContext = mockValidationSupportContext(myValidationSupport);
+		myWorkerContextWrapper = new WorkerContextValidationSupportAdapter(myValidationSupport);
+	}
+
+	public void setupValidation() {
+		myValidationSupport = mockValidationSupport();
+		myValidationSupportContext = mockValidationSupportContext(myValidationSupport);
+		myWorkerContextWrapper = new WorkerContextValidationSupportAdapter(myValidationSupport);
+	}
+
+	private IValidationSupport mockValidationSupportWithTwoBinaries() {
+		IValidationSupport validationSupport;
+		validationSupport = mockValidationSupport();
+		when(validationSupport.fetchBinary(EXPECTED_BINARY_KEY_1)).thenReturn(EXPECTED_BINARY_CONTENT_1);
+		when(validationSupport.fetchBinary(EXPECTED_BINARY_KEY_2)).thenReturn(EXPECTED_BINARY_CONTENT_2);
+		return validationSupport;
+	}
+
+	@Test
+	public void hasBinaryKey_returnsExpected() {
+		setupValidationForBinary();
+		assertThat(myWorkerContextWrapper.hasBinaryKey(EXPECTED_BINARY_KEY_1)).as("wrapper should have binary key " + EXPECTED_BINARY_KEY_1).isTrue();
+		assertThat(myWorkerContextWrapper.hasBinaryKey(EXPECTED_BINARY_KEY_2)).as("wrapper should have binary key " + EXPECTED_BINARY_KEY_1).isTrue();
+		assertThat(myWorkerContextWrapper.hasBinaryKey(NON_EXISTENT_BINARY_KEY)).as("wrapper should not have binary key " + NON_EXISTENT_BINARY_KEY).isFalse();
+
+	}
+
+	@Test
+	public void getBinaryForKey_returnsExpected() {
+		setupValidationForBinary();
+		assertThat(myWorkerContextWrapper.getBinaryForKey(EXPECTED_BINARY_KEY_1)).containsExactly(EXPECTED_BINARY_CONTENT_1);
+		assertThat(myWorkerContextWrapper.getBinaryForKey(EXPECTED_BINARY_KEY_2)).containsExactly(EXPECTED_BINARY_CONTENT_2);
+		assertThat(myWorkerContextWrapper.getBinaryForKey(NON_EXISTENT_BINARY_KEY)).as("wrapper should return null for binary key " + NON_EXISTENT_BINARY_KEY).isNull();
+	}
+
+	@Test
+	public void validateCode_codeInValueSet_resolvesCodeSystemFromValueSet() {
+		// setup
+		setupValidation();
+
+		org.hl7.fhir.r5.model.ValueSet valueSet = new ValueSet();
+		valueSet.getCompose().addInclude().setSystem("http://codesystems.com/system").addConcept().setCode("code0");
+		valueSet.getCompose().addInclude().setSystem("http://codesystems.com/system2").addConcept().setCode("code2");
+		when(myValidationSupport.validateCodeInValueSet(any(), any(), any(), any(), any(), any())).thenReturn(new CodeValidationResult().setCode("code0"));
+
+		// execute
+		myWorkerContextWrapper.validateCode(new ValidationOptions(), "code0", valueSet);
+
+		// verify
+		verify(myValidationSupport, times(1)).validateCodeInValueSet(any(), any(), eq("http://codesystems.com/system"), eq("code0"), any(), any());
+		verify(myValidationSupport, times(1)).validateCode(any(), any(), requestWith("http://codesystems.com/system", null, "code0"));
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	public void validateCode_systemInferredFromVersionedInclude_namesTheVersionSeparately() {
+		// setup
+		setupValidation();
+
+		// The system taken from an include that names a version already has the version on it
+		ValueSet valueSet = new ValueSet();
+		valueSet.getCompose()
+			.addInclude()
+			.setSystem("http://codesystems.com/system")
+			.setVersion("1.0.0")
+			.addConcept()
+			.setCode("code0");
+
+		CodeValidationResult valueSetResult = new CodeValidationResult().setCode("code0").setCodeSystemVersion("1.0.0");
+		when(myValidationSupport.validateCodeInValueSet(any(), any(), any(), any(), any(), any())).thenReturn(valueSetResult);
+
+		// execute
+		myWorkerContextWrapper.validateCode(new ValidationOptions(), "code0", valueSet);
+
+		// verify
+		verify(myValidationSupport, times(1)).validateCode(any(), any(), requestWith("http://codesystems.com/system", "1.0.0", "code0"));
+	}
+
+	// Created by Claude Opus 5.5
+	@Test
+	void validateCode_systemInferredFromVersionedIncludeAndValueSetAnsweredWithAnotherVersion_checksThatVersion() {
+		// setup
+		setupValidation();
+
+		ValueSet valueSet = new ValueSet();
+		valueSet.getCompose()
+			.addInclude()
+			.setSystem("http://codesystems.com/system")
+			.setVersion("1.0.0")
+			.addConcept()
+			.setCode("code0");
+
+		// The ValueSet check used the current version in place of the one the include names
+		CodeValidationResult valueSetResult = new CodeValidationResult().setCode("code0").setCodeSystemVersion("2.0.0");
+		when(myValidationSupport.validateCodeInValueSet(any(), any(), any(), any(), any(), any())).thenReturn(valueSetResult);
+
+		// execute
+		myWorkerContextWrapper.validateCode(new ValidationOptions(), "code0", valueSet);
+
+		// verify
+		verify(myValidationSupport, times(1)).validateCode(any(), any(), requestWith("http://codesystems.com/system", "2.0.0", "code0"));
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	public void validateCode_codingNamesACodeSystemVersion_checksThatVersion() {
+		// setup
+		setupValidation();
+
+		ValueSet valueSet = new ValueSet();
+		valueSet.getCompose().addInclude().setSystem("http://codesystems.com/system").addConcept().setCode("code0");
+
+		// The ValueSet check answered with another version; the coding's own version is still the one checked
+		CodeValidationResult valueSetResult = new CodeValidationResult().setCode("code0").setCodeSystemVersion("2.0.0");
+		when(myValidationSupport.validateCodeInValueSet(any(), any(), any(), any(), any(), any())).thenReturn(valueSetResult);
+
+		Coding coding = new Coding("http://codesystems.com/system", "code0", "");
+		coding.setVersion("1.0.0");
+
+		// execute
+		myWorkerContextWrapper.validateCode(new ValidationOptions(), coding, valueSet);
+
+		// verify
+		verify(myValidationSupport, times(1)).validateCode(any(), any(), requestWith("http://codesystems.com/system", "1.0.0", "code0"));
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	public void validateCode_callerNamesNoVersion_checksTheVersionTheValueSetAnsweredWith() {
+		// setup
+		setupValidation();
+
+		ValueSet valueSet = new ValueSet();
+		valueSet.getCompose().addInclude().setSystem("http://codesystems.com/system").addConcept().setCode("code0");
+
+		CodeValidationResult valueSetResult = new CodeValidationResult().setCode("code0").setCodeSystemVersion("2.0.0");
+		when(myValidationSupport.validateCodeInValueSet(any(), any(), any(), any(), any(), any())).thenReturn(valueSetResult);
+
+		// execute
+		myWorkerContextWrapper.validateCode(new ValidationOptions(), new Coding("http://codesystems.com/system", "code0", ""), valueSet);
+
+		// verify
+		verify(myValidationSupport, times(1)).validateCode(any(), any(), requestWith("http://codesystems.com/system", "2.0.0", "code0"));
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	public void validateCode_systemAndVersionGivenSeparately_checksThatVersion() {
+		// setup
+		setupValidation();
+
+		ValueSet valueSet = new ValueSet();
+		valueSet.getCompose().addInclude().setSystem("http://codesystems.com/system").addConcept().setCode("code0");
+
+		when(myValidationSupport.validateCodeInValueSet(any(), any(), any(), any(), any(), any())).thenReturn(new CodeValidationResult().setCode("code0"));
+
+		// execute
+		myWorkerContextWrapper.validateCode(new ValidationOptions(), "http://codesystems.com/system", "1.0.0", "code0", "", valueSet);
+
+		// verify
+		verify(myValidationSupport, times(1)).validateCode(any(), any(), requestWith("http://codesystems.com/system", "1.0.0", "code0"));
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	public void validateCode_noValueSetAndVersionGivenSeparately_checksThatVersion() {
+		// setup
+		setupValidation();
+
+		// execute
+		myWorkerContextWrapper.validateCode(new ValidationOptions(), "http://codesystems.com/system", "1.0.0", "code0", "");
+
+		// verify
+		verify(myValidationSupport, times(1)).validateCode(any(), any(), requestWith("http://codesystems.com/system", "1.0.0", "code0"));
+	}
+
+	// Created by Claude Opus 5
+	@Test
+	public void validateCode_noValueSetAndNoSystem_doesNotFail() {
+		// setup
+		setupValidation();
+
+		// execute
+		myWorkerContextWrapper.validateCode(new ValidationOptions(), null, "1.0.0", "code0", "");
+
+		// verify
+		verify(myValidationSupport, times(1)).validateCode(any(), any(), requestWith(null, "1.0.0", "code0"));
+	}
+
+	@Test
+	public void validateCode_codeNotInValueSet_doesNotResolveSystem() {
+		setupValidation();
+
+		org.hl7.fhir.r5.model.ValueSet valueSet = new org.hl7.fhir.r5.model.ValueSet();
+		valueSet.getCompose().addInclude().setSystem("http://codesystems.com/system").addConcept().setCode("code0");
+		valueSet.getCompose().addInclude().setSystem("http://codesystems.com/system2").addConcept().setCode("code2");
+
+		// execute
+		myWorkerContextWrapper.validateCode(new ValidationOptions(), "code1", valueSet);
+
+		// verify
+		verify(myValidationSupport, times(1)).validateCodeInValueSet(any(), any(), eq(null), eq("code1"), any(), any());
+		verify(myValidationSupport, never()).validateCode(any(), any(), any());
+	}
+
+	// Created by Claude Opus 5.5
+	@Test
+	public void validateCode_systemInferredAndCodeNotInValueSet_reportsOnlyTheValueSetIssue() {
+		// setup
+		setupValidation();
+
+		// A single include gives the system without checking the code is in it
+		ValueSet valueSet = new ValueSet();
+		valueSet.getCompose().addInclude().setSystem("http://codesystems.com/system").addConcept().setCode("code0");
+
+		CodeValidationResult valueSetResult = new CodeValidationResult()
+			.setSeverity(IssueSeverity.ERROR)
+			.setMessage("Not in VS")
+			.addIssue(new CodeValidationIssue("Not in VS", IssueSeverity.ERROR, CodeValidationIssueCode.CODE_INVALID, CodeValidationIssueCoding.NOT_IN_VS));
+		when(myValidationSupport.validateCodeInValueSet(any(), any(), any(), any(), any(), any())).thenReturn(valueSetResult);
+		CodeValidationResult codeSystemResult = new CodeValidationResult()
+			.setSeverity(IssueSeverity.ERROR)
+			.setMessage("Not in CS")
+			.addIssue(new CodeValidationIssue("Not in CS", IssueSeverity.ERROR, CodeValidationIssueCode.INVALID, CodeValidationIssueCoding.INVALID_CODE));
+		when(myValidationSupport.validateCode(any(), any(), any())).thenReturn(codeSystemResult);
+
+		// execute
+		ValidationResult result = myWorkerContextWrapper.validateCode(new ValidationOptions().withGuessSystem(), "code1", valueSet);
+
+		// verify: the caller never named the system, so the code is not wrong for it - like Ontoserver and tx.fhir.org
+		verify(myValidationSupport, never()).validateCode(any(), any(), any());
+		assertThat(result.getIssues())
+			.singleElement()
+			.satisfies(issue -> {
+				assertThat(issue.getSeverity()).isEqualTo(OperationOutcome.IssueSeverity.ERROR);
+				assertThat(issue.getDetails().hasCoding(CodeValidationIssueCoding.TX_ISSUE_SYSTEM, "not-in-vs")).isTrue();
+			});
+	}
+
+	// Created by Claude Opus 5.5
+	@Test
+	public void validateCode_codingNamesSystemAndCodeNotInValueSet_alsoReportsTheCodeSystemIssue() {
+		// setup
+		setupValidation();
+
+		ValueSet valueSet = new ValueSet();
+		valueSet.getCompose().addInclude().setSystem("http://codesystems.com/system").addConcept().setCode("code0");
+
+		CodeValidationResult valueSetResult = new CodeValidationResult()
+			.setSeverity(IssueSeverity.ERROR)
+			.setMessage("Not in VS")
+			.addIssue(new CodeValidationIssue("Not in VS", IssueSeverity.ERROR, CodeValidationIssueCode.CODE_INVALID, CodeValidationIssueCoding.NOT_IN_VS));
+		when(myValidationSupport.validateCodeInValueSet(any(), any(), any(), any(), any(), any())).thenReturn(valueSetResult);
+		CodeValidationResult codeSystemResult = new CodeValidationResult()
+			.setSeverity(IssueSeverity.ERROR)
+			.setMessage("Not in CS")
+			.addIssue(new CodeValidationIssue("Not in CS", IssueSeverity.ERROR, CodeValidationIssueCode.INVALID, CodeValidationIssueCoding.INVALID_CODE));
+		when(myValidationSupport.validateCode(any(), any(), requestWith("http://codesystems.com/system", null, "code1"))).thenReturn(codeSystemResult);
+
+		// execute
+		ValidationResult result = myWorkerContextWrapper.validateCode(new ValidationOptions(), new Coding("http://codesystems.com/system", "code1", ""), valueSet);
+
+		// verify: a Coding that names the system must hold a code that system defines
+		assertThat(result.getIssues())
+			.extracting(issue -> issue.getDetails().getCodingFirstRep().getCode())
+			.containsExactly("not-in-vs", "invalid-code");
+	}
+
+	@Test
+	public void validateCode_codeNotInValueSet_codeNotInSystem_concurrent() {
+		// setup
+		setupValidation();
+
+		String system = "http://codesystems.com/system";
+		String badCode = "code3";
+
+		CodeValidationResult codeInValuesetValResult = new CodeValidationResult().setCode(badCode).setCodeSystemName(system).setMessage("Bad code in VS");
+		when(myValidationSupport.validateCodeInValueSet(any(), any(), eq(system), eq(badCode), any(), any())).thenReturn(codeInValuesetValResult);
+
+		// We expect this code validation result as an additional result on the validation, if code is in value set
+		String issueMessage = "Code not in here!";
+		CodeValidationIssue codeValidationIssue = new CodeValidationIssue(issueMessage, IssueSeverity.ERROR, CodeValidationIssueCode.NOT_FOUND, CodeValidationIssueCoding.NOT_FOUND);
+		CodeValidationResult codeValResult = new CodeValidationResult().setMessage("Bad code in CS").setCode(badCode).setCodeSystemName(system).setSeverity(IssueSeverity.ERROR).addIssue(codeValidationIssue);
+		when(myValidationSupport.validateCode(any(), any(), requestWith("http://codesystems.com/system", null, badCode))).thenReturn(codeValResult);
+
+		ForkJoinPool pool = ForkJoinPool.commonPool();
+		List<ForkJoinTask<?>> futures = new ArrayList<>();
+		for(int i=0; i<1000; i++) {
+			ForkJoinTask<?> f = pool.submit(() -> {
+				org.hl7.fhir.r5.model.ValueSet valueSet = new ValueSet();
+				valueSet.getCompose().addInclude().setSystem(system).addConcept().setCode("code0");
+				valueSet.getCompose().addInclude().setSystem("http://codesystems.com/system2").addConcept().setCode("code2");
+
+				ValidationResult result = myWorkerContextWrapper.validateCode(new ValidationOptions(), new Coding(system, badCode, ""), valueSet);
+				
+				// here we check if the additional code validation result was added
+				assertThat(result.getIssues()).hasSize(1);
+				assertThat(result.getIssues().get(0).getDiagnostics()).isEqualTo(issueMessage);
+			});
+			futures.add(f);
+		}
+		// test if there was no assertion exception for any invocation
+		for(ForkJoinTask<?> f : futures) {
+			f.join();
+		}
+	}
+
+	@Test
+	public void isPrimitive_primitive() {
+		// setup
+		setupValidation();
+
+		List<StructureDefinition> structDefs = createPrimitiveStructureDefinitions();
+
+		when(myValidationSupportContext.getRootValidationSupport().<StructureDefinition>fetchAllStructureDefinitions()).thenReturn(structDefs);
+		assertThat(myWorkerContextWrapper.isPrimitiveType("boolean")).isTrue();
+
+		// try again to check if lookup after cache is built is working
+		assertThat(myWorkerContextWrapper.isPrimitiveType("string")).isTrue();
+	}
+
+	@Test
+	public void isPrimitive_not_primitive() {
+		// setup
+		setupValidation();
+
+		List<StructureDefinition> structDefs = createPrimitiveStructureDefinitions();
+
+		when(myValidationSupportContext.getRootValidationSupport().<StructureDefinition>fetchAllStructureDefinitions()).thenReturn(structDefs);
+		assertThat(myWorkerContextWrapper.isPrimitiveType("Person")).isFalse();
+
+		// try again to check if lookup after cache is built is working
+		assertThat(myWorkerContextWrapper.isPrimitiveType("Organization")).isFalse();
+
+		// Assert that unknown types are not regarded as primitive
+		assertThat(myWorkerContextWrapper.isPrimitiveType("Unknown")).isFalse();
+	}
+
+	@Test
+	public void fetchResource_withResource() {
+		// setup
+		setupValidation();
+
+		StructureDefinition expected = new StructureDefinition();
+		expected.setUrl("http://foo");
+		expected.getSnapshot().addElement().setId("FOO");
+		when(myValidationSupportContext.getRootValidationSupport().fetchResource(isNull(), eq("http://foo"))).thenReturn(expected);
+
+		// Test
+		org.hl7.fhir.r5.model.StructureDefinition actual = (org.hl7.fhir.r5.model.StructureDefinition) myWorkerContextWrapper.fetchResource(Resource.class, "http://foo");
+
+		// Verify
+		assertThat(actual.getSnapshot().getElementFirstRep().getId()).isEqualTo("FOO");
+	}
+
+	@Test
+	public void fetchResource_withStructureDefinition() {
+		// setup
+		setupValidation();
+
+		StructureDefinition expected = new StructureDefinition();
+		expected.setUrl("http://foo");
+		expected.getSnapshot().addElement().setId("FOO");
+		expected.setUserData(DefaultProfileValidationSupport.SOURCE_PACKAGE_ID, "hl7.fhir.r999.core");
+		when(myValidationSupportContext.getRootValidationSupport().fetchResource(any(), eq("http://foo"))).thenReturn(expected);
+
+		// Test
+		org.hl7.fhir.r5.model.StructureDefinition actual = myWorkerContextWrapper.fetchResource(org.hl7.fhir.r5.model.StructureDefinition.class, "http://foo");
+
+		// Verify
+		assertThat(actual.getSnapshot().getElementFirstRep().getId()).isEqualTo("FOO");
+		PackageInformation sourcePackage = actual.getSourcePackage();
+		assertThat(sourcePackage.getId()).isEqualTo("hl7.fhir.r999.core");
+	}
+
+	@Test
+	public void testFetchCodeSystem_withVersion() {
+		// setup
+		String systemUrl = "http://codesystems.com/system";
+		String version = "v1";
+		setupValidation();
+
+		CodeSystem csV1 = new CodeSystem();
+		csV1.setUrl(systemUrl);
+		csV1.setVersion(version);
+		csV1.setStatus(Enumerations.PublicationStatus.ACTIVE);
+		csV1.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);
+		csV1.addConcept().setCode("code1").setDisplay("Code 1");
+		when(myValidationSupport.fetchCodeSystem(anyString())).thenReturn(csV1);
+
+		// execute
+		org.hl7.fhir.r5.model.CodeSystem codeSystem = myWorkerContextWrapper.fetchCodeSystem(systemUrl, version, null);
+
+		// Verify
+		verify(myValidationSupport, times(1)).fetchCodeSystem(systemUrl + "|" + version);
+		assertThat(codeSystem.getUrl()).isEqualTo(systemUrl);
+		assertThat(codeSystem.getVersion()).isEqualTo(version);
+	}
+
+	@Test
+	public void testSettingDifferentValidationSupportFails() {
+		WorkerContextValidationSupportAdapter adapter = new WorkerContextValidationSupportAdapter();
+		IValidationSupport mockValidationSupport = mockValidationSupport();
+		adapter.setValidationSupport(mockValidationSupport);
+		IValidationSupport differentMockValidationSupport = mockValidationSupport();
+		assertThrows(IllegalArgumentException.class, () ->
+		adapter.setValidationSupport(differentMockValidationSupport));
+	}
+
+	@Test
+	public void testSettingSameValidationSupportDoesntFail() {
+		WorkerContextValidationSupportAdapter adapter = new WorkerContextValidationSupportAdapter();
+		IValidationSupport mockValidationSupport = mockValidationSupport();
+		adapter.setValidationSupport(mockValidationSupport);
+		adapter.setValidationSupport(mockValidationSupport);
+	}
+
+	private List<StructureDefinition> createPrimitiveStructureDefinitions() {
+		StructureDefinition stringType = createPrimitive("string");
+		StructureDefinition boolType = createPrimitive("boolean");
+		StructureDefinition personType = createComplex("Person");
+		StructureDefinition orgType = createComplex("Organization");
+
+		return List.of(personType, boolType, orgType, stringType);
+	}
+
+	private StructureDefinition createComplex(String name) {
+		return createStructureDefinition(name).setKind(StructureDefinition.StructureDefinitionKind.COMPLEXTYPE);
+	}
+
+	private StructureDefinition createPrimitive(String name) {
+		return createStructureDefinition(name).setKind(StructureDefinition.StructureDefinitionKind.PRIMITIVETYPE);
+	}
+
+	private StructureDefinition createStructureDefinition(String name) {
+		StructureDefinition sd = new StructureDefinition();
+		sd.setUrl("http://hl7.org/fhir/StructureDefinition/" + name).setName(name);
+		sd.getSnapshot().addElement().setId("FOO");
+		return sd;
+	}
+
+	private static ValidationSupportContext mockValidationSupportContext(IValidationSupport validationSupport) {
+		ValidationSupportContext mockContext;
+		mockContext = mock(ValidationSupportContext.class);
+		when(mockContext.getRootValidationSupport()).thenReturn(validationSupport);
+		return mockContext;
+	}
+
+	private static IValidationSupport mockValidationSupport() {
+		IValidationSupport mockValidationSupport;
+		mockValidationSupport = mock(IValidationSupport.class);
+		when(mockValidationSupport.getFhirContext()).thenReturn(ourCtx);
+		return mockValidationSupport;
+	}
+
+	// Created by Claude Opus 5
+	private static ValidateCodeRequest requestWith(String theCodeSystem, String theCodeSystemVersion, String theCode) {
+		// argThat matchers are also applied to the stubbing-time invocation, where the argument is null
+		return argThat(request -> request != null
+			&& Objects.equals(theCodeSystem, request.getCodeSystem())
+			&& Objects.equals(theCodeSystemVersion, request.getCodeSystemVersion())
+			&& Objects.equals(theCode, request.getCode()));
+	}
+
+}

@@ -1,50 +1,38 @@
 package ca.uhn.fhir.rest.server;
 
-import static org.hamcrest.Matchers.*;
-import static org.junit.Assert.*;
-
-import java.util.concurrent.TimeUnit;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.hl7.fhir.instance.model.Patient;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.model.api.IResource;
 import ca.uhn.fhir.rest.annotation.IdParam;
 import ca.uhn.fhir.rest.annotation.Read;
-import ca.uhn.fhir.util.PortUtil;
+import ca.uhn.fhir.rest.api.EncodingEnum;
+import ca.uhn.fhir.test.utilities.server.RestfulServerExtension;
+import ca.uhn.fhir.util.TestUtil;
+import org.hl7.fhir.dstu2.model.Patient;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class ReadHl7OrgDstu2Test {
 
-	private static CloseableHttpClient ourClient;
-	private static int ourPort;
-	private static Server ourServer;
-	private static FhirContext ourCtx = FhirContext.forDstu2Hl7Org();
-	
-	/**
+  private static final FhirContext ourCtx = FhirContext.forDstu2Hl7OrgCached();
+
+  @RegisterExtension
+  public static RestfulServerExtension ourServer = new RestfulServerExtension(ourCtx)
+      .registerProvider(new DummyPatientResourceProvider())
+      .withPagingProvider(new FifoMemoryPagingProvider(100))
+      .setDefaultResponseEncoding(EncodingEnum.JSON)
+      .setDefaultPrettyPrint(false);
+
+  /**
 	 * In DSTU2+ the resource ID appears in the resource body
 	 */
 	@Test
 	public void testReadXml() throws Exception {
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient/123&_format=xml");
-		HttpResponse status = ourClient.execute(httpGet);
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient/123&_format=xml").get().assertStatus(200).getBody();
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		assertThat(responseContent, containsString("p1ReadValue"));
-		assertThat(responseContent, containsString("p1ReadId"));
+		assertThat(responseContent).contains("p1ReadValue");
+		assertThat(responseContent).contains("p1ReadId");
 	}
 
 	/**
@@ -52,43 +40,15 @@ public class ReadHl7OrgDstu2Test {
 	 */
 	@Test
 	public void testReadJson() throws Exception {
-		HttpGet httpGet = new HttpGet("http://localhost:" + ourPort + "/Patient/123&_format=json");
-		HttpResponse status = ourClient.execute(httpGet);
-		String responseContent = IOUtils.toString(status.getEntity().getContent());
-		IOUtils.closeQuietly(status.getEntity().getContent());
+		String responseContent = ourServer.fhirRequest("/Patient/123&_format=json").get().assertStatus(200).getBody();
 
-		assertEquals(200, status.getStatusLine().getStatusCode());
-		assertThat(responseContent, containsString("p1ReadValue"));
-		assertThat(responseContent, containsString("p1ReadId"));
+		assertThat(responseContent).contains("p1ReadValue");
+		assertThat(responseContent).contains("p1ReadId");
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void afterClass() throws Exception {
-		ourServer.stop();
-	}
-
-	@BeforeClass
-	public static void beforeClass() throws Exception {
-
-		ourPort = PortUtil.findFreePort();
-		ourServer = new Server(ourPort);
-
-		DummyPatientResourceProvider patientProvider = new DummyPatientResourceProvider();
-
-		ServletHandler proxyHandler = new ServletHandler();
-		RestfulServer servlet = new RestfulServer(ourCtx);
-		servlet.setFhirContext(ourCtx);
-		servlet.setResourceProviders(patientProvider);
-		ServletHolder servletHolder = new ServletHolder(servlet);
-		proxyHandler.addServletWithMapping(servletHolder, "/*");
-		ourServer.setHandler(proxyHandler);
-		ourServer.start();
-
-		PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(5000, TimeUnit.MILLISECONDS);
-		HttpClientBuilder builder = HttpClientBuilder.create();
-		builder.setConnectionManager(connectionManager);
-		ourClient = builder.build();
-
+    TestUtil.randomizeLocaleAndTimezone();
 	}
 
 	/**
@@ -97,7 +57,7 @@ public class ReadHl7OrgDstu2Test {
 	public static class DummyPatientResourceProvider implements IResourceProvider {
 
 		@Read
-		public Patient read(@IdParam org.hl7.fhir.instance.model.IdType theId) {
+		public Patient read(@IdParam org.hl7.fhir.dstu2.model.IdType theId) {
 			Patient p1 = new Patient();
 			p1.setId("p1ReadId");
 			p1.addIdentifier().setValue("p1ReadValue");

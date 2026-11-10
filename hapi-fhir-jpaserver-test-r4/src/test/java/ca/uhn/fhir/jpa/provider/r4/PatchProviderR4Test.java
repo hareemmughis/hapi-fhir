@@ -1,0 +1,1012 @@
+package ca.uhn.fhir.jpa.provider.r4;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import ca.uhn.fhir.i18n.Msg;
+import ca.uhn.fhir.interceptor.api.HookParams;
+import ca.uhn.fhir.interceptor.api.IAnonymousInterceptor;
+import ca.uhn.fhir.interceptor.api.Pointcut;
+import ca.uhn.fhir.interceptor.model.PrePatchDetails;
+import ca.uhn.fhir.jpa.provider.BaseResourceProviderR4Test;
+import ca.uhn.fhir.rest.api.Constants;
+import ca.uhn.fhir.rest.api.MethodOutcome;
+import ca.uhn.fhir.rest.api.PatchTypeEnum;
+import ca.uhn.fhir.rest.server.exceptions.ResourceGoneException;
+import ca.uhn.fhir.rest.server.exceptions.ResourceVersionConflictException;
+import com.google.common.base.Charsets;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r4.model.Binary;
+import org.hl7.fhir.r4.model.BooleanType;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Group;
+import org.hl7.fhir.r4.model.CodeType;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Media;
+import org.hl7.fhir.r4.model.Observation;
+import org.hl7.fhir.r4.model.OperationOutcome;
+import org.hl7.fhir.r4.model.Parameters;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.StringType;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
+import org.mockito.Mock;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Date;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+
+public class PatchProviderR4Test extends BaseResourceProviderR4Test {
+
+
+	private static final Logger ourLog = LoggerFactory.getLogger(PatchProviderR4Test.class);
+	private static final String PREFER_RETURN_OPERATION_OUTCOME = Constants.HEADER_PREFER_RETURN + "=" + Constants.HEADER_PREFER_RETURN_OPERATION_OUTCOME;
+
+	@Mock
+	private IAnonymousInterceptor myAnonymousInterceptor;
+	@Captor
+	private ArgumentCaptor<HookParams> myHookParamsCaptor;
+
+	@Test
+	public void testFhirPatch() {
+		Patient patient = new Patient();
+		patient.setActive(true);
+		patient.addIdentifier().addExtension("http://foo", new StringType("abc"));
+		patient.addIdentifier().setSystem("sys").setValue("val");
+		IIdType id = myClient.create().resource(patient).execute().getId().toUnqualifiedVersionless();
+
+		Parameters patch = new Parameters();
+		Parameters.ParametersParameterComponent operation = patch.addParameter();
+		operation.setName("operation");
+		operation
+			.addPart()
+			.setName("type")
+			.setValue(new CodeType("delete"));
+		operation
+			.addPart()
+			.setName("path")
+			.setValue(new StringType("Patient.identifier[0]"));
+
+		myInterceptorRegistry.registerAnonymousInterceptor(Pointcut.STORAGE_PRESTORAGE_RESOURCE_PREPATCH, myAnonymousInterceptor);
+
+		MethodOutcome outcome = myClient
+			.patch()
+			.withFhirPatch(patch)
+			.withId(id)
+			.execute();
+
+		verify(myAnonymousInterceptor, times(1)).invoke(eq(Pointcut.STORAGE_PRESTORAGE_RESOURCE_PREPATCH), myHookParamsCaptor.capture());
+		assertNotNull(myHookParamsCaptor.getValue().get(PrePatchDetails.class).getResource());
+		assertNotNull(myHookParamsCaptor.getValue().get(PrePatchDetails.class).getFhirPatchBody());
+		assertThat(myHookParamsCaptor.getValue().get(PrePatchDetails.class).getPatchBody()).startsWith("{\"resourceType\":\"Parameters\"");
+		assertEquals(PatchTypeEnum.FHIR_PATCH_JSON, myHookParamsCaptor.getValue().get(PrePatchDetails.class).getPatchType());
+
+		Patient resultingResource = (Patient) outcome.getResource();
+		assertThat(resultingResource.getIdentifier()).hasSize(1);
+
+		resultingResource = myClient.read().resource(Patient.class).withId(id).execute();
+		assertThat(resultingResource.getIdentifier()).hasSize(1);
+	}
+
+	@Test
+	public void testFhirPatch_ContentionAware_Match() {
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		Parameters patch = new Parameters();
+		Parameters.ParametersParameterComponent op = patch.addParameter().setName("operation");
+		op.addPart().setName("type").setValue(new CodeType("replace"));
+		op.addPart().setName("path").setValue(new CodeType("Patient.active"));
+		op.addPart().setName("value").setValue(new BooleanType(false));
+
+		MethodOutcome outcome = myClient
+			.patch()
+			.withFhirPatch(patch)
+			.withId(pid1)
+			.withAdditionalHeader(Constants.HEADER_IF_MATCH, "W/\"1\"")
+			.execute();
+		assertEquals("2", outcome.getId().getVersionIdPart());
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(false, newPt.getActive());
+	}
+
+
+	@Test
+	public void testFhirPatch_ContentionAware_NoMatch() {
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+
+			patient.setBirthDate(new Date());
+			myPatientDao.update(patient, mySrd);
+		}
+
+		Parameters patch = new Parameters();
+		Parameters.ParametersParameterComponent op = patch.addParameter().setName("operation");
+		op.addPart().setName("type").setValue(new CodeType("replace"));
+		op.addPart().setName("path").setValue(new CodeType("Patient.active"));
+		op.addPart().setName("value").setValue(new BooleanType(false));
+
+		try {
+			myClient
+				.patch()
+				.withFhirPatch(patch)
+				.withId(pid1)
+				.withAdditionalHeader(Constants.HEADER_IF_MATCH, "W/\"1\"")
+				.execute();
+			fail();
+		} catch (ResourceVersionConflictException e) {
+			// good
+		}
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(true, newPt.getActive());
+	}
+
+
+	@Test
+	public void testFhirPatch_Transaction() throws Exception {
+		String methodName = "testFhirPatch_Transaction";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		Parameters patch = new Parameters();
+		Parameters.ParametersParameterComponent op = patch.addParameter().setName("operation");
+		op.addPart().setName("type").setValue(new CodeType("replace"));
+		op.addPart().setName("path").setValue(new CodeType("Patient.active"));
+		op.addPart().setName("value").setValue(new BooleanType(false));
+
+		Bundle input = new Bundle();
+		input.setType(Bundle.BundleType.TRANSACTION);
+		input.addEntry()
+			.setFullUrl(pid1.getValue())
+			.setResource(patch)
+			.getRequest().setUrl(pid1.getValue())
+			.setMethod(Bundle.HTTPVerb.PATCH);
+
+		String encodedRequest = myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(input);
+		ourLog.info("Request:\n{}", encodedRequest);
+		String responseString = myServer.fhirRequest("")
+			.post(encodedRequest, Constants.CT_FHIR_JSON_NEW)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("\"resourceType\":\"Bundle\"");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(false, newPt.getActive());
+	}
+
+	@Test
+	public void testFhirPatch_TransactionContentionAware_Match() {
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		Parameters patch = new Parameters();
+		Parameters.ParametersParameterComponent op = patch.addParameter().setName("operation");
+		op.addPart().setName("type").setValue(new CodeType("replace"));
+		op.addPart().setName("path").setValue(new CodeType("Patient.active"));
+		op.addPart().setName("value").setValue(new BooleanType(false));
+
+		Bundle input = new Bundle();
+		input.setType(Bundle.BundleType.TRANSACTION);
+		input.addEntry()
+			.setFullUrl(pid1.getValue())
+			.setResource(patch)
+			.getRequest()
+			.setUrl(pid1.getValue())
+			.setIfMatch("W/\"1\"")
+			.setMethod(Bundle.HTTPVerb.PATCH);
+
+		Bundle outcome = myClient
+			.transaction()
+			.withBundle(input)
+			.execute();
+		ourLog.info(myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(outcome));
+		assertEquals("2", new IdType(outcome.getEntry().get(0).getResponse().getLocation()).getVersionIdPart());
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(false, newPt.getActive());
+	}
+
+
+	@Test
+	public void testFhirPatch_TransactionContentionAware_NoMatch() {
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+
+			patient.setBirthDate(new Date());
+			myPatientDao.update(patient, mySrd);
+		}
+
+		Parameters patch = new Parameters();
+		Parameters.ParametersParameterComponent op = patch.addParameter().setName("operation");
+		op.addPart().setName("type").setValue(new CodeType("replace"));
+		op.addPart().setName("path").setValue(new CodeType("Patient.active"));
+		op.addPart().setName("value").setValue(new BooleanType(false));
+
+		try {
+			Bundle input = new Bundle();
+			input.setType(Bundle.BundleType.TRANSACTION);
+			input.addEntry()
+				.setFullUrl(pid1.getValue())
+				.setResource(patch)
+				.getRequest()
+				.setUrl(pid1.getValue())
+				.setIfMatch("W/\"1\"")
+				.setMethod(Bundle.HTTPVerb.PATCH);
+
+			myClient
+				.transaction()
+				.withBundle(input)
+				.execute();
+			fail();
+		} catch (ResourceVersionConflictException e) {
+			// good
+		}
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(true, newPt.getActive());
+	}
+
+
+	@Test
+	public void testFhirPatch_TransactionWithSearchParameter() throws Exception {
+		String methodName = "testFhirPatch_Transaction";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myClient.create().resource(patient).execute().getId().toUnqualifiedVersionless();
+		}
+		Parameters patch = new Parameters();
+		Parameters.ParametersParameterComponent operation = patch.addParameter();
+		operation.setName("operation");
+		operation.addPart().setName("type").setValue(new CodeType("replace"));
+		operation.addPart().setName("path").setValue(new CodeType("Patient.active"));
+		operation.addPart().setName("value").setValue(new BooleanType(false));
+
+		Bundle input = new Bundle();
+		input.setType(Bundle.BundleType.TRANSACTION);
+		input.addEntry()
+			.setFullUrl(pid1.getValue())
+			.setResource(patch)
+			.getRequest().setUrl(String.format("Patient?name=%s", methodName))
+			.setMethod(Bundle.HTTPVerb.PATCH);
+
+		myClient.transaction().withBundle(input).execute();
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(false, newPt.getActive());
+	}
+
+	@Test
+	public void testFhirPatch_AfterDelete_Returns410() {
+		Patient patient = new Patient();
+		patient.setActive(true);
+		patient.addIdentifier().addExtension("http://foo", new StringType("abc"));
+		patient.addIdentifier().setSystem("sys").setValue("val");
+		IIdType id = myClient.create().resource(patient).execute().getId().toUnqualifiedVersionless();
+
+		OperationOutcome delOutcome = (OperationOutcome) myClient.delete().resourceById(id).execute().getOperationOutcome();
+		assertThat(delOutcome.getIssue().get(0).getDiagnostics()).contains("Successfully deleted");
+
+		Parameters patch = new Parameters();
+		Parameters.ParametersParameterComponent operation = patch.addParameter();
+		operation.setName("operation");
+		operation
+			.addPart()
+			.setName("type")
+			.setValue(new CodeType("replace"));
+		operation
+			.addPart()
+			.setName("path")
+			.setValue(new StringType("Patient.active"));
+		operation
+			.addPart()
+			.setName("value")
+			.setValue(new BooleanType(false));
+
+
+		try {
+			myClient.patch().withFhirPatch(patch).withId(id).execute();
+			fail();
+		} catch (ResourceGoneException e) {
+			assertEquals(Constants.STATUS_HTTP_410_GONE, e.getStatusCode());
+		}
+
+		try {
+			myClient.read().resource(Patient.class).withId(id).execute();
+			fail();
+		} catch (ResourceGoneException e) {
+			assertEquals(Constants.STATUS_HTTP_410_GONE, e.getStatusCode());
+		}
+	}
+
+	@Test
+	public void testPatchAddArray() {
+		IIdType id;
+		{
+			Media media = new Media();
+			media.setId("465eb73a-bce3-423a-b86e-5d0d267638f4");
+			media.setDuration(100L);
+			myMediaDao.update(media);
+
+			Observation obs = new Observation();
+			obs.addIdentifier().setSystem("urn:system").setValue("0");
+			id = myObservationDao.create(obs, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+
+		String patchText = "[ " +
+			"      {" +
+			"        \"op\": \"add\"," +
+			"        \"path\": \"/derivedFrom\"," +
+			"        \"value\": [" +
+			"          {\"reference\": \"/Media/465eb73a-bce3-423a-b86e-5d0d267638f4\"}" +
+			"        ]" +
+			"      } " +
+			"]";
+
+		String prefer = Constants.HEADER_PREFER_RETURN + "=" + Constants.HEADER_PREFER_RETURN_REPRESENTATION;
+		String path = "/Observation/" + id.getIdPart();
+		String responseString = myServer.fhirRequest(path)
+			.withHeader(Constants.HEADER_PREFER, prefer)
+			.withHeader(Constants.HEADER_ACCEPT, Constants.CT_FHIR_JSON)
+			.patch(patchText)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("\"derivedFrom\":[{\"reference\":\"Media/465eb73a-bce3-423a-b86e-5d0d267638f4\"}]");
+
+	}
+
+	@Test
+	public void testPatchUsingJsonPatch() throws Exception {
+		String methodName = "testPatchUsingJsonPatch";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		myInterceptorRegistry.registerAnonymousInterceptor(Pointcut.STORAGE_PRESTORAGE_RESOURCE_PREPATCH, myAnonymousInterceptor);
+
+		String patchText = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		String responseString = myServer.fhirRequest("/Patient/" + pid1.getIdPart())
+			.withHeader(Constants.HEADER_PREFER, PREFER_RETURN_OPERATION_OUTCOME)
+			.patch(patchText)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("<OperationOutcome");
+		assertThat(responseString).contains("INFORMATION");
+
+		verify(myAnonymousInterceptor, times(1)).invoke(eq(Pointcut.STORAGE_PRESTORAGE_RESOURCE_PREPATCH), myHookParamsCaptor.capture());
+		assertNotNull(myHookParamsCaptor.getValue().get(PrePatchDetails.class).getResource());
+		assertNull(myHookParamsCaptor.getValue().get(PrePatchDetails.class).getFhirPatchBody());
+		assertNotNull(myHookParamsCaptor.getValue().get(PrePatchDetails.class).getPatchBody());
+		assertEquals(PatchTypeEnum.JSON_PATCH, myHookParamsCaptor.getValue().get(PrePatchDetails.class).getPatchType());
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertFalse(newPt.getActive());
+	}
+
+	@Test
+	void testPatchWithFhirPatch_historyRewrite() {
+		myStorageSettings.setUpdateWithHistoryRewriteEnabled(true);
+		Patient patient = new Patient();
+		patient.setActive(true);
+		patient.addIdentifier().addExtension("http://foo", new StringType("abc"));
+		patient.addIdentifier().setSystem("sys").setValue("val");
+		IIdType id = myClient.create().resource(patient).execute().getId().toUnqualifiedVersionless();
+
+		Parameters patch = new Parameters();
+		Parameters.ParametersParameterComponent operation = patch.addParameter();
+		operation.setName("operation");
+		operation
+			.addPart()
+			.setName("type")
+			.setValue(new CodeType("delete"));
+		operation
+			.addPart()
+			.setName("path")
+			.setValue(new StringType("Patient.identifier[0]"));
+
+		MethodOutcome outcome = myClient
+			.patch()
+			.withFhirPatch(patch)
+			.historyRewrite()
+			.withId(id.withVersion("1"))
+			.execute();
+
+		Patient resultingResource = (Patient) outcome.getResource();
+		assertThat(resultingResource.getIdentifier()).hasSize(1);
+		assertThat(resultingResource.getIdentifier().get(0).getSystem()).isEqualTo("sys");
+		assertThat(resultingResource.getIdentifier().get(0).getValue()).isEqualTo("val");
+
+		assertThat(resultingResource.getIdentifier()).hasSize(1);
+
+		resultingResource = myClient.read().resource(Patient.class).withId(id).execute();
+		assertThat(resultingResource.getIdentifier()).hasSize(1);
+		assertThat(resultingResource.getIdentifier().get(0).getSystem()).isEqualTo("sys");
+		assertThat(resultingResource.getIdentifier().get(0).getValue()).isEqualTo("val");
+		assertThat(resultingResource.getIdElement().getVersionIdPart()).isEqualTo("1");
+	}
+
+	@Test
+	void testPatchUsingJsonPatch_historyRewrite() throws Exception {
+		myStorageSettings.setUpdateWithHistoryRewriteEnabled(true);
+		String patchedFamilyName = "testPatchUsingJsonPatch";
+
+		Patient patient = new Patient();
+		patient.setActive(true);
+		patient.addIdentifier().setSystem("urn:system").setValue("0");
+		patient.addName().setFamily(patchedFamilyName).addGiven("Joe");
+		IIdType pid1 = myPatientDao.create(patient, mySrd).getId();
+
+		String path = "/" + pid1.getValue();
+		String patchText = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		String responseString = myServer.fhirRequest(path)
+			.withHeader(Constants.HEADER_PREFER, PREFER_RETURN_OPERATION_OUTCOME)
+			.withHeader(Constants.HEADER_REWRITE_HISTORY, "true")
+			.patch(patchText)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("<OperationOutcome");
+		assertThat(responseString).contains("INFORMATION");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("1", newPt.getIdElement().getVersionIdPart());
+		assertFalse(newPt.getActive());
+	}
+
+
+	@Test
+	public void testPatchUsingJsonPatch_Transaction() throws Exception {
+		String methodName = "testPatchUsingJsonPatch_Transaction";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String patchString = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		Binary patch = new Binary();
+		patch.setContentType(Constants.CT_JSON_PATCH);
+		patch.setContent(patchString.getBytes(Charsets.UTF_8));
+
+		Bundle input = new Bundle();
+		input.setType(Bundle.BundleType.TRANSACTION);
+		input.addEntry()
+			.setFullUrl(pid1.getValue())
+			.setResource(patch)
+			.getRequest().setUrl(pid1.getValue())
+			.setMethod(Bundle.HTTPVerb.PATCH);
+
+		String encodedRequest = myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(input);
+		ourLog.info("Request:\n{}", encodedRequest);
+		String responseString = myServer.fhirRequest("")
+			.post(encodedRequest, Constants.CT_FHIR_JSON_NEW)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("\"resourceType\":\"Bundle\"");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(false, newPt.getActive());
+	}
+
+
+	@Test
+	public void testPatchUsingJsonPatch_Conditional_Success() throws Exception {
+		String methodName = "testPatchUsingJsonPatch";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String path = "/Patient?_id=" + pid1.getIdPart();
+		String patchText = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		String responseString = myServer.fhirRequest(path)
+			.withHeader(Constants.HEADER_PREFER, PREFER_RETURN_OPERATION_OUTCOME)
+			.patch(patchText)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("<OperationOutcome");
+		assertThat(responseString).contains("INFORMATION");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(false, newPt.getActive());
+	}
+
+	@Test
+	public void testPatchUsingJsonPatch_Conditional_NoMatch() throws Exception {
+		String methodName = "testPatchUsingJsonPatch";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String path = "/Patient?_id=" + pid1.getIdPart() + "FOO";
+		String patchText = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		String responseString = myServer.fhirRequest(path)
+			.withHeader(Constants.HEADER_PREFER, PREFER_RETURN_OPERATION_OUTCOME)
+			.patch(patchText)
+			.assertStatus(404)
+			.getBody();
+		assertThat(responseString).contains("<OperationOutcome");
+		assertThat(responseString).contains("Invalid match URL &quot;Patient?_id=" + pid1.getIdPart() + "FOO&quot; - No resources match this search");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("1", newPt.getIdElement().getVersionIdPart());
+	}
+
+	@Test
+	public void testPatchUsingJsonPatch_Conditional_MultipleMatch() throws Exception {
+		String methodName = "testPatchUsingJsonPatch";
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("1");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String patchText = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		String responseString = myServer.fhirRequest("/Patient?active=true")
+			.withHeader(Constants.HEADER_PREFER, PREFER_RETURN_OPERATION_OUTCOME)
+			.patch(patchText)
+			.assertStatus(412)
+			.getBody();
+		assertThat(responseString).contains("<OperationOutcome");
+		assertThat(responseString).contains("Failed to PATCH Patient with match URL &quot;Patient?active=true&quot; because this search matched 2 resources");
+
+	}
+
+	/**
+	 * Pass in an invalid JSON Patch and make sure the error message
+	 * that is returned is useful
+	 */
+	@Test
+	public void testPatchUsingJsonPatchInvalid() throws Exception {
+		IIdType id;
+		{
+			Observation patient = new Observation();
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			id = myObservationDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		// Quotes are incorrect in the "value" body
+		String patchText = "[ {\n" +
+			"        \"comment\": \"add image to examination\",\n" +
+			"        \"patch\": [ {\n" +
+			"            \"op\": \"add\",\n" +
+			"            \"path\": \"/derivedFrom/-\",\n" +
+			"            \"value\": [{'reference': '/Media/465eb73a-bce3-423a-b86e-5d0d267638f4'}]\n" +
+			"        } ]\n" +
+			"    } ]";
+
+
+		String path = "/Observation/" + id.getIdPart();
+		String responseString = myServer.fhirRequest(path)
+			.withHeader(Constants.HEADER_PREFER, PREFER_RETURN_OPERATION_OUTCOME)
+			.patch(patchText)
+			.assertStatus(400)
+			.getBody();
+		assertThat(responseString).contains("<OperationOutcome");
+		assertThat(responseString).contains("was expecting double-quote to start");
+
+	}
+
+	@Test
+	public void testPatchUsingJsonPatchWithContentionCheckBad() throws Exception {
+		String methodName = "testPatchUsingJsonPatchWithContentionCheckBad";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String path = "/Patient/" + pid1.getIdPart();
+		String responseString = myServer.fhirRequest(path)
+			.withHeader(Constants.HEADER_IF_MATCH, "W/\"9\"")
+			.patch("[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]")
+			.assertStatus(409)
+			.getBody();
+		assertThat(responseString).contains("<OperationOutcome");
+		assertThat(responseString).contains("<diagnostics value=\"" + Msg.code(550) + Msg.code(974) + "Version 9 is not the most recent version of this resource, unable to apply patch\"/>");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("1", newPt.getIdElement().getVersionIdPart());
+		assertEquals(true, newPt.getActive());
+	}
+
+	@Test
+	public void testPatchUsingJsonPatchWithContentionCheckGood() throws Exception {
+		String methodName = "testPatchUsingJsonPatchWithContentionCheckGood";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String path = "/Patient/" + pid1.getIdPart();
+		String patchText = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		String responseString = myServer.fhirRequest(path)
+			.withHeader(Constants.HEADER_IF_MATCH, "W/\"1\"")
+			.withHeader(Constants.HEADER_PREFER, PREFER_RETURN_OPERATION_OUTCOME)
+			.patch(patchText)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("<OperationOutcome");
+		assertThat(responseString).contains("INFORMATION");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(false, newPt.getActive());
+	}
+
+	@Test
+	public void testPatchUsingXmlPatch() throws Exception {
+		String methodName = "testPatchUsingXmlPatch";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String patchString = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><diff xmlns:fhir=\"http://hl7.org/fhir\"><replace sel=\"fhir:Patient/fhir:active/@value\">false</replace></diff>";
+		String path = "/Patient/" + pid1.getIdPart();
+		String responseString = myServer.fhirRequest(path)
+			.withHeader(Constants.HEADER_PREFER, PREFER_RETURN_OPERATION_OUTCOME)
+			.patch(patchString, Constants.CT_XML_PATCH)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("<OperationOutcome");
+		assertThat(responseString).contains("INFORMATION");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(false, newPt.getActive());
+	}
+
+
+	@Test
+	public void testPatchUsingXmlPatch_Transaction() throws Exception {
+		String methodName = "testPatchUsingXmlPatch_Transaction";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String patchString = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><diff xmlns:fhir=\"http://hl7.org/fhir\"><replace sel=\"fhir:Patient/fhir:active/@value\">false</replace></diff>";
+		Binary patch = new Binary();
+		patch.setContentType(Constants.CT_XML_PATCH);
+		patch.setContent(patchString.getBytes(Charsets.UTF_8));
+
+		Bundle input = new Bundle();
+		input.setType(Bundle.BundleType.TRANSACTION);
+		input.addEntry()
+			.setFullUrl(pid1.getValue())
+			.setResource(patch)
+			.getRequest().setUrl(pid1.getValue())
+			.setMethod(Bundle.HTTPVerb.PATCH);
+
+		String encoded = myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(input);
+		ourLog.info("Encoded output: {}", encoded);
+
+		String responseString = myServer.fhirRequest("")
+			.post(encoded, Constants.CT_FHIR_JSON_NEW)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("\"resourceType\":\"Bundle\"");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("2", newPt.getIdElement().getVersionIdPart());
+		assertEquals(false, newPt.getActive());
+	}
+
+
+
+	@Test
+	public void testPatchInTransaction_MissingContentType() throws Exception {
+		String methodName = "testPatchUsingJsonPatch_Transaction";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String patchString = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		Binary patch = new Binary();
+		patch.setContent(patchString.getBytes(Charsets.UTF_8));
+
+		Bundle input = new Bundle();
+		input.setType(Bundle.BundleType.TRANSACTION);
+		input.addEntry()
+			.setFullUrl(pid1.getValue())
+			.setResource(patch)
+			.getRequest().setUrl(pid1.getValue())
+			.setMethod(Bundle.HTTPVerb.PATCH);
+
+		String responseString = myServer.fhirRequest("")
+			.post(myFhirContext.newJsonParser().encodeResourceToString(input), Constants.CT_FHIR_JSON_NEW)
+			.assertStatus(400)
+			.getBody();
+		assertThat(responseString).contains("Missing or invalid content type for PATCH operation");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("1", newPt.getIdElement().getVersionIdPart());
+		assertEquals(true, newPt.getActive());
+	}
+
+
+	@Test
+	public void testPatchInTransaction_MissingBody() throws Exception {
+		String methodName = "testPatchUsingJsonPatch_Transaction";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String patchString = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		Binary patch = new Binary();
+		patch.setContentType(Constants.CT_JSON_PATCH);
+
+		Bundle input = new Bundle();
+		input.setType(Bundle.BundleType.TRANSACTION);
+		input.addEntry()
+			.setFullUrl(pid1.getValue())
+			.setResource(patch)
+			.getRequest().setUrl(pid1.getValue())
+			.setMethod(Bundle.HTTPVerb.PATCH);
+
+		String responseString = myServer.fhirRequest("")
+			.post(myFhirContext.newJsonParser().encodeResourceToString(input), Constants.CT_FHIR_JSON_NEW)
+			.assertStatus(400)
+			.getBody();
+		assertThat(responseString).contains("Unable to determine PATCH body from request");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("1", newPt.getIdElement().getVersionIdPart());
+		assertEquals(true, newPt.getActive());
+	}
+
+
+	@Test
+	public void testPatchInTransaction_InvalidContentType_NonFhir() throws Exception {
+		String methodName = "testPatchUsingJsonPatch_Transaction";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String patchString = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		Binary patch = new Binary();
+		patch.setContentType("application/octet-stream");
+		patch.setContent(patchString.getBytes(Charsets.UTF_8));
+
+		Bundle input = new Bundle();
+		input.setType(Bundle.BundleType.TRANSACTION);
+		input.addEntry()
+			.setFullUrl(pid1.getValue())
+			.setResource(patch)
+			.getRequest().setUrl(pid1.getValue())
+			.setMethod(Bundle.HTTPVerb.PATCH);
+
+		String responseString = myServer.fhirRequest("")
+			.post(myFhirContext.newJsonParser().encodeResourceToString(input), Constants.CT_FHIR_JSON_NEW)
+			.assertStatus(400)
+			.getBody();
+		assertThat(responseString).contains("Invalid Content-Type for PATCH operation: application/octet-stream");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("1", newPt.getIdElement().getVersionIdPart());
+		assertEquals(true, newPt.getActive());
+	}
+
+	@Test
+	public void testPatchInTransaction_InvalidContentType_Fhir() throws Exception {
+		String methodName = "testPatchUsingJsonPatch_Transaction";
+		IIdType pid1;
+		{
+			Patient patient = new Patient();
+			patient.setActive(true);
+			patient.addIdentifier().setSystem("urn:system").setValue("0");
+			patient.addName().setFamily(methodName).addGiven("Joe");
+			pid1 = myPatientDao.create(patient, mySrd).getId().toUnqualifiedVersionless();
+		}
+
+		String patchString = "[ { \"op\":\"replace\", \"path\":\"/active\", \"value\":false } ]";
+		Binary patch = new Binary();
+		patch.setContentType(Constants.CT_FHIR_JSON_NEW);
+		patch.setContent(patchString.getBytes(Charsets.UTF_8));
+
+		Bundle input = new Bundle();
+		input.setType(Bundle.BundleType.TRANSACTION);
+		input.addEntry()
+			.setFullUrl(pid1.getValue())
+			.setResource(patch)
+			.getRequest().setUrl(pid1.getValue())
+			.setMethod(Bundle.HTTPVerb.PATCH);
+
+		String responseString = myServer.fhirRequest("")
+			.post(myFhirContext.newJsonParser().encodeResourceToString(input), Constants.CT_FHIR_JSON_NEW)
+			.assertStatus(400)
+			.getBody();
+		assertThat(responseString).contains("Binary PATCH detected with FHIR content type. FHIR Patch should use Parameters resource.");
+
+		Patient newPt = myClient.read().resource(Patient.class).withId(pid1.getIdPart()).execute();
+		assertEquals("1", newPt.getIdElement().getVersionIdPart());
+		assertEquals(true, newPt.getActive());
+	}
+
+	/**
+	 * Reproduces GitHub issue #7578: JSON Patch "add" at {@code /member/0} on a Group
+	 * with no existing members, exercised via the REST PATCH endpoint.
+	 *
+	 * @author Claude Opus 4.6
+	 */
+	@Test
+	public void testJsonPatch_AddMemberToEmptyGroup_ViaEndpoint() {
+		// Create the referenced Patient first (server validates references)
+		Patient patient = new Patient();
+		patient.setActive(true);
+		IIdType patientId = myClient.create().resource(patient).execute().getId().toUnqualifiedVersionless();
+
+		// Create a Group with no members
+		Group group = new Group();
+		group.setType(Group.GroupType.PERSON);
+		group.setActual(true);
+		group.setActive(true);
+		IIdType groupId = myClient.create().resource(group).execute().getId().toUnqualifiedVersionless();
+
+		// JSON Patch: add a member at /member/0
+		String patchText = "[{\"op\":\"add\",\"path\":\"/member/0\",\"value\":{\"entity\":{\"reference\":\"" + patientId.getValue() + "\"},\"inactive\":false}}]";
+
+		String prefer = Constants.HEADER_PREFER_RETURN + "=" + Constants.HEADER_PREFER_RETURN_REPRESENTATION;
+		String path = "/Group/" + groupId.getIdPart();
+		String responseString = myServer.fhirRequest(path)
+			.withHeader(Constants.HEADER_PREFER, prefer)
+			.withHeader(Constants.HEADER_ACCEPT, Constants.CT_FHIR_JSON)
+			.patch(patchText)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("\"reference\":\"" + patientId.getValue() + "\"");
+
+		// Verify via a read
+		Group updated = myClient.read().resource(Group.class).withId(groupId.getIdPart()).execute();
+		assertThat(updated.getMember()).hasSize(1);
+		assertThat(updated.getMember().get(0).getEntity().getReference()).isEqualTo(patientId.getValue());
+	}
+
+	/**
+	 * Reproduces GitHub issue #7578: JSON Patch "add" at {@code /member/0} on a Group
+	 * with no existing members, exercised via a transaction Bundle.
+	 *
+	 * @author Claude Opus 4.6
+	 */
+	@Test
+	public void testJsonPatch_AddMemberToEmptyGroup_ViaTransactionBundle() {
+		// Create the referenced Patient first (server validates references)
+		Patient patient = new Patient();
+		patient.setActive(true);
+		IIdType patientId = myClient.create().resource(patient).execute().getId().toUnqualifiedVersionless();
+
+		// Create a Group with no members
+		Group group = new Group();
+		group.setType(Group.GroupType.PERSON);
+		group.setActual(true);
+		group.setActive(true);
+		IIdType groupId = myClient.create().resource(group).execute().getId().toUnqualifiedVersionless();
+
+		// JSON Patch body as a Binary resource in a transaction bundle
+		String patchText = "[{\"op\":\"add\",\"path\":\"/member/0\",\"value\":{\"entity\":{\"reference\":\"" + patientId.getValue() + "\"},\"inactive\":false}}]";
+		Binary patchBinary = new Binary();
+		patchBinary.setContentType(Constants.CT_JSON_PATCH);
+		patchBinary.setContent(patchText.getBytes(StandardCharsets.UTF_8));
+
+		Bundle input = new Bundle();
+		input.setType(Bundle.BundleType.TRANSACTION);
+		input.addEntry()
+			.setFullUrl(groupId.getValue())
+			.setResource(patchBinary)
+			.getRequest().setUrl(groupId.getValue())
+			.setMethod(Bundle.HTTPVerb.PATCH);
+
+		String encodedRequest = myFhirContext.newJsonParser().setPrettyPrint(true).encodeResourceToString(input);
+		ourLog.info("Request:\n{}", encodedRequest);
+		String responseString = myServer.fhirRequest("")
+			.post(encodedRequest, Constants.CT_FHIR_JSON_NEW)
+			.assertStatus(200)
+			.getBody();
+		assertThat(responseString).contains("\"resourceType\":\"Bundle\"");
+
+		// Verify via a read
+		Group updated = myClient.read().resource(Group.class).withId(groupId.getIdPart()).execute();
+		assertThat(updated.getMember()).hasSize(1);
+		assertThat(updated.getMember().get(0).getEntity().getReference()).isEqualTo(patientId.getValue());
+	}
+}

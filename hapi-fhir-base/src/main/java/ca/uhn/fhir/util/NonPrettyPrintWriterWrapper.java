@@ -1,17 +1,15 @@
-package ca.uhn.fhir.util;
-
 /*
  * #%L
  * HAPI FHIR - Core Library
  * %%
- * Copyright (C) 2014 - 2017 University Health Network
+ * Copyright (C) 2014 - 2026 Smile CDR, Inc.
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,6 +17,7 @@ package ca.uhn.fhir.util;
  * limitations under the License.
  * #L%
  */
+package ca.uhn.fhir.util;
 
 import javax.xml.namespace.NamespaceContext;
 import javax.xml.stream.XMLStreamException;
@@ -91,7 +90,8 @@ public class NonPrettyPrintWriterWrapper implements XMLStreamWriter {
 	}
 
 	@Override
-	public void writeStartElement(String thePrefix, String theLocalName, String theNamespaceURI) throws XMLStreamException {
+	public void writeStartElement(String thePrefix, String theLocalName, String theNamespaceURI)
+			throws XMLStreamException {
 		if (PRE.equals(theLocalName) || myInsidePre > 0) {
 			myInsidePre++;
 		}
@@ -106,7 +106,8 @@ public class NonPrettyPrintWriterWrapper implements XMLStreamWriter {
 
 	@Override
 	@CoverageIgnore
-	public void writeEmptyElement(String thePrefix, String theLocalName, String theNamespaceURI) throws XMLStreamException {
+	public void writeEmptyElement(String thePrefix, String theLocalName, String theNamespaceURI)
+			throws XMLStreamException {
 		myTarget.writeEmptyElement(thePrefix, theLocalName, theNamespaceURI);
 	}
 
@@ -136,7 +137,8 @@ public class NonPrettyPrintWriterWrapper implements XMLStreamWriter {
 
 	@Override
 	@CoverageIgnore
-	public void writeAttribute(String thePrefix, String theNamespaceURI, String theLocalName, String theValue) throws XMLStreamException {
+	public void writeAttribute(String thePrefix, String theNamespaceURI, String theLocalName, String theValue)
+			throws XMLStreamException {
 		myTarget.writeAttribute(thePrefix, theNamespaceURI, theLocalName, theValue);
 	}
 
@@ -222,7 +224,8 @@ public class NonPrettyPrintWriterWrapper implements XMLStreamWriter {
 		writeCharacters(theText, theStart, theLen, myTarget, myInsidePre);
 	}
 
-	static void writeCharacters(char[] theText, int theStart, int theLen, XMLStreamWriter target, int insidePre) throws XMLStreamException {
+	static void writeCharacters(char[] theText, int theStart, int theLen, XMLStreamWriter target, int insidePre)
+			throws XMLStreamException {
 		if (theLen > 0) {
 			if (insidePre > 0) {
 				target.writeCharacters(theText, theStart, theLen);
@@ -249,7 +252,6 @@ public class NonPrettyPrintWriterWrapper implements XMLStreamWriter {
 				if (end < initialEnd) {
 					target.writeCharacters(" ");
 				}
-
 			}
 		}
 	}
@@ -259,5 +261,4 @@ public class NonPrettyPrintWriterWrapper implements XMLStreamWriter {
 	public Object getProperty(String theName) throws IllegalArgumentException {
 		return myTarget.getProperty(theName);
 	}
-
 }
